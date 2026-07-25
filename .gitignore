@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .venv/
 transferred_pdfs/
+전달용/예시/

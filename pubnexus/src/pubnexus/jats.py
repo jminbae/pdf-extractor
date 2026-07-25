@@ -12,6 +12,7 @@ import re
 
 from lxml import etree
 
+from .textfix import clean_paragraph
 from .utils import norm_text
 
 
@@ -76,6 +77,8 @@ def paragraph_text(p_elem) -> dict:
     text = norm_text("".join(parts))
     # 인용 제거 후 남는 공백/문장부호 정리: " ," "( )" 등
     text = _tidy_punct(text)
+    # 러닝헤더·자간 아티팩트 등 추출 결함 수리(textfix, 결함 발생 지점에서 차단)
+    text = clean_paragraph(text)
     # 순서 보존 dedup
     return {
         "text": text,
@@ -151,7 +154,7 @@ def caption_text(elem) -> str:
         bits.append(norm_text("".join(label.itertext())))
     if cap is not None:
         bits.append(norm_text("".join(cap.itertext())))
-    return " ".join(b for b in bits if b).strip()
+    return clean_paragraph(" ".join(b for b in bits if b))
 
 
 # ── 헬퍼 ────────────────────────────────────────────────────────────
@@ -177,7 +180,11 @@ def _tidy_punct(s: str) -> str:
     """인용 마커 제거 후 남는 구분자 잔재(",," ".,,," "( , )" 등) 정리."""
     import re
     s = _strip_residual_citations(s)              # 파서가 놓친 잔여 인용 제거
-    s = re.sub(r'\s+([,.;:])', r'\1', s)          # " ," → ","
+    # " ," → ","  단, 통계 표기는 보존한다: "P = .001" 의 앞 공백,
+    # "1 : 1.6" 의 비율 콜론을 지우면 수치의 의미가 바뀐다(textfix._tidy_spaces 와 동일 규칙).
+    s = re.sub(r'\s+([,;])', r'\1', s)
+    s = re.sub(r'\s+\.(?!\d)', '.', s)
+    s = re.sub(r'(?<!\d)\s+:', ':', s)
     # 연속 인용을 지운 자리의 쉼표/세미콜론 런 축약
     s = re.sub(r'([.;:])[\s,;]*[,;][\s,;]*', r'\1 ', s)  # ".,,," → ". "
     s = re.sub(r',[\s,]*,', ",", s)                # ",," / ", ," → ","

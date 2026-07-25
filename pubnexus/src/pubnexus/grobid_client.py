@@ -17,6 +17,7 @@ from lxml import etree
 from . import utils
 from .schema import (Document, Meta, Section, Paragraph, Figure, Table,
                      Reference, classify_section)
+from .textfix import clean_heading, clean_paragraph
 from .utils import norm_text, log
 
 XMLID = "{http://www.w3.org/XML/1998/namespace}id"
@@ -97,7 +98,8 @@ def _tei_paragraph(p_elem) -> dict:
 
     walk(p_elem)
     from .jats import _tidy_punct, _dedup
-    text = _tidy_punct(norm_text("".join(parts)))
+    # 러닝헤더·자간 아티팩트 등 추출 결함 수리(textfix, 결함 발생 지점에서 차단)
+    text = clean_paragraph(_tidy_punct(norm_text("".join(parts))))
     return {"text": text, "cited_keys": _dedup(cited),
             "fig_ids": _dedup(figs), "table_ids": _dedup(tables)}
 
@@ -171,6 +173,7 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
             head_el = div.find("{*}head")
             title = norm_text("".join(head_el.itertext())) if head_el is not None else ""
             title = re.sub(r'^[\s|.)]+', '', title).strip()  # Wiley "3.2 |" 등 잔재 정리
+            title = clean_heading(title)   # 자간 아티팩트 복원(textfix)
             sec = Section(path=[title] if title else ["Body"],
                           section_type=classify_section(title))
             for p in div.findall("{*}p"):
@@ -195,12 +198,13 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
                     cap_el = fig.find("{*}head")
                 caption = norm_text("".join(cap_el.itertext())) if cap_el is not None else ""
                 tables.append(Table(id=fid or f"tab{len(tables)+1}",
-                                    caption=caption, markdown=_tei_table_markdown(fig)))
+                                    caption=clean_paragraph(caption),
+                                    markdown=_tei_table_markdown(fig)))
             else:
                 head_el = fig.find("{*}head")
                 desc_el = fig.find("{*}figDesc")
-                cap = " ".join(norm_text("".join(e.itertext()))
-                               for e in (head_el, desc_el) if e is not None).strip()
+                cap = clean_paragraph(" ".join(norm_text("".join(e.itertext()))
+                                               for e in (head_el, desc_el) if e is not None))
                 figures.append(Figure(id=fid or f"fig{len(figures)+1}", caption=cap))
 
     m = Meta(

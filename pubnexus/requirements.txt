@@ -7,7 +7,10 @@ PyYAML>=6.0          # 설정
 rapidfuzz>=3.0       # 제목 퍼지 매칭 / 중복 판정
 tqdm>=4.66           # 진행 표시
 
-# 5단계 이후(임베딩·검색)에서 추가 — 사용자 사양에 따라 선택 설치
-# sentence-transformers>=3.0
-# lancedb>=0.13
-# rank-bm25>=0.2
+numpy>=1.26          # 청킹/검색 벡터 연산 (flat 인덱스 폴백에도 필요)
+
+# 5단계 이후(임베딩·검색) — 사용자 사양에 따라 선택 설치
+# BM25 는 자체 구현(순수 파이썬)이라 별도 패키지 불필요.
+# sentence-transformers>=3.0   # Qwen3-Embedding / Qwen3-Reranker 로딩
+# torch>=2.3                   # (CUDA 빌드는 각자 사양에 맞춰 설치)
+# lancedb>=0.13                # 벡터 DB (없으면 vectordb.backend: flat 로 동작)

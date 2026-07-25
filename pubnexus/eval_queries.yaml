@@ -1,0 +1,135 @@
+# PubNexus 검색 품질 골든 세트
+#
+# 목적: 임베딩 모델(0.6B → 4B)이나 청킹 파라미터를 바꿨을 때 검색 품질이
+#       좋아졌는지 나빠졌는지를 **숫자로** 판단하기 위한 최소 기준선.
+#
+# 만든 방법: 파일럿 167편의 제목·초록·MeSH 를 키워드로 매칭해 각 질의의 정답
+#       후보(anchor)를 코퍼스에서 직접 뽑았다. 사람이 임의로 지어낸 정답이 아니다.
+#       다만 "이 논문들이 반드시 1위여야 한다"는 뜻은 아니고, top-k 안에 최소
+#       하나는 들어와야 정상이라는 **재현율 하한** 점검용이다.
+#
+# 한계: 167편 소규모 코퍼스 기준. 3만 편으로 확장하면 정답 후보를 다시 뽑아야 한다.
+#       질의당 anchor 가 1편뿐인 항목(hair_dye, jak)은 특히 엄격한 시험이다.
+#
+# 사용: python evaluate.py            (전체)
+#       python evaluate.py -k 10      (top-k 조정)
+
+version: 1
+corpus: "pilot-167"
+default_k: 8
+
+queries:
+  - id: nbuvb_repigmentation
+    ko: "백반증에서 NB-UVB 광선치료의 재색소침착률은 어느 정도인가"
+    en: "NB-UVB narrowband phototherapy repigmentation rate in vitiligo"
+    must_hit_any: ["10.1111/jdv.17073", "10.1016/j.jaad.2015.11.044", "10.1016/j.jaad.2015.04.008"]
+    note: "약어(NB-UVB) 정확 매칭 — BM25 기여도를 보는 항목"
+
+  - id: excimer_308
+    ko: "308nm 엑시머 레이저와 국소제제 병용 요법의 효과"
+    en: "308-nm excimer laser combined with topical agents efficacy"
+    must_hit_any: ["10.1016/j.jaad.2015.04.008", "10.1016/j.jaad.2015.11.044", "10.1002/lsm.23048"]
+
+  - id: micropunch_grafting
+    ko: "난치성 백반증에 대한 마이크로펀치 이식술 결과"
+    en: "micropunch grafting for refractory vitiligo outcomes"
+    must_hit_any: ["10.1016/j.jaad.2018.06.016", "10.1111/1346-8138.15390", "10.1016/j.jaad.2020.03.003"]
+
+  - id: vasi_threshold
+    ko: "VASI 점수의 임상적으로 의미 있는 변화 기준은 무엇인가"
+    en: "VASI meaningful change threshold psychometric properties"
+    must_hit_any: ["10.1001/jamadermatol.2024.4534", "10.1111/pcmr.12730"]
+    note: "VASI 는 측정도구명 — dense 단독으로는 놓치기 쉬운 전형적 사례"
+
+  - id: vitiligo_severity_consensus
+    ko: "백반증 중증도와 재발의 국제 합의 정의"
+    en: "international consensus definition of vitiligo severity and relapse"
+    must_hit_any: ["10.1001/jamadermatol.2026.0294", "10.1111/jdv.19450"]
+
+  - id: vitiligo_comorbidity
+    ko: "백반증 환자의 동반질환, 특히 갑상선 질환 위험"
+    en: "comorbidities in vitiligo patients thyroid autoimmune risk"
+    must_hit_any: ["10.1016/j.jid.2022.10.021", "10.1111/1346-8138.14648"]
+
+  - id: vitiligo_qol
+    ko: "백반증 환자의 삶의 질에 영향을 주는 요인"
+    en: "factors affecting quality of life in patients with vitiligo"
+    must_hit_any: ["10.1111/bjd.15560"]
+
+  - id: vitiligo_burden
+    ko: "전 세계 백반증 유병률 추정"
+    en: "global burden and prevalence of vitiligo modelling study"
+    must_hit_any: ["10.1016/s2468-2667(24)00026-4"]
+
+  - id: hair_dye_pcd
+    ko: "헤나 염모제와 색소성 접촉피부염의 연관성"
+    en: "henna hair dye and pigmented contact dermatitis risk"
+    must_hit_any: ["10.1111/jdv.19395"]
+    note: "정답이 1편뿐 — 놓치면 검색이 확실히 잘못된 것"
+
+  - id: acral_melanoma_dermoscopy
+    ko: "말단 흑색종의 더모스코피 소견과 Breslow 두께의 관계"
+    en: "dermoscopic findings and Breslow thickness in acral melanoma"
+    must_hit_any: ["10.1016/j.jaad.2018.06.004", "10.5021/ad.2014.26.4.485"]
+
+  - id: skin_cancer_incidence_korea
+    ko: "한국의 피부암 발생률과 유병률 추이"
+    en: "incidence and prevalence of skin cancers in South Korea"
+    must_hit_any: ["10.5021/ad.2022.34.2.105", "10.3346/jkms.2010.25.6.924"]
+
+  - id: ad_treatment_guideline
+    ko: "한국 아토피피부염 치료 컨센서스 가이드라인"
+    en: "consensus guidelines for treatment of atopic dermatitis in Korea"
+    must_hit_any: ["10.5021/ad.2015.27.5.578"]
+
+  # ── 어휘 겹침이 거의 없는 한국어 의역 질의 ──────────────────────────
+  # 위 12개는 영문 전문용어가 그대로 겹쳐 BM25만으로도 거의 다 맞는다(변별력 부족).
+  # 아래 5개는 논문 본문에 없는 한국어 일상 표현으로 물어 **dense 임베딩의 의미 검색
+  # 능력만** 시험한다. BM25는 대부분 실패하는 것이 정상이고, 여기서 벌어지는 차이가
+  # 곧 임베딩 모델을 0.6B에서 4B로 올릴지 판단하는 근거가 된다.
+  - id: para_phototherapy
+    force_lang: ko
+    lexical_overlap: low
+    ko: "자외선 치료를 몇 달 받으면 흰 반점이 어느 정도나 원래 색으로 돌아오나요"
+    en: "how much does skin colour return after months of ultraviolet treatment"
+    must_hit_any: ["10.1111/jdv.17073", "10.1016/j.jaad.2015.11.044",
+                   "10.1016/j.jaad.2015.04.008", "10.1002/lsm.23048"]
+
+  - id: para_hair_dye
+    force_lang: ko
+    lexical_overlap: low
+    ko: "머리 염색을 자주 했더니 얼굴과 목에 거뭇한 색소가 올라왔다는 연구"
+    en: "study of brownish facial and neck pigmentation after frequent hair colouring"
+    must_hit_any: ["10.1111/jdv.19395"]
+
+  - id: para_thyroid
+    force_lang: ko
+    lexical_overlap: low
+    ko: "흰 반점이 생기는 병이 있으면 목에 있는 호르몬 기관 이상도 같이 오나요"
+    en: "does the white patch disease come with hormone gland problems in the neck"
+    must_hit_any: ["10.1016/j.jid.2022.10.021", "10.1111/1346-8138.14648",
+                   "10.1371/journal.pone.0179088"]
+
+  - id: para_skin_cancer_trend
+    force_lang: ko
+    lexical_overlap: low
+    ko: "우리나라에서 피부에 생기는 악성 종양이 해마다 얼마나 늘고 있나"
+    en: "how fast are malignant skin tumours increasing each year in our country"
+    must_hit_any: ["10.5021/ad.2022.34.2.105", "10.3346/jkms.2010.25.6.924"]
+
+  - id: para_psychosocial
+    force_lang: ko
+    lexical_overlap: low
+    ko: "겉으로 드러나는 피부 문제 때문에 환자가 느끼는 마음의 부담과 일상 지장"
+    en: "emotional burden and daily life impact felt by patients with visible skin problems"
+    must_hit_any: ["10.1111/bjd.15560", "10.1016/j.jid.2018.09.024",
+                   "10.2500/aap.2024.45.230094"]
+
+  # 섹션 필터가 실제로 동작하는지 보는 항목 (section_type 분류 개선의 회귀 시험)
+  - id: statistical_method_filter
+    ko: "생존분석과 콕스 비례위험모형을 사용한 통계 분석 방법"
+    en: "Cox proportional hazards survival analysis statistical methods"
+    filters:
+      section_type: ["methods"]
+    must_hit_any: []
+    note: "정답 DOI 없이, 반환된 청크가 전부 section_type=methods 인지만 검사한다"

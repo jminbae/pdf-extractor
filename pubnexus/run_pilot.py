@@ -57,6 +57,7 @@ def main():
     log("=" * 64)
     log(f"완료: 고유논문 {n_primary}편 중 정규화 {len(norm)}편, QC PASS {n_pass}편")
     log(f"산출물: {work}")
+    log("다음: python run_rag.py   (5~6단계 청킹·임베딩·인덱스)")
     log("=" * 64)
 
 

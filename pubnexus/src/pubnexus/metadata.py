@@ -8,9 +8,39 @@
   iCite(NIH) : RCR, 인용수, 임상 인용 여부
   Crossref   : reference 개수(QC 대조용), 라이선스
   OpenAlex   : concepts(주제 태깅/시각화)
+
+대규모(3만 편) 대비 — 이 단계가 rate-limit 때문에 가장 오래 걸리고 가장 자주 끊긴다:
+  · 원장 = meta/{slug}.json (논문 1편 끝날 때마다 즉시 기록) → 재개 단위가 1편
+  · **원자적 쓰기**(임시파일 → os.replace): 쓰다 죽어도 반쪽 JSON 이 남지 않는다.
+    (후속 단계들이 meta/*.json 을 glob 해서 read_json 하므로 반쪽 파일 1개가
+     파이프라인 전체를 죽인다 — 그 사고 경로를 막는다)
+  · 손상된 캐시는 '완료'로 보지 않고 재수집하며, 논문 1편의 예외가 전체를 멈추지 않는다
+  · 실패는 failures.jsonl 로 표면화하고 마지막에 요약 로그
+
+호스트 앱(ResearchMap) 연동용 선택 인자 — 기존 호출부는 그대로 동작한다:
+  collect_all(cfg, on_progress=cb, should_cancel=fn)
+
+  on_progress(payload: dict)  — 논문마다 호출. payload 키(안정 계약):
+      stage    "metadata"
+      phase    "start" | "item" | "cached" | "failed" | "done" | "cancelled"
+      done/total/ok/failed/cached : int
+      current  현재 DOI
+      message  사람이 읽는 한 줄
+    콜백 예외는 무시한다(파이프라인을 멈추지 않는다).
+
+  should_cancel() -> bool  — True 면 이미 수집한 편은 그대로 두고 즉시 멈춘다.
+    meta/*.json 이 편별로 확정 저장돼 있으므로 다시 실행하면 남은 편만 수집한다.
+
+설정(모두 선택, 기본값으로 기존 동작 유지):
+  metadata.checkpoint_every : 진행 요약 로그 주기(편). 기본 25.
+      (수집 결과 자체는 편마다 즉시 저장되므로 이 값과 무관하게 재개는 항상 안전하다)
+  metadata.retry_failed     : True 면 '모든 소스 실패' 캐시도 다시 시도. 기본 True
 """
 from __future__ import annotations
 
+import json
+import os
+import time
 from pathlib import Path
 
 from lxml import etree

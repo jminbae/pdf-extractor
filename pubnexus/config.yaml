@@ -38,21 +38,44 @@ grobid:
   segment_sentences: 0
   timeout_sec: 300
 
+textfix:
+  # 정본 JSON 의 추출 결함 수리(자간 아티팩트·러닝헤더·캡션 누수·중복 문단·빈 표)
+  # 와 섹션 타입 재분류. 원본은 data/normalized_raw/ 로 백업되므로 되돌릴 수 있다.
+  enabled: true
+  carry_forward: true             # 평면 경로에서 직전 섹션 타입을 이어받아 하위 절을 구제
+                                  #   (GROBID TEI 가 계층을 잃는 문제의 실질적 보정)
+  backup_dir: "normalized_raw"          # work_dir 기준 상대 (= pubnexus/data/normalized_raw)
+  report: "textfix_report.jsonl"
+
 chunk:
   target_tokens: 550
   max_tokens: 700
+  min_tokens: 80                  # 이보다 짧은 청크는 같은 섹션의 이웃과 병합
   respect_section_boundary: true  # Methods/Results 경계 절대 침범 금지
   context_header: true            # "[제목] > Results > ..." 접두 부착
   exclude_references: true        # 참고문헌 목록은 청킹 제외 (API 메타로 보유)
+  exclude_back_matter: true       # 감사의 글·이해충돌·연구비(section_type=back)도 제외.
+                                  #   false 로 두면 back 청크가 생겨 ask.py --section back 이 의미를 갖는다.
+  include_abstract: true          # 초록은 단독 청크(검색 진입점으로 가치 큼)
+  include_tables: true            # 표는 캡션+본문 통째로 별도 청크(쪼개지 않음)
+  include_figures: true           # figure 캡션 별도 청크
+  output: "pubnexus/data/chunks.jsonl"
 
 embedding:
   # 사양별 프리셋에서 선택. 아래는 6GB VRAM 기본값.
+  backend: "auto"                 # auto | sentence_transformers | onnx | hash
+                                  #   auto: ST 사용 가능하면 ST, 아니면 명확한 오류
+                                  #   hash: 의존성 0의 결정적 스텁(구조 테스트/오프라인 전용)
   model: "Qwen/Qwen3-Embedding-0.6B"
-  device: "cuda"                  # cuda | cpu
+  device: "auto"                  # auto | cuda | cpu
   dim: 1024                       # Matryoshka 절단 가능(512로 저장공간 1/4)
   batch_size: 16
+  normalize: true                 # L2 정규화(코사인=내적)
+  # Qwen3-Embedding 은 질의에만 instruction 접두를 붙인다(문서는 원문 그대로).
+  query_instruction: "Given a medical research question, retrieve passages from papers that answer it"
 
 reranker:
+  enabled: true
   model: "Qwen/Qwen3-Reranker-0.6B"
   top_k_in: 50
   top_k_out: 8
@@ -60,7 +83,12 @@ reranker:
 search:
   hybrid: true                    # BM25 + dense (RRF 병합) — 의학 약어에 필수
   rrf_k: 60
+  dense_top_k: 50
+  bm25_top_k: 50
 
 vectordb:
-  backend: "lancedb"
+  backend: "lancedb"              # lancedb | flat (flat = numpy 브루트포스, 의존성 최소)
   path: "pubnexus/data/lancedb"
+  table: "chunks"
+  flat_path: "pubnexus/data/vectors.npz"
+  bm25_path: "pubnexus/data/bm25_index.json.gz"

@@ -22,6 +22,7 @@ import fitz
 from . import utils
 from .jats import _dedup, _tidy_punct
 from .schema import Document, Meta, Section, Paragraph, classify_section
+from .textfix import clean_heading, clean_paragraph
 from .utils import norm_text, log
 
 CITE_RE = re.compile(r'^[0-9]{1,3}(?:[,\-–][0-9]{1,3})*$')
@@ -118,7 +119,8 @@ def _is_heading(ln: dict, body: float) -> bool:
         return False
     words = len(t.split())
     emphasized = ln["size"] >= body * 1.05 or ln["bold"] or ln.get("italic")
-    core = re.sub(r'^\d+[\s.|)]*', '', t).strip().lower().rstrip(":")
+    # 자간 아티팩트('I N TRODUC TION')도 섹션 키워드로 인식되도록 복원 후 판정
+    core = re.sub(r'^\d+[\s.|)]*', '', clean_heading(t)).strip().lower().rstrip(":")
     first_word = core.split(" ")[0] if core else ""
     # 번호 매김 섹션 ("1 | INTRODUCTION", "3.2.2 Neoplasms")
     if NUM_HEAD.match(t) and (emphasized or t.isupper()):
@@ -170,7 +172,8 @@ def _join_lines(lines: list[dict]) -> str:
             out += " " + t
         else:
             out = t
-    return _tidy_punct(norm_text(out))
+    # 러닝헤더·자간 아티팩트 등 추출 결함 수리(textfix, 결함 발생 지점에서 차단)
+    return clean_paragraph(_tidy_punct(norm_text(out)))
 
 
 def _body_start(lines: list[dict], body: float) -> int:
@@ -212,7 +215,7 @@ def _reconstruct(lines: list[dict], body: float) -> list[Section]:
             flush()
             if cur.paragraphs:
                 sections.append(cur)
-            title = ln["text"].strip()
+            title = clean_heading(ln["text"])   # 자간 아티팩트 복원(textfix)
             cur = Section(path=[title], section_type=classify_section(
                 re.sub(r'^\d+[\s.|)]*', '', title)))
             prev = None
