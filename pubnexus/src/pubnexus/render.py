@@ -92,10 +92,8 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
     if m.get("pub_types"):
         out.append("")
         out.append("`" + "` `".join(m["pub_types"]) + "`")
-    q = doc.get("quality_score")
-    if q is not None:
-        out.append("")
-        out.append(f"> QC 품질점수 **{q}** · source `{doc.get('source')}`")
+    # QC 점수·source 는 우리 내부 지표지 논문 내용이 아니다 → 본문 뷰에 넣지 않는다.
+    # (앱은 정보줄에 따로 표시한다.)
 
     if doc.get("abstract"):
         out += ["", "## Abstract", "", doc["abstract"]]

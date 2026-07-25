@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import queue
 import sys
 import threading
@@ -47,6 +48,100 @@ def _setup_console() -> None:
 
 
 _setup_console()
+
+
+# ── Markdown → tkinter Text 렌더링 ──────────────────────────────────
+# 최종 목적지(ResearchMap)는 pywebview+HTML 이지만, 검수 화면에서 마크다운 기호를
+# 날것으로 보여주면 추출 품질을 눈으로 판단할 수 없다. 태그로 서식을 입힌다.
+_MD_H = re.compile(r"^(#{1,4})\s+(.*)$")
+_MD_TABLE = re.compile(r"^\s*\|.*\|\s*$")
+_MD_SUB = re.compile(r"^<sub>(.*)</sub>$")
+_MD_INLINE = re.compile(r"(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[\d{1,3}\])")
+
+
+def setup_md_tags(t: tk.Text) -> None:
+    base = ("Malgun Gothic", 11)
+    t.configure(background="#ffffff", foreground="#1a1a1a", font=base,
+                spacing1=3, spacing2=2, spacing3=8, padx=28, pady=20,
+                borderwidth=0, highlightthickness=0, cursor="arrow",
+                selectbackground="#cfe3f7", selectforeground="#000000")
+    t.tag_configure("h1", font=("Malgun Gothic", 17, "bold"), foreground="#12355b",
+                    spacing1=16, spacing3=10)
+    t.tag_configure("h2", font=("Malgun Gothic", 14, "bold"), foreground="#1d4e79",
+                    spacing1=18, spacing3=6)
+    t.tag_configure("h3", font=("Malgun Gothic", 12, "bold"), foreground="#2e6da4",
+                    spacing1=14, spacing3=4)
+    t.tag_configure("h4", font=("Malgun Gothic", 11, "bold"), foreground="#4a7fb5",
+                    spacing1=12, spacing3=3)
+    t.tag_configure("meta", font=("Malgun Gothic", 9), foreground="#7a7a7a")
+    t.tag_configure("quote", font=("Malgun Gothic", 10), foreground="#5a5a5a",
+                    lmargin1=18, lmargin2=18, background="#f6f8fa")
+    t.tag_configure("bold", font=("Malgun Gothic", 11, "bold"))
+    t.tag_configure("italic", font=("Malgun Gothic", 11, "italic"))
+    t.tag_configure("code", font=("Consolas", 10), background="#f1f3f5",
+                    foreground="#a03030")
+    t.tag_configure("cite", font=("Malgun Gothic", 10), foreground="#1a73c8")
+    t.tag_configure("table", font=("Consolas", 9), background="#f8f9fa",
+                    lmargin1=14, lmargin2=14, spacing1=0, spacing3=0)
+    t.tag_configure("bullet", lmargin1=18, lmargin2=32)
+    t.tag_configure("warn", font=("Malgun Gothic", 11, "bold"), foreground="#b33")
+
+
+def _insert_inline(t: tk.Text, line: str, base_tag: str | None = None) -> None:
+    """굵게/기울임/코드/인용번호만 태그로 입히고 나머지는 평문."""
+    pos = 0
+    for m in _MD_INLINE.finditer(line):
+        if m.start() > pos:
+            t.insert("end", line[pos:m.start()], base_tag or "")
+        s = m.group(0)
+        if s.startswith("**"):
+            t.insert("end", s[2:-2], ("bold",) + ((base_tag,) if base_tag else ()))
+        elif s.startswith("`"):
+            t.insert("end", s[1:-1], ("code",) + ((base_tag,) if base_tag else ()))
+        elif s.startswith("["):
+            t.insert("end", s, ("cite",) + ((base_tag,) if base_tag else ()))
+        else:
+            t.insert("end", s[1:-1], ("italic",) + ((base_tag,) if base_tag else ()))
+        pos = m.end()
+    t.insert("end", line[pos:] + "\n", base_tag or "")
+
+
+def render_markdown(t: tk.Text, md: str) -> None:
+    t.configure(state="normal")
+    t.delete("1.0", "end")
+    in_table = False
+    for line in md.splitlines():
+        if _MD_TABLE.match(line):
+            # 구분행(| --- | --- |)은 표시하지 않는다
+            if not re.fullmatch(r"\s*\|[\s:|-]+\|\s*", line):
+                t.insert("end", line.strip() + "\n", "table")
+            in_table = True
+            continue
+        if in_table:
+            t.insert("end", "\n")
+            in_table = False
+        h = _MD_H.match(line)
+        if h:
+            t.insert("end", h.group(2) + "\n", f"h{len(h.group(1))}")
+            continue
+        sub = _MD_SUB.match(line.strip())
+        if sub:
+            t.insert("end", sub.group(1) + "\n", "meta")
+            continue
+        if line.startswith(">"):
+            _insert_inline(t, line.lstrip("> ").strip(), "quote")
+            continue
+        if line.startswith("- "):
+            _insert_inline(t, "• " + line[2:], "bullet")
+            continue
+        if line.startswith("*") and line.endswith("*") and len(line) > 2 and "**" not in line:
+            t.insert("end", line[1:-1] + "\n", "meta")
+            continue
+        if line.startswith("⚠"):
+            t.insert("end", line + "\n", "warn")
+            continue
+        _insert_inline(t, line)
+    t.configure(state="disabled")
 
 
 def scan_jsons(folder: Path) -> dict[str, Path]:
@@ -202,63 +297,99 @@ class App(tk.Tk):
             self.load_folder(start)
 
     # ── 화면 ────────────────────────────────────────────────────────
+    def _style(self) -> None:
+        s = ttk.Style(self)
+        try:
+            s.theme_use("vista")
+        except tk.TclError:
+            pass
+        self.configure(background="#eef1f5")
+        s.configure(".", background="#eef1f5", font=("Malgun Gothic", 9))
+        s.configure("TFrame", background="#eef1f5")
+        s.configure("Card.TFrame", background="#ffffff", relief="flat",
+                    borderwidth=1)
+        s.configure("Pane.TLabel", font=("Malgun Gothic", 10, "bold"),
+                    foreground="#2a4a6b", background="#eef1f5")
+        s.configure("Meta.TLabel", font=("Malgun Gothic", 8),
+                    foreground="#6b7684", background="#eef1f5")
+        s.configure("Dir.TLabel", font=("Malgun Gothic", 9),
+                    foreground="#44546a", background="#eef1f5")
+        s.configure("TButton", font=("Malgun Gothic", 9), padding=(10, 5))
+        s.configure("Go.TButton", font=("Malgun Gothic", 9, "bold"), padding=(12, 5))
+
     def _build(self) -> None:
+        self._style()
         top = ttk.Frame(self)
-        top.pack(fill="x", padx=8, pady=(8, 4))
-        ttk.Button(top, text="폴더 열기…", command=self.pick).pack(side="left")
+        top.pack(fill="x", padx=14, pady=(12, 6))
+        ttk.Button(top, text="폴더 열기", command=self.pick).pack(side="left")
         self.var_dir = tk.StringVar(value="(폴더를 고르세요)")
-        ttk.Label(top, textvariable=self.var_dir).pack(side="left", padx=10)
-        self.btn_all = ttk.Button(top, text="전부 추출하기", command=self.extract_all)
+        ttk.Label(top, textvariable=self.var_dir, style="Dir.TLabel").pack(
+            side="left", padx=12)
+        self.btn_all = ttk.Button(top, text="전부 추출", command=self.extract_all,
+                                  style="Go.TButton")
         self.btn_all.pack(side="right")
-        self.btn_one = ttk.Button(top, text="이 논문만 추출", command=self.extract_one)
+        self.btn_one = ttk.Button(top, text="이 논문만", command=self.extract_one)
         self.btn_one.pack(side="right", padx=6)
         self.btn_stop = ttk.Button(top, text="중지", command=self.stop, state="disabled")
         self.btn_stop.pack(side="right")
 
         bar = ttk.Frame(self)
-        bar.pack(fill="x", padx=8)
+        bar.pack(fill="x", padx=14, pady=(0, 6))
         self.var_status = tk.StringVar(value="")
-        ttk.Label(bar, textvariable=self.var_status).pack(side="left")
-        self.prog = ttk.Progressbar(bar, mode="determinate")
-        self.prog.pack(side="right", fill="x", expand=True, padx=(12, 0))
+        ttk.Label(bar, textvariable=self.var_status, style="Meta.TLabel").pack(side="left")
+        self.prog = ttk.Progressbar(bar, mode="determinate", length=200)
+        self.prog.pack(side="right", padx=(12, 0))
 
         pan = ttk.PanedWindow(self, orient="horizontal")
-        pan.pack(fill="both", expand=True, padx=8, pady=8)
+        pan.pack(fill="both", expand=True, padx=14, pady=(0, 14))
 
         # 1) 파일 목록 — 좁게. 원본·추출물 대조가 주인공이므로 폭을 아낀다.
-        left = ttk.Frame(pan, width=250)
+        left = ttk.Frame(pan, width=260)
         left.pack_propagate(False)
+        ttk.Label(left, text="논문", style="Pane.TLabel").pack(anchor="w", pady=(0, 4))
         self.var_q = tk.StringVar()
-        e = ttk.Entry(left, textvariable=self.var_q)
-        e.pack(fill="x")
+        e = ttk.Entry(left, textvariable=self.var_q, font=("Malgun Gothic", 9))
+        e.pack(fill="x", pady=(0, 6))
         self.var_q.trace_add("write", lambda *_: self.refresh_list())
-        self.lb = tk.Listbox(left, activestyle="none", exportselection=False,
-                             font=("Malgun Gothic", 8))
-        sb = ttk.Scrollbar(left, command=self.lb.yview)
+        lbox = ttk.Frame(left, style="Card.TFrame")
+        lbox.pack(fill="both", expand=True)
+        self.lb = tk.Listbox(lbox, activestyle="none", exportselection=False,
+                             font=("Malgun Gothic", 8), borderwidth=0,
+                             highlightthickness=0, background="#ffffff",
+                             selectbackground="#2a6db5", selectforeground="#ffffff")
+        sb = ttk.Scrollbar(lbox, command=self.lb.yview)
         self.lb.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
-        self.lb.pack(fill="both", expand=True)
+        self.lb.pack(fill="both", expand=True, padx=2, pady=2)
         self.lb.bind("<<ListboxSelect>>", self.on_select)
         pan.add(left, weight=0)
 
         # 2) PDF 원본
-        mid = ttk.LabelFrame(pan, text=" PDF 원본 ")
-        self.pdf = PdfPane(mid)
-        self.pdf.pack(fill="both", expand=True, padx=4, pady=4)
-        pan.add(mid, weight=2)
+        mid = ttk.Frame(pan)
+        ttk.Label(mid, text="PDF 원본", style="Pane.TLabel").pack(anchor="w", pady=(0, 4))
+        pbox = ttk.Frame(mid, style="Card.TFrame")
+        pbox.pack(fill="both", expand=True)
+        self.pdf = PdfPane(pbox)
+        self.pdf.pack(fill="both", expand=True, padx=2, pady=2)
+        pan.add(mid, weight=3)
 
-        # 3) 추출 결과
-        right = ttk.LabelFrame(pan, text=" 추출 결과 ")
+        # 3) 추출 결과 — 마크다운을 서식대로 그린다
+        right = ttk.Frame(pan)
+        head = ttk.Frame(right)
+        head.pack(fill="x", pady=(0, 4))
+        ttk.Label(head, text="추출 결과", style="Pane.TLabel").pack(side="left")
         self.var_meta = tk.StringVar(value="")
-        ttk.Label(right, textvariable=self.var_meta, wraplength=520,
-                  justify="left").pack(anchor="w", padx=6, pady=(4, 0))
-        self.txt = tk.Text(right, wrap="word", font=("Malgun Gothic", 10),
-                           padx=10, pady=8, spacing1=2, spacing3=4)
-        ts = ttk.Scrollbar(right, command=self.txt.yview)
-        self.txt.configure(yscrollcommand=ts.set)
+        ttk.Label(right, textvariable=self.var_meta, wraplength=640,
+                  justify="left", style="Meta.TLabel").pack(anchor="w", pady=(0, 6))
+        box = ttk.Frame(right, style="Card.TFrame")
+        box.pack(fill="both", expand=True)
+        self.txt = tk.Text(box, wrap="word")
+        setup_md_tags(self.txt)
+        ts = ttk.Scrollbar(box, command=self.txt.yview)
+        self.txt.configure(yscrollcommand=ts.set, state="disabled")
         ts.pack(side="right", fill="y")
-        self.txt.pack(fill="both", expand=True, padx=(6, 0), pady=4)
-        pan.add(right, weight=2)
+        self.txt.pack(fill="both", expand=True)
+        pan.add(right, weight=3)
 
     # ── 폴더·목록 ───────────────────────────────────────────────────
     def pick(self) -> None:
@@ -302,14 +433,14 @@ class App(tk.Tk):
 
     def show_extract(self, pdf: Path) -> None:
         from pubnexus import render
-        self.txt.delete("1.0", "end")
         jp = self.json_of(pdf)
         if jp is None:
-            self.var_meta.set("아직 추출되지 않았습니다.")
-            self.txt.insert("1.0",
-                            "오른쪽 위 '이 논문만 추출' 을 누르면 이 논문만 처리합니다.\n"
-                            "'전부 추출하기' 는 폴더 전체를 처리합니다.\n\n"
-                            "추출 결과는 PDF 옆에 같은 이름의 .json 으로 저장됩니다.")
+            self.var_meta.set("아직 추출되지 않았습니다")
+            render_markdown(self.txt,
+                            "## 아직 추출하지 않은 논문입니다\n\n"
+                            "위쪽 **이 논문만** 을 누르면 이 논문 하나를 처리합니다.\n"
+                            "**전부 추출** 은 폴더 전체를 처리합니다.\n\n"
+                            "추출 결과는 PDF 와 같은 폴더에 DOI 이름의 .json 으로 저장됩니다.")
             return
         try:
             doc = utils.read_json(jp)
@@ -329,16 +460,14 @@ class App(tk.Tk):
 
         # 본문이 사실상 비었는데 조용히 넘어가면 안 된다 — 왜 실패했는지 화면에 알린다.
         if body < 500:
-            self.txt.insert("1.0",
-                            "⚠ 본문을 제대로 뽑지 못했습니다.\n\n"
-                            f"   추출된 본문 {body}자 · 문단 {n_par}개\n\n"
-                            "   흔한 원인:\n"
-                            "   · 스캔본 PDF (텍스트층 없음) — 이 도구의 범위 밖입니다\n"
-                            "   · 영어가 아닌 논문 — 현재 영어 논문만 지원합니다\n"
-                            "   · GROBID 미가동 — 켜면 품질이 크게 올라갑니다\n"
-                            f"     (현재 source: {doc.get('source')})\n"
-                            "\n" + "─" * 50 + "\n\n")
-        self.txt.insert("end", md)
+            md = ("⚠ 본문을 제대로 뽑지 못했습니다\n\n"
+                  f"추출된 본문 {body}자 · 문단 {n_par}개\n\n"
+                  "**흔한 원인**\n"
+                  "- 스캔본 PDF (텍스트층 없음) — 이 도구의 범위 밖입니다\n"
+                  "- 영어가 아닌 논문 — 현재 영어 논문만 지원합니다\n"
+                  f"- GROBID 미가동 — 켜면 품질이 크게 올라갑니다 (현재 `{doc.get('source')}`)\n\n"
+                  "---\n\n") + md
+        render_markdown(self.txt, md)
 
     # ── 추출 ────────────────────────────────────────────────────────
     def extract_one(self) -> None:
