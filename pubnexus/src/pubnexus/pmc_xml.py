@@ -5,6 +5,7 @@ inEPMC=Y 논문은 출판사 정본 XML이 있으므로 파싱 오류가 원리�
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from lxml import etree
@@ -13,6 +14,20 @@ from . import utils, jats
 from .schema import (Document, Meta, Section, Paragraph, Figure, Table,
                      Reference, classify_section)
 from .utils import HttpClient, norm_text, log
+
+
+@dataclass
+class ImageTable(Table):
+    """<table> 없이 <graphic> 이미지 한 장으로만 실린 표.
+
+    일부 저널의 PMC 변환본은 표를 스캔 이미지로 넣는다. 이때 markdown 이 비는 것은
+    '추출 실패'가 아니라 '이미지 표'다 — 구분되지 않으면 회수 가능한 결함과
+    회수 불가능한 원본 한계를 같은 통계에 섞게 된다. Table 의 하위형이라 기존
+    소비자는 그대로 동작하고, asdict() 는 추가 필드까지 직렬화한다.
+    (본문 회수는 pdf_fallback 담당 — 여기서는 표시만 남긴다.)
+    """
+    source: str = "graphic"        # 표 본문의 출처
+    graphic: str = ""              # <graphic xlink:href> 이미지 파일명
 
 
 def fetch_xml(http: HttpClient, base: str, pmcid: str, cache_dir: Path) -> bytes | None:
@@ -64,7 +79,7 @@ def _build_ref_map(root) -> tuple[dict[str, Reference], dict[str, str]]:
 
 
 def _walk_sections(sec_elem, path, rid_to_ref, figures, tables,
-                   pcount) -> list[Section]:
+                   pcount, ref_ids=None) -> list[Section]:
     """<sec> 재귀 → Section 리스트(중첩 평탄화, path 보존)."""
     title_el = sec_elem.find("{*}title")
     title = norm_text("".join(title_el.itertext())) if title_el is not None else ""
@@ -77,7 +92,7 @@ def _walk_sections(sec_elem, path, rid_to_ref, figures, tables,
     for child in sec_elem:
         tag = jats._local(child.tag)
         if tag == "p":
-            info = jats.paragraph_text(child)
+            info = jats.paragraph_text(child, ref_ids)
             if not info["text"]:
                 continue
             pcount[0] += 1
@@ -97,7 +112,7 @@ def _walk_sections(sec_elem, path, rid_to_ref, figures, tables,
                 section = Section(path=cur_path or ["Body"],
                                   section_type=classify_section(title))
             out.extend(_walk_sections(child, cur_path, rid_to_ref,
-                                      figures, tables, pcount))
+                                      figures, tables, pcount, ref_ids))
         # 표/그림은 parse()의 단일 문서 패스에서 일괄 추출(여기선 처리하지 않음)
 
     if section.paragraphs:
@@ -105,9 +120,73 @@ def _walk_sections(sec_elem, path, rid_to_ref, figures, tables,
     return out
 
 
+# 이 논문이 아닌 '딸린 글' — 동료심사 보고서·편집자 논평·저자 답변.
+# 여기 실린 표·그림은 본 논문의 것이 아니므로 정본에 넣으면 안 된다.
+_FOREIGN_ARTICLE = frozenset({"sub-article", "response"})
+
+
+def _in_sub_article(el) -> bool:
+    """sub-article/response(동료심사·편집자 논평 등) 안의 요소인가."""
+    for anc in el.iterancestors():
+        if jats._local(anc.tag) in _FOREIGN_ARTICLE:
+            return True
+    return False
+
+
+def _collect_floats(root, body, tag: str) -> list:
+    """문서 전체를 훑어 tag 요소를 문서 순서대로 중복 없이 모은다(딸린 글 제외).
+
+    **id() 로 중복을 판정하면 안 된다.** lxml 요소는 접근할 때마다 파이썬 프록시가
+    새로 생성됐다 참조가 끊기는 즉시 GC 되므로, 해제된 주소가 다른 원소의 프록시에
+    재사용되면 그 원소를 '이미 봤다'고 오판해 통째로 건너뛴다. 결과가 실행할 때마다
+    달라지는 비결정적 소실이었다(수리 전 실측: 33편 중 8편에서 표·그림 개수가 요동).
+    그래서 안정 식별자인 tree.getpath() 로 판정하고, 모은 요소는 반환 리스트가
+    끝까지 붙들어 둬 프록시 수명 자체를 보장한다.
+
+    범위를 body/floats-group/back 으로 좁히면 <front> 에 실린 그래픽 초록처럼
+    바깥에 놓인 float 를 소리 없이 잃는다. 판정 기준을 '딸린 글 안인가' 하나로
+    통일해 XPath 진값(//table-wrap[not(ancestor::sub-article)])과 정의를 맞춘다.
+    body 인자는 공개 시그니처 유지를 위해 남겨둔다(범위 계산에는 쓰지 않는다).
+    """
+    tree = root.getroottree()
+    out: list = []
+    seen: set[str] = set()
+    for el in root.iter(tag):
+        key = tree.getpath(el)
+        if key in seen or _in_sub_article(el):
+            continue
+        seen.add(key)
+        out.append(el)
+    return out
+
+
+# 초록이 아닌 '초록 자리' 요소들 — 본문 초록보다 먼저 나와도 이것을 초록으로 삼으면 안 된다.
+# (JAMA 계열은 <abstract abstract-type="teaser"> 한 문장이 맨 앞에 온다.)
+_ABSTRACT_ASIDES = frozenset({"teaser", "graphical", "toc", "video", "web",
+                              "précis", "precis", "editor-summary"})
+
+
+def _pick_abstract(front):
+    """front 안 여러 <abstract> 중 본문 초록을 고른다.
+
+    JAMA 계열은 teaser·key-points·본초록이 나란히 있어서 '첫 번째'를 집으면
+    한 문장짜리 티저가 초록으로 확정된다(수리 전 실측 2편). 타입 없는 초록이
+    본초록이며, 여럿이면 가장 긴 것을 쓴다.
+    """
+    cands = front.findall(".//{*}abstract")
+    if not cands:
+        return None
+    plain = [a for a in cands if not (a.get("abstract-type") or "").strip()]
+    pool = plain or [a for a in cands
+                     if (a.get("abstract-type") or "").strip().lower()
+                     not in _ABSTRACT_ASIDES] or cands
+    return max(pool, key=lambda a: len("".join(a.itertext())))
+
+
 def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     root = etree.fromstring(xml_bytes)
     refs, rid_to_ref = _build_ref_map(root)
+    ref_ids = set(refs)          # 인용 rid 판정용(ref-type='ref' 등도 포착)
 
     figures: list[Figure] = []
     tables: list[Table] = []
@@ -118,13 +197,13 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     if body is not None:
         for sec in body.findall("{*}sec"):
             sections.extend(_walk_sections(sec, [], rid_to_ref,
-                                           figures, tables, pcount))
+                                           figures, tables, pcount, ref_ids))
         # 섹션 없이 <body> 직속 <p> 만 있는 경우
         loose = [c for c in body if jats._local(c.tag) == "p"]
         if loose:
             sec = Section(path=["Body"], section_type="other")
             for p in loose:
-                info = jats.paragraph_text(p)
+                info = jats.paragraph_text(p, ref_ids)
                 if info["text"]:
                     pcount[0] += 1
                     sec.paragraphs.append(Paragraph(
@@ -137,37 +216,27 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
 
     # 표/그림 단일 패스: body + floats-group + back 을 훑어 중복 없이 추출.
     # id 없는 것도 생성 id 부여(누락 방지). sub-article(동료심사 등)은 제외.
-    subarticle_els = {id(e) for sa in root.findall(".//{*}sub-article")
-                      for e in sa.iter()}
-    scopes = [body] + root.findall(".//{*}floats-group") + root.findall(".//{*}back")
-    seen_t: set[int] = set()
-    seen_f: set[int] = set()
-    for scope in scopes:
-        if scope is None:
-            continue
-        for tw in scope.iter("{*}table-wrap"):
-            if id(tw) in seen_t or id(tw) in subarticle_els:
-                continue
-            seen_t.add(id(tw))
-            tables.append(Table(id=tw.get("id") or f"tab{len(tables)+1}",
-                                caption=jats.caption_text(tw),
-                                markdown=jats.table_to_markdown(tw)))
-        for fg in scope.iter("{*}fig"):
-            if id(fg) in seen_f or id(fg) in subarticle_els:
-                continue
-            seen_f.add(id(fg))
-            figures.append(Figure(id=fg.get("id") or f"fig{len(figures)+1}",
-                                  caption=jats.caption_text(fg)))
+    for tw in _collect_floats(root, body, "{*}table-wrap"):
+        tid = tw.get("id") or f"tab{len(tables)+1}"
+        cap = jats.caption_text(tw)
+        md = jats.table_to_markdown(tw)
+        href = jats.graphic_href(tw) if not md.strip() else ""
+        if href:
+            # <table> 없이 이미지로만 실린 표 — 빈 markdown 을 '추출 실패'와 구분한다.
+            tables.append(ImageTable(id=tid, caption=cap, markdown="", graphic=href))
+        else:
+            tables.append(Table(id=tid, caption=cap, markdown=md))
+    for fg in _collect_floats(root, body, "{*}fig"):
+        figures.append(Figure(id=fg.get("id") or f"fig{len(figures)+1}",
+                              caption=jats.caption_text(fg)))
 
     # 초록은 '문서 자체'에서 추출(QC 초록대조를 실제 검증신호로 만들기 위함)
     extracted_abstract = ""
     front = root.find(".//{*}front")
     if front is not None:
-        ab = front.find(".//{*}abstract")
+        ab = _pick_abstract(front)
         if ab is not None:
-            extracted_abstract = norm_text(" ".join(
-                "".join(p.itertext()) for p in ab.iter("{*}p"))) or \
-                norm_text("".join(ab.itertext()))
+            extracted_abstract = jats.abstract_text(ab, ref_ids)
 
     api_abstract = meta.get("abstract_pubmed") or meta.get("abstract") or ""
     if extracted_abstract:

@@ -148,11 +148,18 @@ def match_by_position(doc: dict, ordered: list[dict], min_sim: int = 55) -> int:
 
 
 def reresolve_cited(doc: dict) -> None:
+    """참고문헌 DOI 가 보강된 뒤 문단의 cited_refs 를 다시 매긴다.
+
+    **참고문헌 목록에 실제로 있는 키만** 옮긴다. GROBID 가 연결에 실패한 인용은
+    'num:15' 같은 표시번호로 cited_keys 에 남아 있는데, 이것까지 cited_refs 로
+    옮기면 '존재하지 않는 참조를 가리키는 링크'가 된다(실측 271건/47편).
+    표시번호는 본문에 이미 [15] 로 박혀 있으므로 정보가 사라지지도 않는다.
+    """
     keymap = {r["key"]: (r.get("doi") or r["key"]) for r in doc.get("references", [])}
     for s in doc["sections"]:
         for p in s["paragraphs"]:
             if p.get("cited_keys"):
-                p["cited_refs"] = [keymap.get(k, k) for k in p["cited_keys"]]
+                p["cited_refs"] = [keymap[k] for k in p["cited_keys"] if k in keymap]
 
 
 # ── 오케스트레이션 ───────────────────────────────────────────────────

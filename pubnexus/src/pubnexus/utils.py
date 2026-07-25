@@ -16,8 +16,21 @@ from typing import Any, Callable, Iterable, Iterator
 import requests
 import yaml
 
-# ── 프로젝트 루트: pubnexus/src/pubnexus/utils.py → 3단계 위 ────────────
-ROOT = Path(__file__).resolve().parents[3]
+# ── 프로젝트 루트 ──────────────────────────────────────────────────────
+# 소스 실행: pubnexus/src/pubnexus/utils.py → 3단계 위가 프로젝트 루트.
+# exe(PyInstaller) 실행: __file__ 이 임시 해제 폴더를 가리켜 위 계산이 무의미하다.
+#   → exe 파일이 놓인 폴더를 루트로 본다(설정·데이터를 exe 옆에서 찾게).
+# PUBNEXUS_ROOT 환경변수가 있으면 그것이 항상 우선(개발·검증용 override).
+def _detect_root() -> Path:
+    env = os.environ.get("PUBNEXUS_ROOT")
+    if env:
+        return Path(env).resolve()
+    if getattr(sys, "frozen", False):            # PyInstaller 로 묶인 상태
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[3]
+
+
+ROOT = _detect_root()
 
 DOI_RE = re.compile(r'10\.\d{4,9}/[-._;()/:\w]+', re.I)
 # DOI 끝에 붙는 흔한 잡꼬리 제거용
@@ -48,6 +61,74 @@ def clean_doi(raw: str | None) -> str | None:
 def extract_doi(text: str) -> str | None:
     m = DOI_RE.search(text or "")
     return clean_doi(m.group(0)) if m else None
+
+
+# 다음 줄에서 DOI 가 이어지는지 볼 때 쓰는 조각(선행 공백 건너뛰고 DOI 문자만)
+_DOI_CONT_RE = re.compile(r'^\s*([\w][-._\w]*)')
+
+
+def doi_candidates(text: str, doi_re: re.Pattern | None = None,
+                   limit: int = 12) -> list[str]:
+    """줄바꿈으로 끊긴 DOI 를 이어붙인 후보들을 만든다.
+
+    조판 때문에 DOI 가 줄 중간에서 끊기는 일이 흔하다:
+        'https://doi.org/10.1200/JCO.18.\\n01223'  → 10.1200/jco.18 로 잘림
+        'https://doi.org/10.5021/ad.22\\n22.150'   → 10.5021/ad.22 로 잘림
+    공백을 전부 지우면 뒷 문장까지 끌고 오므로('...01223volume37') 쓸 수 없다.
+    그래서 **끊긴 지점 다음 줄의 첫 조각만** 이어붙인 후보를 만들고, 어느 것이
+    실제로 존재하는 DOI 인지는 호출부가 Crossref 로 확인한다(verify_doi).
+
+    반환 순서 = 원본 매치들 먼저, 그다음 이어붙인 후보들(긴 것 우선).
+    """
+    doi_re = doi_re or DOI_RE
+    bases: list[str] = []
+    stitched: list[str] = []
+    for m in doi_re.finditer(text or ""):
+        raw = m.group(0)
+        base = clean_doi(raw)
+        if base and base not in bases:
+            bases.append(base)
+        # 매치가 줄 끝에서 멈췄을 때만 이어붙이기를 시도한다
+        tail = (text or "")[m.end():m.end() + 80]
+        if not tail[:1] in ("\n", "\r"):
+            continue
+        cont = _DOI_CONT_RE.match(tail.lstrip("\r\n"))
+        if not cont:
+            continue
+        token = cont.group(1)
+        # 'ad.22' 다음 줄이 '22.150' 인 2단 조판처럼, 토큰의 뒷부분만 이어야
+        # 맞는 경우가 있다 → 점 기준 뒤쪽 조합을 모두 후보로 낸다.
+        parts = token.split(".")
+        pieces = {token}
+        for i in range(1, len(parts)):
+            pieces.add(".".join(parts[i:]))
+        joiner = "" if raw.rstrip()[-1:] in "./-" else "."
+        for piece in sorted(pieces, key=len, reverse=True):
+            cand = clean_doi(raw.rstrip() + joiner + piece)
+            if cand and cand not in bases and cand not in stitched:
+                stitched.append(cand)
+    return (bases + stitched)[:limit]
+
+
+def verify_doi(doi: str, http: "HttpClient | None" = None) -> str | None:
+    """Crossref 에 실제로 등록된 DOI 인지 확인하고, 맞으면 정규 DOI 를 돌려준다.
+
+    네트워크가 안 되면 None(=판정 불가). 호출부가 '없음'과 구분해 다루어야 한다.
+    """
+    if not doi:
+        return None
+    client = http or HttpClient()
+    try:
+        r = client.get(f"https://api.crossref.org/works/{doi}",
+                       accept="application/json", retries=1)
+    except Exception:  # noqa: BLE001 — 네트워크 실패는 판정 불가로 처리
+        return None
+    if r is None or r.status_code != 200:
+        return None
+    try:
+        return clean_doi(r.json()["message"].get("DOI") or doi)
+    except Exception:  # noqa: BLE001
+        return doi
 
 
 def slug(s: str) -> str:
@@ -118,6 +199,27 @@ class HttpClient:
 # os.replace 는 같은 볼륨 안에서 원자적이며 Windows 에서도 기존 파일을 덮어쓴다.
 _REPLACE_RETRIES = 5          # Windows: 백신/Dropbox 가 잠깐 파일을 물고 있을 때 대비
 _REPLACE_WAIT = 0.2
+_LONG_PATH_AT = 240           # 260자 제한에 임시파일 접미사까지 감안한 여유선
+
+
+def long_path(path: str | Path) -> str:
+    r"""Windows 260자 경로 제한을 넘는 경로를 확장 형식(\\?\C:\...)으로 바꾼다.
+
+    실제로 터진다 — 논문 파일명이 120자쯤이고 Dropbox 한글 폴더까지 겹치면
+    os.replace 가 FileNotFoundError(WinError 3) 로 죽는다. 앱이 PDF 옆에
+    같은 이름의 .json 을 쓰기 때문에 이 조건이 흔하다.
+    긴 경로 지원이 꺼져 있어도 이 접두사를 붙이면 API 수준에서 통과한다.
+    """
+    s = str(path)
+    if sys.platform != "win32" or len(s) < _LONG_PATH_AT or s.startswith("\\\\?\\"):
+        return s
+    try:
+        s = str(Path(s).resolve())
+    except OSError:
+        return s
+    if s.startswith("\\\\"):                      # UNC 경로
+        return "\\\\?\\UNC\\" + s.lstrip("\\")
+    return "\\\\?\\" + s
 
 
 def _atomic_write(path: Path, writer: Callable[[Any], Any]) -> Any:
@@ -142,7 +244,8 @@ def _atomic_write(path: Path, writer: Callable[[Any], Any]) -> Any:
         last: OSError | None = None
         for attempt in range(_REPLACE_RETRIES):
             try:
-                os.replace(tmp, p)       # ← 원자적 교체(기존 파일 덮어쓰기 포함)
+                # 260자를 넘는 대상은 확장 형식으로 바꿔야 os.replace 가 통과한다
+                os.replace(long_path(tmp), long_path(p))
                 return result
             except PermissionError as e:  # 다른 프로세스가 대상 파일을 잠시 열고 있음
                 last = e
@@ -174,10 +277,24 @@ def write_jsonl_stream(path: Path, rows: Iterable[dict]) -> int:
     return _atomic_write(path, _w)
 
 
+def path_exists(path: str | Path) -> bool:
+    """긴 경로에서도 정확한 존재 확인.
+
+    Path.exists() 는 260자를 넘으면 조용히 False 를 돌려준다 — '없다'와
+    '못 본다'를 구분하지 못해, 이미 만든 파일을 없다고 판단해 재처리하거나
+    빈 결과를 반환하는 사고가 난다.
+    """
+    p = str(path)
+    if Path(p).exists():
+        return True
+    lp = long_path(p)
+    return lp != p and os.path.exists(lp)
+
+
 def read_jsonl(path: Path) -> list[dict]:
-    if not Path(path).exists():
+    if not path_exists(path):
         return []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(long_path(path), "r", encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
@@ -239,7 +356,7 @@ def write_json(path: Path, obj: Any):
 
 
 def read_json(path: Path) -> Any:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(long_path(path), "r", encoding="utf-8") as f:
         return json.load(f)
 
 

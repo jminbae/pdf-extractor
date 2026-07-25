@@ -44,7 +44,8 @@ def main():
 
     refmatch.run(cfg)   # 참고문헌 DOI를 Crossref 참조목록과 대조해 보강
     qc.run(cfg)
-    render.run(cfg)
+    # Markdown 은 정본이 아니라 뷰다 → 파이프라인에서 만들어 쌓지 않는다.
+    #   보고 싶을 때만: python -c "from pubnexus import render; render.export()"
     audit.run(cfg)      # 내용 수준 전수 감사
 
     # 요약

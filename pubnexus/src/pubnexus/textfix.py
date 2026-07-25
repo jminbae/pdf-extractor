@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import re
 import shutil
+import unicodedata
 from typing import Any
 
 from . import schema, utils
@@ -364,6 +365,447 @@ def strip_caption_leak(s: str) -> tuple[str, list[str]]:
     return text, caps
 
 
+# ── D8 인코딩 깨짐 수리 ─────────────────────────────────────────────
+# 근본 원인: Elsevier(3B2)·Wiley 조판이 = ± ≥ ≤ < > × · − ° * + 같은 기호를
+# 서브셋 폰트의 **남는 슬롯**에 밀어 넣으면서 ToUnicode/글리프 이름을 갱신하지
+# 않았다. 사람 눈에는 '≥75%' 로 보이지만 추출기는 슬롯 코드를 그대로 읽어
+# '$75%' 를 내놓는다(폰트가 신고하는 글리프 이름도 'onequarter'/'thorn' 처럼
+# 거짓이라 폰트 표로는 복원할 수 없다 — 렌더링만이 근거가 된다).
+#
+# 아래 매핑은 전부 **원본 PDF 를 렌더링해 육안으로 확인한 것만** 담았다.
+#   문서                              PDF 실제 표기            → 추출 결과
+#   10.1016/j.jaad.2018.06.016        ≥75% repigmentation       $75%
+#   10.1016/j.jaad.2018.06.016        <50% as insufficient      \50%
+#   10.1016/j.jaad.2018.06.004        BT >2 mm … BT ≤2 mm       BT [2 mm … BT #2 mm
+#   10.1016/j.jaad.2020.03.009        86.1% ± 23.9%             86.1% 6 23.9%
+#   10.1016/j.jid.2017.11.012         CD8⁺ … ratio = 1.99       CD8 þ … ratio ¼ 1.99
+#   10.1016/j.jid.2023.02.031         affecting 0.5−1%          0.5e1%
+#   10.1016/j.jcjo.2018.04.020        p < 0.001                 p o 0.001
+#   10.1002/lsm.23048                 55.4 ± 28.7% … −2.862%    55.4 AE 28.7% … À2.862%
+#   10.1002/lsm.22358                 ×200 … 94°C               Â200 … 948C
+#   10.1080/09546634.2020.1817298     delta L*                  delta L Ã
+#   10.1111/bjd.15560                 0·5–2% … 49·8 years       0Á5-2% … 49Á8
+#   10.1016/S2468-2667(24)00026-4     24·7 (95% CI 24·3–25·2)   24•7 … 24•3-25•2
+#   10.1016/j.jid.2023.07.007         aged <40 … or ≥40 years   <40 … !40
+#   10.1111/j.1365-2133.2008.08937.x  LLD ≥ 10 mm … 62·5%       LLD ‡ 10 mm … 62AE5%
+#   10.1111/jocd.12551                Antera 3D® system         Antera 3D â
+#   10.1111/jocd.12338                Köln, Germany             K€ oln, Germany
+#   10.1111/bjd.21054                 Behçet disease            Behc ßet disease
+#   10.1016/j.jid.2023.02.031         Sjögren's syndrome        Sjo ̈gren's syndrome
+#
+# 설계 원칙은 기존 함수들과 같다: **오탐 0 우선.** 치환은 두 겹으로 막는다.
+#   (1) 문서 게이트 — 정상 텍스트에 사실상 나올 수 없는 '조판 사고 서명'이
+#       하나도 없는 문서에는 ASCII 계열 치환($ \ # [ 6 e o AE …)을 아예 열지
+#       않는다. 그래야 진짜 통화 '$75', 진짜 인용 '[19]', 진짜 번호 '#1' 이
+#       멀쩡한 문서에서 훼손되지 않는다.
+#   (2) 자리 문맥 — 게이트를 통과해도 숫자·단위가 붙는 자리에서만 바꾼다.
+
+# 아래 정규식의 '공백'은 전부 `[ \t]` 다(`\s` 가 아니다). `\s` 는 줄바꿈을 먹으므로
+# 치환하면서 표 markdown 의 **행이 병합**되어 열 정렬이 무너진다(기존 표 잡음 제거가
+# 줄 단위로 도는 것과 같은 이유다).
+_SP = r"[ \t]"
+
+# 게이트 서명. 정상 영문 의학 텍스트에서는 사실상 만들어질 수 없는 형태만 골랐다.
+_MOJI_SIGNS: tuple[tuple[str, re.Pattern], ...] = (
+    # 'P ¼ 0.22' — 분수 ¼ 가 변수와 숫자 사이에 오는 문장은 존재하지 않는다
+    ("eq_quarter", re.compile(r"[\w)\]]\s*(?:1⁄4|¼)\s*[\d.,]")),
+    # 본문 속 역슬래시+수('\50%', 'P \.001') — 정상 산문에는 역슬래시가 없다
+    ("lt_backslash", re.compile(r"\\\s?\.?\d")),
+    ("dot_aacute", re.compile(r"\d\s?Á\s?\d")),   # 49Á8
+    ("minus_agrave", re.compile(r"À\s?[\d.]|\d\s?À")),
+    ("pm_ae", re.compile(r"\d\s?AE\s?\d")),
+    ("times_acirc", re.compile(r"Â\s?\d")),
+    ("plus_thorn", re.compile(r"\d\s?þ|[a-z]þ")),
+    ("star_atilde", re.compile(r"[A-Za-z]\s?Ã(?![\w])")),
+    # '$75%' / '$ 60 years' — 통화로는 읽을 수 없는 자리의 달러 기호
+    ("ge_dollar", re.compile(
+        r"\$\s?\d+(?:\.\d+)?\s?(?:%|y\b|yr\b|years?\b|mo\b|months?\b|days?\b|"
+        r"cm\b|mm\b|g\b|LNs?\b|colou?rs?\b|times\b|physician\b)", re.I)),
+    ("pm_six", re.compile(r"\b(?:mean|age)\s6\s(?:SD|SEM)\b", re.I)),
+    ("deg_eight", re.compile(r"\d8C\b")),
+    # '!40 years' — 느낌표 바로 뒤에 숫자가 오는 영문 문장은 없다
+    ("ge_excl", re.compile(r"!\d")),
+    # '‡ 10 mm' — 각주 기호 뒤에 '수+단위'가 오는 조판은 없다
+    ("ge_ddagger", re.compile(rf"‡{_SP}?\d+{_SP}?(?:%|mm\b|cm\b|y\b|years?\b)")),
+    # 괄호 안 신뢰구간이 'e' 로 이어진 형태('(1.683e3.863)', '0.5e1%')
+    ("dash_e", re.compile(r"\d\.\d+e\d+\.\d|\de\d+\s?%")),
+)
+
+# ── (1) 문맥만으로 확정되는 수리 — 게이트 없이 적용 ──────────────────
+# 숫자 사이의 Á/• 는 영국식 소수점(middle dot)이 깨진 것 외의 해석이 없다.
+_MJ_DOT_AACUTE = re.compile(rf"(?<=\d){_SP}?Á{_SP}?(?=\d)")   # 49Á8  → 49·8
+_MJ_DOT_BULLET = re.compile(r"(?<=\d)•(?=\d)")                # 24•7  → 24·7
+# U+2010 HYPHEN / U+2011 NB-HYPHEN: 유니코드상 '정상'이지만 ASCII '-' 로 찾으면
+# 걸리지 않아 검색이 조용히 실패한다('large‐scale'). 표기를 통일한다.
+_MJ_HYPHENS = re.compile(r"[‐‑]")
+# 결합 기호가 앞 글자에서 떨어져 나온 형태: 'Sjo ̈gren' → 'Sjögren',
+# 'Behc ̧et' → 'Behçet', 'Atas ‚' → 'Ataş'(U+201A 가 세디유 자리에 왔다).
+# 조판이 í 를 **점 없는 i(U+0131) + 액센트**로 쌓는 경우도 같은 사고다
+# ('Dı ́az Angulo' → 'Díaz Angulo', PDF 렌더링 확인). ı 는 NFC 로 합쳐지지
+# 않으므로 밑글자를 보통 i 로 되돌린 뒤 합성한다.
+_MJ_COMBINING = re.compile(rf"([A-Za-zıİ]){_SP}+([̀-ͯ])")
+_DOTLESS = {"ı": "i", "İ": "I"}
+_MJ_CEDILLA_LOW = re.compile(rf"([A-Za-z]){_SP}+‚")
+# 같은 사고의 다른 슬롯: '€' 는 **뒤따르는 모음** 위의 움라우트,
+# 'ß' 는 **앞 글자** 밑의 세디유가 떨어져 나온 것이다.
+#   'Sj€ ogren' → 'Sjögren' · 'K€oln' → 'Köln' · 'Behc ßet' → 'Behçet'
+# (실측: € 17건 전부 Sjögren/Köln, ß 9건 전부 Behçet — 진짜 유로·에스체트는 없다)
+_MJ_UMLAUT_EURO = re.compile(rf"€{_SP}?([aeiouAEIOU])")
+_MJ_CEDILLA_SS = re.compile(rf"([Cc]){_SP}?ß")
+# 'â' 는 등록상표 ®. 제품명 뒤에 홀로 선 자리에서만 바꾼다 — 같은 코드가
+# 10.1002/lsm.22358 에서는 'â-catenin'(= β-catenin)이라 하이픈이 붙으면 손대지
+# 않는다(둘 다 PDF 렌더링으로 확인). 정상 단어 속 â('château')는 구조상 안 걸린다.
+_MJ_REG_ACIRC = re.compile(rf"(?<=[A-Za-z0-9]){_SP}?â(?![-\w])")
+
+# ── (2) 게이트가 열려야만 적용되는 수리 ─────────────────────────────
+_MJ_EQ_QUARTER = re.compile(rf"{_SP}*(?:1⁄4|¼){_SP}*")  # P ¼ 0.22 → P = 0.22
+# ≥ 는 두 슬롯으로 깨진다: JAAD 계열은 '$', JID/LSM 계열은 '!'.
+_MJ_GE_DOLLAR = re.compile(rf"\${_SP}?(?=\d)")               # $75%     → ≥75%
+_MJ_GE_EXCL = re.compile(rf"!{_SP}?(?=\d)")                  # !40 y    → ≥40 y
+_MJ_LT_BACKSLASH = re.compile(rf"\\{_SP}?(?=[\d.])")         # \50%     → <50%
+_MJ_PLUS_THORN = re.compile(rf"(?<=[0-9A-Za-z]){_SP}?þ")     # CD8 þ    → CD8+
+_MJ_STAR_ATILDE = re.compile(rf"(?<=[A-Za-z]){_SP}?Ã(?![\w])")  # L Ã   → L*
+_MJ_TIMES_ACIRC = re.compile(rf"Â(?={_SP}?\d)")              # Â200     → ×200
+_MJ_DEG_EIGHT = re.compile(r"(?<=\d)8(?=C\b)")               # 948C     → 94°C
+_MJ_LT_LETTER_O = re.compile(rf"\b([Pp]){_SP}+o{_SP}+(?=[.,]?\d)")  # p o .001
+# ± : Wiley 계열은 'AE'(Æ 슬롯), Elsevier 계열은 '6' 으로 깨진다.
+# 단, **같은 Æ 슬롯이 BJD 구권에서는 영국식 소수점(·)** 이다(둘 다 렌더링 확인):
+#   10.1111/jocd.12338            '35.2±4.8'  → '35.2AE4.8'
+#   10.1111/j.1365-2133.2008.08937.x '62·5%'  → '62AE5%'  · 'P = 0·006' → '0AE006'
+# 가르는 근거: ± 는 이미 소수점이 찍힌 두 수 사이에 오고, · 는 소수점 자리 자체다.
+_MJ_PM_AE_NUM = re.compile(rf"(?<=\d){_SP}*AE{_SP}*(?=\d)")
+_MJ_AE_LEFT = re.compile(r"[\d.,·]+\Z")
+_MJ_AE_RIGHT = re.compile(r"[\d.,·]+")
+_MJ_PM_AE_SD = re.compile(rf"\bAE(?={_SP}+(?:SD|SEM)\b)")
+_MJ_PM_AE_CELL = re.compile(rf"(?<=\|{_SP})AE(?={_SP}+\d)")
+_MJ_PM_SIX_NUM = re.compile(rf"(?<=\d){_SP}6{_SP}(?=\d)")
+_MJ_PM_SIX_SD = re.compile(
+    rf"(?<=[A-Za-z(])({_SP}?)6({_SP})(?=SD\b|SEM\b|standard\b)")
+# '6' 은 진짜 숫자이기도 하다. 표에서 공백으로 갈린 **수치 칸**('… 3.1 6 416,460 4.1',
+# '1 2 3 4 5 6 7')이 '±' 로 둔갑하지 않도록 오른쪽 피연산자를 검사한다:
+# 천단위 콤마가 있으면 개수 칸, 한 자리 숫자면 나열이다(실측 오탐 15건 전부 이 둘).
+_MJ_SIX_RIGHT = re.compile(r"[\d,]+(?:\.\d+)?")
+# − : Elsevier 조판에서 같은 대시 글리프가 'À' 또는 'e' 로 떨어진다.
+#     범위('0.5−1%')와 음수('−2.862%') 모두 같은 글리프라 대상도 하나로 둔다.
+_MJ_MINUS_AGRAVE = re.compile(
+    rf"À(?={_SP}?[\d.])"           # À0.013 / À 6.531
+    r"|(?<=[a-z])À(?=[A-Za-z])"    # factorÀa / gammaÀCXCL10
+    r"|(?<=\()À(?=\))"             # (À)
+    rf"|(?<=\d{_SP})À(?={_SP})")   # 1 À coefficient
+_MJ_MINUS_E = re.compile(r"(?<=\d)e(?=\d)")
+_MJ_MINUS_E_LEAD = re.compile(rf"(?<=[=<>≤≥]{_SP})e(?=[\d.])")
+# ≤/≥ : '#' 와 '‡' 는 진짜 번호·각주 기호('#1 OR #2', 'analysis #1', '‡1,4-6',
+#       'P value ‡')로도 쓰이므로 **뒤에 수 + 단위·백분율·표 칸 경계가 오는
+#       자리**에서만 비교기호로 본다.
+_MJ_LE_HASH = re.compile(rf"#{_SP}?(?=\d)")
+_MJ_GE_DDAGGER = re.compile(rf"‡{_SP}?(?=\d)")   # LLD ‡ 10 mm → LLD ≥10 mm
+_MJ_CMP_UNIT = re.compile(
+    rf"[#‡]{_SP}?\d+(?:\.\d+)?{_SP}*"
+    r"(?:%|\||\)|y\b|yr\b|years?\b|mo\b|months?\b|d\b|days?\b|"
+    r"wk\b|weeks?\b|h\b|hours?\b|cm\b|mm\b|m\b|g\b|kg\b|mg\b|mL\b|L\b|LNs?\b|"
+    r"points?\b|times\b|colou?rs?\b|cases?\b|lesions?\b)", re.I)
+# > : '[' 는 인용 '[19]'·통계 '[95% confidence interval 1.10-3.17]' 로도 쓰인다.
+#     **같은 줄 안에서 닫는 ']' 가 끝내 나오지 않을 때만** 비교기호로 본다.
+#     창을 20자로 잡았더니 '[95% confidence interval …]'(닫는 괄호가 35자 뒤)이
+#     전부 오탐으로 걸렸다 → 창을 60자로 넓히고 통계 괄호는 따로 제외한다.
+#     '[.99'(= '>.99', P값)도 대상이라 소수점으로 시작하는 수까지 받는다.
+_MJ_GT_BRACKET = re.compile(
+    rf"\[{_SP}?(?=\.?\d)(?![^\]\n]{{0,60}}\])"
+    rf"(?!{_SP}?\d+{_SP}?%?{_SP}*(?:confidence|CI\b|IQR\b))")
+
+# ── (2-a) 문서 게이트를 통과해도 남는 오탐 두 가지 ────────────────────
+# 게이트는 **문서 단위**라, 한 문서 안에 '깨진 ≥'와 '진짜 달러'가 함께 있으면
+# 막지 못한다. 실측으로 확인된 사고 두 건을 자리 문맥으로 따로 잘라낸다.
+#
+#  (i) 10.1016/j.jaad.2020.09.088 (지불의사액 연구) — 같은 문서 안에
+#      본문 '($2000 for vitiligo, $1000 for psoriasis)' = **진짜 미국 달러**,
+#      표 '| $60 | 103 (19.4) |' = 깨진 '≥60'. 둘 다 PDF 렌더링으로 확인했다.
+#      가르는 근거: 비교기호 '≥N' 뒤에는 세는 대상(단위·명사·표 칸)이 오고
+#      전치사가 오지 않는다. 금액 '$N' 은 'for/per …' 로 이어진다.
+#      보조로 ±90자 안의 금액 어휘(WTP·cost·price…)도 본다.
+#      실측: 코퍼스의 '$숫자' 85자리 중 이 두 조건에 걸리는 것은 그 4자리뿐이다.
+#      ('to'·'in' 은 '≥5 to 10 y' 같은 정상 표현과 겹칠 수 있어 넣지 않는다 —
+#       금액 4자리는 'for' 만으로도 전부 걸리고, ±90자 어휘 그물이 이중으로 막는다.)
+_MJ_MONEY_TAIL = re.compile(rf"\$[ \t]?[\d,]+(?:\.\d+)?{_SP}+(?:for|per)\b")
+_MJ_MONEY_SEP = re.compile(r"\$[ \t]?\d{1,3}(?:,\d{3})+")   # $1,200 = 금액
+_MJ_MONEY_WORD = re.compile(
+    r"\b(?:WTP|willing(?:ness)?|cost|costs|costed|price|prices|priced|pay|paid|"
+    r"payment|USD|dollars?|expenditure|reimburse\w*|out-of-pocket)\b", re.I)
+#
+#  (ii) 10.1111/jdv.16976 — 표 각주 '‡43.9% (n=189/431), and 43.4% … achieved'
+#       를 '≥43.9%' 로 바꿔 **원문에 없는 주장**을 만들었다(PDF 확인: 위첨자
+#       각주 기호다). 비교기호는 같은 절 안에 **왼쪽 피연산자**가 있어야 한다.
+#       문장 끝('.', ')', ']') 직후나 필드 맨 앞에 선 '#'·'‡' 는 각주로 본다.
+#       (표 칸 첫머리 '| ‡10 mm |' 는 왼쪽이 '|' 라 그대로 통과한다.)
+_MJ_FOOTNOTE_LEFT = ".)]\n"
+
+
+def _money_here(s: str, i: int) -> bool:
+    """s[i] 의 '$' 가 통화로 읽히는 자리인지."""
+    if _MJ_MONEY_TAIL.match(s, i) or _MJ_MONEY_SEP.match(s, i):
+        return True
+    return bool(_MJ_MONEY_WORD.search(s[max(0, i - 90):i + 90]))
+
+
+def _footnote_here(s: str, i: int) -> bool:
+    """s[i] 의 '#'·'‡' 가 왼쪽 피연산자 없는 각주 기호 자리인지."""
+    j = i - 1
+    while j >= 0 and s[j] in " \t":
+        j -= 1
+    return j < 0 or s[j] in _MJ_FOOTNOTE_LEFT
+
+
+def encoding_profile(doc: dict) -> frozenset[str]:
+    """문서 전체 본문을 훑어 '조판 사고 서명'을 찾는다(게이트 판정).
+
+    반환된 집합이 비어 있지 않으면 그 문서는 서브셋 폰트 오매핑을 겪은 것이라
+    보고 ASCII 계열 치환을 연다. 비어 있으면 문맥만으로 확정되는 수리
+    (숫자 사이 Á/•, U+2010 하이픈, 떨어진 결합기호)만 적용한다.
+    """
+    found: set[str] = set()
+    for text in _iter_doc_text(doc):
+        if not text:
+            continue
+        for name, rx in _MOJI_SIGNS:
+            if name not in found and rx.search(text):
+                found.add(name)
+        if len(found) == len(_MOJI_SIGNS):
+            break
+    return frozenset(found)
+
+
+def _iter_doc_text(doc: dict):
+    """수리 대상 문자열을 흘려보낸다(초록·제목·문단·캡션·표 본문)."""
+    yield doc.get("abstract") or ""
+    for sec in doc.get("sections") or []:
+        for p in sec.get("path") or []:
+            yield p or ""
+        for para in sec.get("paragraphs") or []:
+            yield para.get("text") or ""
+    for fig in doc.get("figures") or []:
+        yield fig.get("caption") or ""
+    for tbl in doc.get("tables") or []:
+        yield tbl.get("caption") or ""
+        yield tbl.get("markdown") or ""
+
+
+def _compose_marks(s: str) -> str:
+    """앞 글자에서 떨어진 결합 기호를 다시 붙인다('Sjo ̈gren' → 'Sjögren')."""
+    def repl(m: re.Match) -> str:
+        raw, mark = m.group(1), m.group(2)
+        base = _DOTLESS.get(raw)
+        if base is not None:
+            # 점 없는 i 는 조합형 글자가 있을 때만 i 로 되돌린다. 안 그러면
+            # 진짜 터키어 'ı' 를 'i' 로 바꿔 놓고 결합기호만 붙이게 된다.
+            out = unicodedata.normalize("NFC", base + mark)
+            return out if len(out) == 1 else raw + mark
+        return unicodedata.normalize("NFC", raw + mark)
+    s = _MJ_COMBINING.sub(repl, s)
+    s = _MJ_CEDILLA_LOW.sub(
+        lambda m: unicodedata.normalize("NFC", m.group(1) + "̧"), s)
+    s = _MJ_UMLAUT_EURO.sub(
+        lambda m: unicodedata.normalize("NFC", m.group(1) + "̈"), s)
+    return _MJ_CEDILLA_SS.sub(
+        lambda m: unicodedata.normalize("NFC", m.group(1) + "̧"), s)
+
+
+def _pm_ae(m: re.Match) -> str:
+    """'AE'(Æ 슬롯)가 ± 인지 ·(영국식 소수점)인지 양쪽 피연산자로 가른다.
+
+    '35.2AE4.8' 처럼 양쪽이 이미 소수인 경우는 ±(평균±표준편차)이고,
+    '62AE5%'·'0AE006' 처럼 소수점이 하나도 없으면 그 자리가 소수점이다.
+    """
+    s = m.string
+    lm = _MJ_AE_LEFT.search(s[:m.start()])
+    rm = _MJ_AE_RIGHT.match(s, m.end())
+    both = (lm.group(0) if lm else "") + (rm.group(0) if rm else "")
+    return " ± " if ("." in both or "·" in both) else "·"
+
+
+def _pm_six(m: re.Match) -> str:
+    """'6' 을 ± 로 볼지 판정. 오른쪽이 개수 칸/나열이면 원문을 유지한다."""
+    tok = _MJ_SIX_RIGHT.match(m.string, m.end())
+    right = tok.group(0) if tok else ""
+    if "." in right:
+        return " ± "                       # '15.4' — 표준편차 표기
+    if "," in right or len(right) <= 1:
+        return m.group(0)                  # '416,460' / '7' — 수치 칸·나열
+    return " ± "                           # '1831'(IgE 평균±SD 처럼 정수 SD)
+
+
+def _minus_e(m: re.Match) -> str:
+    """숫자 사이 'e' 를 대시로 볼지 판정. 해시·식별자 안이면 손대지 않는다.
+
+    '0.5e1%'/'(1.683e3.863)' 는 대시지만, 'dbc21e882f7a'(첨부파일 해시)의 e 는
+    글자다. 숫자런 바깥에 영문자가 붙어 있으면 후자로 보고 원문을 유지한다.
+    """
+    s, i = m.string, m.start()
+    j = i - 1
+    while j >= 0 and (s[j].isdigit() or s[j] == "."):
+        j -= 1
+    k = i + 1
+    while k < len(s) and (s[k].isdigit() or s[k] == "."):
+        k += 1
+    if (j >= 0 and s[j].isalpha()) or (k < len(s) and s[k].isalpha()):
+        return "e"
+    return "−"
+
+
+def fix_encoding(s: str, typeset: bool = False) -> str:
+    """한 문자열의 인코딩 깨짐을 복구한다. 멱등(여러 번 적용해도 같은 결과).
+
+    typeset=False 면 문맥만으로 확정되는 수리만 한다. typeset=True 는
+    `encoding_profile()` 이 조판 사고 서명을 찾은 문서에서만 넘겨야 한다 —
+    그 문서 밖에서 켜면 진짜 통화 '$75'·인용 '[19]'·번호 '#1' 을 훼손한다.
+    게이트가 열린 문서 안에서도 진짜 금액('$2000 for vitiligo')과 각주
+    기호('… data). ‡43.9%')는 자리 문맥으로 따로 걸러낸다.
+    """
+    if not s:
+        return s or ""
+    # (1) 게이트 없이
+    s = _MJ_DOT_AACUTE.sub("·", s)
+    s = _MJ_DOT_BULLET.sub("·", s)
+    s = _MJ_HYPHENS.sub("-", s)
+    s = _MJ_REG_ACIRC.sub("®", s)
+    s = _compose_marks(s)
+    if not typeset:
+        return s
+    # (2) 게이트 통과 문서만 — '=' 부터 복원해야 'X = e0.254'(선행 마이너스)가 산다
+    s = _MJ_EQ_QUARTER.sub(" = ", s)
+    s = _MJ_GE_DOLLAR.sub(
+        lambda m: m.group(0) if _money_here(m.string, m.start()) else "≥", s)
+    s = _MJ_GE_EXCL.sub("≥", s)
+    s = _MJ_LT_BACKSLASH.sub("<", s)
+    s = _MJ_LE_HASH.sub(
+        lambda m: "≤" if (_MJ_CMP_UNIT.match(m.string, m.start())
+                          and not _footnote_here(m.string, m.start()))
+        else m.group(0), s)
+    s = _MJ_GE_DDAGGER.sub(
+        lambda m: "≥" if (_MJ_CMP_UNIT.match(m.string, m.start())
+                          and not _footnote_here(m.string, m.start()))
+        else m.group(0), s)
+    s = _MJ_GT_BRACKET.sub(">", s)
+    s = _MJ_PM_AE_NUM.sub(_pm_ae, s)
+    s = _MJ_PM_AE_SD.sub("±", s)
+    s = _MJ_PM_AE_CELL.sub("±", s)
+    s = _MJ_PM_SIX_NUM.sub(_pm_six, s)
+    s = _MJ_PM_SIX_SD.sub(r"\1±\2", s)
+    s = _MJ_PLUS_THORN.sub("+", s)
+    s = _MJ_STAR_ATILDE.sub("*", s)
+    s = _MJ_TIMES_ACIRC.sub("×", s)
+    s = _MJ_DEG_EIGHT.sub("°", s)
+    s = _MJ_MINUS_AGRAVE.sub("−", s)
+    s = _MJ_MINUS_E.sub(_minus_e, s)
+    s = _MJ_MINUS_E_LEAD.sub("−", s)
+    s = _MJ_LT_LETTER_O.sub(r"\1 < ", s)
+    return s
+
+
+def repair_encoding(doc: dict) -> tuple[int, list[str]]:
+    """문서 dict 의 본문 문자열을 제자리에서 인코딩 수리한다.
+
+    반환: (바뀐 문자 수, 감사용 before→after 표본 리스트).
+    문자 수는 '수리로 사라진/생긴 글자'가 아니라 **치환된 자리 수**의 근사로,
+    길이 변화와 무관하게 세도록 원문/결과를 자리별로 비교하지 않고
+    치환 규칙이 실제로 문자열을 바꾼 횟수를 세어 보고한다.
+    """
+    profile = encoding_profile(doc)
+    typeset = bool(profile)
+    n = 0
+    samples: list[str] = []
+
+    def fix(text: str) -> str:
+        nonlocal n
+        if not text:
+            return text
+        out = fix_encoding(text, typeset=typeset)
+        if out != text:
+            n += _count_diff(text, out)
+            if len(samples) < 8:
+                samples.append(_diff_sample(text, out))
+        return out
+
+    doc["abstract"] = fix(doc.get("abstract") or "")
+    for sec in doc.get("sections") or []:
+        if sec.get("path"):
+            sec["path"] = [fix(p or "") for p in sec["path"]]
+        for para in sec.get("paragraphs") or []:
+            para["text"] = fix(para.get("text") or "")
+    for fig in doc.get("figures") or []:
+        fig["caption"] = fix(fig.get("caption") or "")
+    for tbl in doc.get("tables") or []:
+        tbl["caption"] = fix(tbl.get("caption") or "")
+        tbl["markdown"] = fix(tbl.get("markdown") or "")
+    return n, samples
+
+
+# 보고용 잔존 계측기 — 수리 대상으로 확인된 자리만 센다(미확인 문자는 세지 않는다).
+_MOJI_ALL = re.compile(
+    r"[ÀÁÂÃþ⁄¼‐‑€]"
+    rf"|(?<=\d)•(?=\d)|\${_SP}?\d|!\d|\\{_SP}?[\d.]|[A-Za-z]{_SP}+[̀-ͯ]"
+    rf"|[Cc]{_SP}?ß|(?<=[A-Za-z0-9]){_SP}?â(?![-\w])")
+
+
+def count_mojibake(doc: dict) -> int:
+    """문서에 남아 있는 '깨진 문자' 수(수리 전후 비교 보고용).
+
+    수리하지 않기로 **판정한** 자리(진짜 금액 '$2000 for …')는 세지 않는다.
+    그러지 않으면 수리 후 계측이 실제보다 나쁘게 나와 보고를 오도한다.
+    """
+    n = 0
+    for t in _iter_doc_text(doc):
+        if not t:
+            continue
+        for m in _MOJI_ALL.finditer(t):
+            if m.group(0).startswith("$") and _money_here(t, m.start()):
+                continue
+            n += 1
+    return n
+
+
+def _count_diff(before: str, after: str) -> int:
+    """치환된 자리 수 근사 — 바뀐 구간 길이의 합.
+
+    difflib 는 문자열 길이의 **제곱**에 비례한다. 표 markdown 은 수십만 자가
+    되기도 해서(실측: 2000행 표 1.4 MB) 통째로 비교하면 계측 하나가 수 분을
+    먹는다. 치환 규칙은 전부 `[ \\t]` 만 소비하고 줄바꿈은 건드리지 않으므로
+    **줄 수가 보존된다** — 줄끼리 짝지어 짧은 조각만 비교하면 선형에 가깝다.
+    (혹시라도 줄 수가 달라지면 통째 비교로 되돌아간다.)
+    """
+    import difflib
+
+    def span(a: str, b: str) -> int:
+        if a == b:
+            return 0
+        # 공통 접두/접미를 먼저 떼어내 difflib 입력을 최소화한다
+        i, na, nb = 0, len(a), len(b)
+        while i < na and i < nb and a[i] == b[i]:
+            i += 1
+        j = 0
+        while j < na - i and j < nb - i and a[na - 1 - j] == b[nb - 1 - j]:
+            j += 1
+        a, b = a[i:na - j], b[i:nb - j]
+        if len(a) > 4000 or len(b) > 4000:      # 최악의 경우 안전판
+            return max(len(a), len(b))
+        return sum(max(i2 - i1, j2 - j1)
+                   for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+                       None, a, b, autojunk=False).get_opcodes() if tag != "equal")
+
+    la, lb = before.split("\n"), after.split("\n")
+    if len(la) != len(lb):
+        return span(before, after)
+    return sum(span(x, y) for x, y in zip(la, lb))
+
+
+def _diff_sample(before: str, after: str) -> str:
+    """바뀐 첫 자리 주변을 'before → after' 한 줄로 요약(감사 로그용)."""
+    i = 0
+    while i < min(len(before), len(after)) and before[i] == after[i]:
+        i += 1
+    a, b = max(0, i - 30), i + 30
+    return f"{before[a:b]!r} → {after[a:min(len(after), b)]!r}"
+
+
 # ── 섹션 타입 복구 ──────────────────────────────────────────────────
 def _classify_path(path: list[str]) -> str:
     """경로 전체로 섹션 타입 판정(schema.classify_path 우선, 없으면 자체 구현)."""
@@ -476,9 +918,18 @@ def fix_document(doc: dict, carry_forward: bool = True) -> tuple[dict, dict]:
         "abstract_cleaned": False, "abstract_caption_stripped": 0,
         "tables_dropped": 0, "tables_cleaned": 0, "figures_cleaned": 0,
         "sections_dropped": 0,
+        "encoding_chars_fixed": 0, "encoding_profile": [],
         "heading_samples": [], "reclass_samples": [], "caption_samples": [],
+        "encoding_samples": [],
     }
     leaked: list[str] = []
+
+    # 0) 인코딩 깨짐 복구 — 뒤 단계(자간 복원·캡션 분리·중복 판정)가 모두
+    #    문자열 비교에 기대므로 **가장 먼저** 글자를 바로잡아야 한다.
+    st["encoding_profile"] = sorted(encoding_profile(doc))
+    n_enc, enc_samples = repair_encoding(doc)
+    st["encoding_chars_fixed"] = n_enc
+    st["encoding_samples"] = enc_samples
 
     # 1) 초록 — 캡션 꼬리는 본문이 남을 때만 떼어낸다(초록 전체가 캡션인
     #    문서는 그대로 두는 편이 검색 진입점 손실보다 낫다).
@@ -584,7 +1035,7 @@ def fix_document(doc: dict, carry_forward: bool = True) -> tuple[dict, dict]:
         or st["paragraphs_dropped_dup"] or st["paragraphs_dropped_caption"]
         or st["paragraphs_dropped_empty"] or st["tables_dropped"]
         or st["tables_cleaned"] or st["figures_cleaned"] or st["abstract_cleaned"]
-        or st["sections_dropped"])
+        or st["sections_dropped"] or st["encoding_chars_fixed"])
     return doc, st
 
 

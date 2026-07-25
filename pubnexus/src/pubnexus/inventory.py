@@ -107,6 +107,15 @@ def probe_pdf(path: Path, scan_pages: int, scanned_threshold: int,
         rec["doi"] = doi
         rec["doi_source"] = "pdf" if doi else None
 
+        # 조판 때문에 DOI 가 줄 중간에서 끊기면 접두부만 뽑혀 조회가 전부 실패한다
+        # (예: '10.1200/JCO.18.\n01223' → 10.1200/jco.18). 접미가 짧아 의심스러울
+        # 때만 이어붙인 후보를 남겨 두고, 실제 확인은 뒷단계(_resolve)에서 한다.
+        if doi and len(doi.split("/", 1)[-1]) < 12:
+            cands = [c for c in utils.doi_candidates("".join(page_texts), doi_re)
+                     if c != doi]
+            if cands:
+                rec["doi_candidates"] = cands[:8]
+
         # 제목: 폰트 기반(1페이지 최대 폰트 텍스트) — 한국어/영어 모두 안정적
         try:
             rec["title_guess"] = _extract_title(doc[0]) if doc.page_count else ""
@@ -171,6 +180,50 @@ def assign_dup_groups(records: list[dict]) -> None:
         g = r["dup_group"]
         r["is_primary"] = g not in seen
         seen.add(g)
+
+
+def verify_truncated_dois(records: list[dict], cfg: dict, *,
+                          on_progress=None, should_cancel=None) -> int:
+    """줄바꿈으로 끊긴 DOI 를 이어붙인 후보로 교정한다. 교정 건수 반환.
+
+    probe_pdf 가 접미가 짧아 의심스러운 DOI 에만 doi_candidates 를 남겨 두었다.
+    여기서 Crossref 에 실제 존재를 물어 첫 번째로 확인되는 후보로 바꾼다.
+    확인된 뒤에는 doi_verified=True 를 남겨 재실행 시 다시 묻지 않는다.
+    네트워크가 안 되면 조용히 원래 DOI 를 유지한다(판정 불가 ≠ 없음).
+    """
+    targets = [r for r in records
+               if r.get("doi_candidates") and not r.get("doi_verified")]
+    if not targets:
+        return 0
+    md = cfg["metadata"]
+    work = utils.resolve(cfg["project"]["work_dir"])
+    http = HttpClient(email=md["email"], delay=md["request_delay_sec"],
+                      timeout=md["timeout_sec"])
+    n = 0
+    log(f"[0단계] 끊긴 DOI 의심 {len(targets)}편 → 후보 검증")
+    for j, r in enumerate(targets, 1):
+        if _cancelled(should_cancel):
+            log(f"[0단계] 취소 요청 — DOI 검증 {j - 1}/{len(targets)} 에서 중단")
+            break
+        old = r.get("doi")
+        try:
+            for cand in [old, *r["doi_candidates"]]:
+                ok = utils.verify_doi(cand, http)
+                if ok:
+                    if ok != old:
+                        r["doi"] = ok
+                        r["doi_source"] = "pdf+stitch"
+                        n += 1
+                        log(f"        {old} → {ok}")
+                    r["doi_verified"] = True
+                    break
+        except Exception as e:  # noqa: BLE001 — 한 편 실패가 전체를 막지 않는다
+            _record_failure(work, "inventory.doi_verify", r.get("file", old or ""), e)
+        _emit(on_progress, {"stage": "inventory", "phase": "doi_verify",
+                            "done": j, "total": len(targets)})
+    if n:
+        log(f"[0단계] DOI 교정 {n}편")
+    return n
 
 
 def resolve_missing_dois(records: list[dict], cfg: dict, *,
@@ -334,6 +387,11 @@ def build_manifest(config: dict | None = None, resume: bool = True, *,
             "message": f"취소됨 — {len(records)}/{total} 보존, 재실행 시 이어서 진행",
         })
         return records
+
+    if ident.get("verify_truncated_doi", True):
+        # 제목 매칭보다 먼저 — 잘린 DOI 를 살릴 수 있으면 제목 조회 자체가 불필요하다
+        verify_truncated_dois(records, cfg, on_progress=on_progress,
+                              should_cancel=should_cancel)
 
     if ident.get("resolve_missing_doi"):
         before = sum(1 for r in records if r.get("doi"))
