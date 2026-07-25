@@ -1,0 +1,5 @@
+pubnexus/data/
+__pycache__/
+*.pyc
+.venv/
+transferred_pdfs/

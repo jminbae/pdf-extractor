@@ -1,0 +1,13 @@
+# PubNexus — 파이프라인 의존성
+# 0~4단계 (인벤토리·메타데이터·XML/GROBID 파싱·정규화·QC)
+PyMuPDF>=1.24        # PDF 텍스트/메타데이터 추출
+requests>=2.31       # API 호출
+lxml>=5.0            # JATS/TEI XML 파싱
+PyYAML>=6.0          # 설정
+rapidfuzz>=3.0       # 제목 퍼지 매칭 / 중복 판정
+tqdm>=4.66           # 진행 표시
+
+# 5단계 이후(임베딩·검색)에서 추가 — 사용자 사양에 따라 선택 설치
+# sentence-transformers>=3.0
+# lancedb>=0.13
+# rank-bm25>=0.2

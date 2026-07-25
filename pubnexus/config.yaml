@@ -1,0 +1,66 @@
+# PubNexus 파이프라인 설정
+# 범용 배포 전제: 모든 경로·모델·엔드포인트를 여기서 조정한다.
+# 사용자 사양별 프리셋은 presets/ 참고.
+
+project:
+  input_dir: "전달용/예시"        # 처리할 PDF 폴더 (프로젝트 루트 기준 상대경로)
+  work_dir: "pubnexus/data"       # 산출물 루트
+
+identify:
+  # 1페이지 텍스트/메타데이터에서 DOI를 뽑는 정규식 (utils.DOI_RE 대체)
+  doi_regex: '10\.\d{4,9}/[-._;()/:\w]+'
+  scan_pages: 2                   # DOI 탐색할 앞쪽 페이지 수
+  scanned_char_threshold: 200     # 전체 글자수가 이 미만이면 스캔본 후보로 별도 큐
+  resolve_missing_doi: true       # DOI 미추출 시 Crossref 제목 매칭으로 보강
+  title_match_threshold: 90       # 제목 퍼지매칭 임계(0~100)
+
+metadata:
+  # NCBI/Crossref polite pool 식별용. 배포 시 각 사용자 이메일로 교체할 것.
+  email: "jminbae@gmail.com"
+  ncbi_api_key: ""                # 있으면 초당 10회까지 허용 (없으면 3회)
+  request_delay_sec: 0.34         # NCBI 무키 기준 초당 ~3회
+  timeout_sec: 30
+
+fulltext:
+  prefer_xml: true                # PMCID 있으면 PDF 대신 XML 사용
+  europepmc_base: "https://www.ebi.ac.uk/europepmc/webservices/rest"
+
+grobid:
+  # 프로덕션 권장: 로컬 Docker
+  #   docker run --rm -p 8070:8070 lfoppiano/grobid:latest-full
+  #   url: "http://localhost:8070"
+  # 파일럿/설치 전 임시: 공개 서버 (rate-limit 있음, 대량 금지)
+  #   url: "https://kermitt2-grobid.hf.space"
+  # 현재: 로컬 구동 GROBID (포터블 JDK17 + 소스빌드)
+  url: "http://localhost:8070"
+  consolidate_header: 1           # 헤더 서지정보 정합 (제목/저자/DOI)
+  include_raw_citations: 1        # 참고문헌 원문 보존
+  segment_sentences: 0
+  timeout_sec: 300
+
+chunk:
+  target_tokens: 550
+  max_tokens: 700
+  respect_section_boundary: true  # Methods/Results 경계 절대 침범 금지
+  context_header: true            # "[제목] > Results > ..." 접두 부착
+  exclude_references: true        # 참고문헌 목록은 청킹 제외 (API 메타로 보유)
+
+embedding:
+  # 사양별 프리셋에서 선택. 아래는 6GB VRAM 기본값.
+  model: "Qwen/Qwen3-Embedding-0.6B"
+  device: "cuda"                  # cuda | cpu
+  dim: 1024                       # Matryoshka 절단 가능(512로 저장공간 1/4)
+  batch_size: 16
+
+reranker:
+  model: "Qwen/Qwen3-Reranker-0.6B"
+  top_k_in: 50
+  top_k_out: 8
+
+search:
+  hybrid: true                    # BM25 + dense (RRF 병합) — 의학 약어에 필수
+  rrf_k: 60
+
+vectordb:
+  backend: "lancedb"
+  path: "pubnexus/data/lancedb"
