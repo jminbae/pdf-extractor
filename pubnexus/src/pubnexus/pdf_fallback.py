@@ -29,7 +29,18 @@
      라벨만 있는 블록은 바로 아래 인접 블록을 한 번만 이어붙여 재판정한다.
   C4 설명 첫 낱말이 소문자 서술동사·기능어(shows/lists/and/of…)면 탈락 →
      'Table 1 shows the characteristics…' 같은 본문 첫 문장을 배제한다.
-  C5 참고문헌 구역 안이면 탈락.
+     '(a) Clinical pictures…' 처럼 한 글자 패널 라벨은 검사에서 뺀다.
+  ※ '참고문헌 구역 안이면 탈락' 규칙은 실측 후 뺐다 — JAAD 는 그림 캡션 쪽이
+     참고문헌 **뒤**에 오고(7개 유실), Wiley 표 캡션은 러닝헤드 띠에 있어
+     'TABLE 2'/'TABLE 3' 이 반복 머리말로 오인됐다(4개 유실). 막아 준 오탐은 0.
+
+실측(정본 167편 대응 PDF)
+  · 캡션 615개 전수 육안 검토 — 캡션 아닌 것 0개.
+  · 본문이 부른 그림 21·표 12번호를 못 찾았으나, 그중 PDF 블록 머리에 캡션
+    문자열이 실제로 있던 것은 표 1건('Table 1 (continued)') 뿐이다. 나머지는
+    캡션 없는 그림(이미지만) 또는 별지 보조자료다.
+  · 위 615개는 보조자료 키 충돌을 고치기 전 수치다. 고친 뒤 9개(그림 5·표 4)가
+    더 살아나 624개가 됐다(아래 '보조자료' 항목).
 
 표 본문
   PyMuPDF `page.find_tables()` 는 이 코퍼스에서 쓸 수 없다(실측: 정본 표 59개
@@ -38,7 +49,42 @@
   묶어 행을 복원하고, 행 안의 가로 공백으로 열을 나눈다. 열이 서지 않으면
   격자를 포기하고 행 텍스트만 그대로 남긴다(누락보다 낫고, 오정렬은 표 안에 갇힌다).
 
+수리 전/후 실측(정본 167편에 대응하는 PDF 전수, 같은 스크립트)
+              그림   표  표본문   본문글자   정본회수(중앙/평균)  오염 front/refs/caption/running
+  수리 전       0     0     0   3,348,858    0.883 / 0.829     253 / 722 / 370 / 89
+  수리 후     328   296   245   2,322,385    0.865 / 0.840      76 /  95 /   4 / 21
+  ※ '오염' = 본문 문단이 소속·펀딩·판권 패턴이거나 참고문헌 항목이거나 캡션이거나
+    러닝헤드인 건수. **판정 규칙은 이 모듈 바깥에 따로 둔 독립 패턴으로 잰다** —
+    이 모듈의 _is_frontmatter/parse_caption 으로 자기 산출물을 채점하면 정의상
+    걸릴 수 없는 것만 남아 수치가 낙관적으로 나온다(같은 코퍼스에서 front 55 vs
+    253, caption 4 vs 370 으로 갈렸다).
+  ※ 수리 전의 본문 글자수가 큰 것은 참고문헌·머리말을 통째로 담고 있었기 때문이다.
+    글자수가 줄어도 **정본 본문의 회수는 늘었다** — 수리 전이 살렸는데 수리 후가
+    잃은 정본 6-gram 11,252개, 반대로 새로 회수한 것 12,243개(순증 +991).
+  ※ 남은 회수 손실의 최대 항목(41.6%)은 캡션 구간인데, 이는 손실이 아니라 이동이다
+    — 폴백은 캡션을 sections 가 아니라 figures/tables 에 담는다. 정본(GROBID)이
+    캡션을 본문 문단에 섞어 둔 탓에 회수율 지표에서만 손실로 보인다.
+
+캡션 문법은 4.6단계 figtab 과 규칙이 겹치지만 여기서는 좌표·폰트 증거를 같이
+쓰므로 별도로 둔다(안전망이 다른 단계에 의존하지 않게 한다). 두 구현을 167편
+전수 대조한 결과 불일치는 1건뿐이었다.
+
+적대적 검증에서 추가로 잡은 결함(각 항목의 근거는 해당 함수 docstring에 있다)
+  · _body_start 가 참고문헌 첫 항목 '1. Richard MA, …' 를 '1번 섹션'으로 오인
+    (10.1001/jamadermatol.2026.0294: 974줄 중 964줄을 버려 회수율 0.000 → 0.605).
+  · _table_region 이 단 사이 여백을 넘어 옆 단 본문을 표로 흡수
+    (10.1111/jdv.15936: 본문 21줄 → 회수율 0.791 → 0.895).
+  · 보조자료 키 충돌 — 'Figure 1' 과 'Supplementary Fig 1' 이 같은 키가 되어
+    보조자료 9개(그림 5·표 4)가 통째로 버려졌다.
+  · 참고문헌 쪽의 읽기순서가 뒤섞여 항목이 헤딩보다 앞에 오면 지워지지 않던 문제
+    (_mark_refs_geometric 로 좌표 기준 보완 — 오염 문단 105 → 95).
+  · missing_prose 가 참고문헌 항목·게재이력을 회수 구간으로 내보내던 문제
+    (_injectable 관문 — 표본 오염 3/75 → 0/72).
+
 한계(GROBID만 가능): 인용→참고문헌 링크, 참고문헌 목록 파싱.
+남은 위험: 다단 참고문헌 쪽에서 한 항목이 단 경계를 넘으면(전폭 줄) 밴드가
+끊겨 읽기순서가 뒤섞인다. _mark_refs_geometric 이 같은 쪽은 막아 주지만 근본
+수리는 _order_lines 의 밴드 규칙을 손대야 한다(오염 잔량 95문단 · 32편).
 """
 from __future__ import annotations
 
@@ -77,7 +123,10 @@ SECTION_KEYS = {
 FRONT_RE = re.compile(
     r'^(received:|accepted:|published|revised:|correspondence|corresponding author|'
     r'e-?mail|©|copyright|all rights reserved|funding information|grant/award|'
-    r'grant number|conflict of interest|orcid|keywords?\b|key words|'
+    # 'keywords' 는 뒤에 콜론이나 대문자 항목이 올 때만 front matter 로 본다 —
+    # 'keywords associated with the search strategy …' 같은 본문 문장을 지우면 안 된다.
+    r'grant number|conflict of interest|orcid|keywords?\b(?=\s*[:：]|\s+[A-Z])|'
+    r'key words\b(?=\s*[:：]|\s+[A-Z])|'
     r'how to cite|doi:|department of|division of|institute of|'
     r'college of medicine|©\s*\d{4})', re.I)
 # 저자명 나열 라인: "Bo Ri Kim | Kun Hee Lee | ..." 또는 콤마 구분 다수 이름
@@ -91,12 +140,14 @@ FRONT_EXTRA_RE = re.compile(
     r'accepted for publication|available online|first published|'
     r'issn\b|0190-9622|this article is protected|presented in part at|'
     r'j am acad dermatol \d{4}|conflicts? of interest|competing interests|'
-    r'data availability|data sharing statement|author contributions|'
-    r'additional contributions|role of the funder|open access:|'
-    r'funding\s*/?\s*support|funding statement|'
+    r'data availability\s*(?:statement|[:：])|data sharing statement|'
+    r'author contributions|additional contributions|role of the funder|'
+    r'open access\s*[:：]|funding\s*/?\s*support|funding statement|'
     r'this (?:study|work|research) was (?:sponsored|funded|supported) by|'
     r'medical writing (?:and editorial )?support|'
-    r'ethical approval|informed consent|'
+    # 'informed consent'·'ethical approval' 은 콜론이 붙은 표제일 때만.
+    # 'Informed consent was waived by the boards …' 는 방법 본문이다(실측 오탐).
+    r'ethical approval\s*[:：]|informed consent\s*[:：]|'
     r'https?://(?:dx\.)?doi\.org/)', re.I)
 # 소속 나열: 한 줄에 기관 토큰이 둘 이상이면 본문 문장이 아니다
 AFFIL_TOKEN_RE = re.compile(
@@ -124,6 +175,18 @@ REF_SIGN_RES = (
 
 # 구역이 '아직 참고문헌인가' 판정용(본문에도 흔한 'et al' 은 뺀 엄격 집합)
 REF_CONT_RES = tuple(rx for rx in REF_SIGN_RES if rx.pattern != r'\bet al\b')
+# 한 줄이 참고문헌 '항목'인가 판정용. 번호 패턴(REF_ITEM_RE)은 뺀다 — 번호는
+# 진짜 섹션 헤딩('1. Introduction')에도 있어서 그것만으로는 가를 수 없다.
+REF_ENTRY_RES = tuple(rx for rx in REF_SIGN_RES if rx is not REF_ITEM_RE)
+
+
+def _looks_ref_entry(text: str) -> bool:
+    """'1. Richard MA, Saint Aroman M, et al.' 같은 참고문헌 항목인가.
+
+    번호 뒤에 저자 표기·et al·연도;권:쪽·DOI 중 하나라도 있으면 참고문헌이다.
+    '1. Introduction' · '1 | INTRODUCTION' 같은 섹션 헤딩에는 하나도 없다.
+    """
+    return any(rx.search(text) for rx in REF_ENTRY_RES)
 
 
 def _ref_signatures(lines: list[dict], start: int, window: int = 12,
@@ -338,11 +401,6 @@ def _order_lines(lines: list[dict]) -> list[dict]:
     return out
 
 
-def _collect_lines(doc, body: float) -> list[dict]:
-    """본문 흐름용 라인(회전 제외)을 읽기순서로 수집."""
-    return _order_lines([l for l in _all_lines(doc, body) if l["rot"] == 0])
-
-
 # ── 머리말/꼬리말 ────────────────────────────────────────────────────
 _PAGENUM_RE = re.compile(r'^(?:[ivxlcdm]{1,7}|e?\d{1,4}(?:[-–]\d{1,4})?)$', re.I)
 
@@ -395,11 +453,29 @@ def _mark_first_page_footnote(lines: list[dict], body: float) -> int:
 
 
 # ── front matter ────────────────────────────────────────────────────
+def _is_author_list(text: str) -> bool:
+    """저자 나열 줄인가. 구분자·조각 모양까지 봐서 제목 오탐을 막는다.
+
+    'International, Multidisciplinary Electronic Delphi Survey' 처럼 쉼표가 든
+    섹션 제목이 저자 나열로 잡히면, 블록 전파 때문에 그 아래 방법 본문까지
+    통째로 사라진다(실측 10.1001/jamadermatol.2026.0294, 6줄).
+    """
+    t = (text or "").strip()
+    if len(t) >= 160 or not AUTHORLIST_RE.match(t):
+        return False
+    parts = [p.strip() for p in re.split(r'\s*[|,]\s*', t) if p.strip()]
+    if len(parts) < 2:
+        return False
+    if "|" in t or len(parts) >= 3:
+        return True
+    return all(len(p.split()) >= 2 for p in parts)   # 이름 두 토막 이상씩
+
+
 def _is_frontmatter(text: str) -> bool:
     t = text.strip()
     if FRONT_RE.match(t) or FRONT_EXTRA_RE.match(t):
         return True
-    if AUTHORLIST_RE.match(t) and len(t) < 160:
+    if _is_author_list(t):
         return True
     # 학위 토큰 2개 이상 + 쉼표 = 저자 나열 줄
     if len(t) < 240 and "," in t and len(DEGREE_RE.findall(t)) >= 2:
@@ -493,6 +569,35 @@ def _mark_references(lines: list[dict]) -> int:
     n = 0
     for ln in lines[start:end]:
         if not ln["skip"]:
+            ln["skip"] = "refs"
+            n += 1
+    n += _mark_refs_geometric(lines, start, end)
+    return n
+
+
+def _mark_refs_geometric(lines: list[dict], start: int, end: int) -> int:
+    """참고문헌 시작 줄과 **같은 쪽**에서 읽기순서상 앞으로 밀려난 항목을 마저 지운다.
+
+    참고문헌 구역은 flow(읽기순서) 위에서 연속이라고 가정하지만, 참고문헌 쪽은
+    한 항목이 단 경계를 넘나들어(전폭 줄) 밴드가 끊기는 일이 잦고 그러면 좌·우
+    단이 뒤섞여 항목 일부가 헤딩보다 **앞**에 온다(실측 10.1007/s00256-009-0872-x:
+    'References' 헤딩이 459줄 중 448번째로 잡혀 앞선 항목 40여 줄이 본문에 남았다).
+
+    좌표는 뒤섞이지 않으므로 같은 쪽 안에서 '헤딩보다 아래(또는 오른쪽 단)'인
+    줄만 추가로 지운다. **참고문헌 서명이 있는 줄로 한정**해 본문을 건드리지
+    않는다 — 별쇄본에서 참고문헌 뒤에 오는 다음 논문 본문은 서명이 없다.
+    """
+    head = lines[start]
+    page = head["page"]
+    n = 0
+    for i, ln in enumerate(lines):
+        if i >= start or ln["skip"] or ln["page"] != page:
+            continue
+        after = (ln["col"] > head["col"]
+                 or (ln["col"] == head["col"] and ln["y0"] >= head["y0"] - 1))
+        if not after or start >= end:
+            continue
+        if any(rx.search(ln["text"]) for rx in REF_CONT_RES):
             ln["skip"] = "refs"
             n += 1
     return n
@@ -616,7 +721,7 @@ def _blocks_of(lines: list[dict]) -> list[dict]:
 
 
 def _caption_blocks(blocks: list[dict]) -> list[dict]:
-    """캡션인 블록만 골라 낸다(C1~C5). 라벨만 있는 블록은 다음 블록을 한 번 잇는다."""
+    """캡션인 블록만 골라 낸다(C1~C4). 라벨만 있는 블록은 다음 블록을 한 번 잇는다."""
     caps = []
     for i, b in enumerate(blocks):
         # 참고문헌/머리말 구역이라는 이유로 캡션 후보를 버리지 않는다(실측 결과):
@@ -722,6 +827,12 @@ def _table_body(page, rect: tuple[float, float, float, float], rot: int,
 
 
 _PROSE_TAIL_RE = re.compile(r'[.?!][")\']?$')
+# 표 영역의 가로 띠 허용 오차(첫 블록에만 적용). 캡션 띠와 이만큼까지 떨어져
+# 있어도 같은 표의 머리행으로 본다. 실측 근거 두 개 사이에 들어가야 한다 —
+#   허용해야 함: 10.1111/jdv.19395 캡션↔머리행 6.1pt (body 10.0 → 8.0)
+#   막아야 함  : 10.1111/jdv.15936 단 사이 여백 11.3pt (body 9.0 → 7.2)
+TABLE_BAND_SLACK_EM = 0.8      # 본문 글자 크기 배수
+TABLE_BAND_SLACK_MAX = 10.0    # 절대 상한(pt)
 
 
 def _looks_prose(text: str) -> bool:
@@ -744,6 +855,17 @@ def _table_region(cap: dict, blocks: list[dict], body: float,
       · 다른 캡션 블록을 만나면
       · 진행 방향 간격이 본문 글자 2.2배를 넘으면(표와 본문 사이의 큰 공백)
       · 산문으로 보이는 블록이 연달아 2개 나오면(본문으로 되돌아온 것)
+
+    가로(띠) 방향은 두 단계로 본다.
+      · **첫 블록**(띠를 세우는 행)만 작은 슬랙을 허용한다. 캡션이 표보다 좁아
+        표 머리행이 캡션 오른쪽에서 시작하는 조판이 있다(실측 10.1111/jdv.19395:
+        캡션 x[45.7,261.8], 머리행 x[267.8,542.1] — 6.1pt 떨어져 있다).
+      · **띠가 선 뒤에는 실제 교집합을 요구한다.** 예전에는 ±12pt 슬랙을 끝까지
+        허용해서, 단 사이 여백이 11.3pt 인 2단 조판에서 옆 단이 0.7pt 차이로
+        통과했고 한 번 들어오자 띠가 그 단까지 넓어져 오른쪽 단 본문 21줄이
+        통째로 표에 빨려 들어갔다(실측 10.1111/jdv.15936). 이 조판에서 옆 단
+        블록은 표 머리행보다 아래에 있어 첫 블록이 될 수 없으므로 두 규칙에
+        모두 걸린다.
     """
     b = cap["block"]
     rot = b["rot"]
@@ -770,10 +892,12 @@ def _table_region(cap: dict, blocks: list[dict], body: float,
     picked: list[dict] = []
     cursor = adv1(b)
     prose_run = 0
+    slack = min(TABLE_BAND_SLACK_MAX, body * TABLE_BAND_SLACK_EM)
     for x in after:
         if (x["page"], x["blk"]) in cap_keys:
             break
-        if band1(x) < lo - 12 or band0(x) > hi + 12:
+        tol = slack if not picked else 0.0    # 슬랙은 띠를 세울 때만
+        if min(band1(x), hi) - max(band0(x), lo) < -tol:
             continue                                   # 다른 단의 블록
         if adv0(x) - cursor > body * 2.2:
             break
@@ -807,7 +931,10 @@ def _figures_tables(doc, lines: list[dict], body: float
     for c in caps:
         b = c["block"]
         num_tag = c["raw"] or str(c["num"])
-        key = (c["kind"], num_tag.upper())
+        # 보조자료 여부를 키에 넣는다. 넣지 않으면 'Figure 1' 과 'Supplementary
+        # Fig 1' 이 같은 키가 되어 뒤에 온 쪽이 통째로 버려진다(실측 9건:
+        # 10.5021/ad.23.151 은 Supplementary Fig 1~4 를 전부 잃었다).
+        key = (c["kind"], bool(c["supp"]), num_tag.upper())
         for ln in b["lines"]:
             if not ln["skip"]:
                 ln["skip"] = "caption"
@@ -888,7 +1015,7 @@ def _is_heading(ln: dict, body: float) -> bool:
     # alone: 같은 행에 형제가 있으면 표 셀이다 → 헤딩으로 승격하지 않는다
     if (emphasized and words <= 8 and t[0:1].isupper() and ln.get("alone", True)
             and not t.rstrip().endswith((".", ",", ";", ":"))
-            and not _is_frontmatter(t) and not AUTHORLIST_RE.match(t)
+            and not _is_frontmatter(t) and not _is_author_list(t)
             and sum(c.isdigit() for c in t) <= 4):
         return True
     return False
@@ -930,6 +1057,7 @@ def _join_lines(lines: list[dict]) -> str:
 
 PROSE_RUN_LINES = 4        # 본문 시작 판정: 이만큼 연속돼야 산문으로 본다
 PROSE_RUN_WORDS = 8        # 한 줄이 '산문 조각'으로 인정되는 최소 단어 수
+BODY_START_MAX_FRAC = 0.5  # '1번 섹션' 헤딩을 본문 시작으로 인정할 최대 위치
 
 
 def _first_prose_index(lines: list[dict], body: float) -> int:
@@ -991,16 +1119,30 @@ def _body_start(lines: list[dict], body: float, title: str = "") -> int:
     제목을 찾았으면(별쇄본) 그 지점이 곧 이 논문의 시작이므로 더 뒤로 밀지
     않는다 — 저자·소속은 front matter 규칙이 이미 걸러낸다. 밀었다가 짧은
     본문이 통째로 잘리는 실측 결함이 있었다(10.3904/kjim.2018.200).
+
+    **'1번 섹션' 후보는 검증한다.** 참고문헌 첫 항목 '1. Richard MA, …' 이
+    `^1[\\s.|)]\\s` 에 걸려 1번 섹션으로 오인되면 본문 시작이 문서 끝으로 밀려
+    본문이 통째로 사라진다(실측 10.1001/jamadermatol.2026.0294: 974줄 중
+    964줄을 버려 회수율 0.000). 그래서 (a) 참고문헌 서명이 있는 줄은 후보에서
+    빼고 (b) 후보는 문서 앞 절반 안에 있어야 한다 — 진짜 서론이 문서 후반부에
+    처음 나오는 조판은 없다.
     """
     floor = _title_index(lines, title)          # 제목보다 앞은 남의 논문
     rest = lines[floor:] if floor > 0 else lines
     base = floor if floor > 0 else 0
     headings = [(i, ln) for i, ln in enumerate(rest) if _is_heading(ln, body)]
+    limit = len(rest) * BODY_START_MAX_FRAC
     for i, ln in headings:
+        if i > limit:
+            break
+        if _looks_ref_entry(ln["text"]):        # 참고문헌 항목은 섹션이 아니다
+            continue
         core = re.sub(r'^\d+[\s.|)]*', '', ln["text"]).strip().lower().rstrip(":")
         if core.startswith(("introduction", "background")) or re.match(r'^1[\s.|)]\s', ln["text"]):
             return base + i
     for k, (i, ln) in enumerate(headings):   # 'abstract' 다음 헤딩
+        if i > limit:
+            break
         if re.sub(r'^\d+[\s.|)]*', '', ln["text"]).strip().lower().rstrip(":") == "abstract":
             return base + (headings[k + 1][0] if k + 1 < len(headings) else i)
     if base:
@@ -1044,9 +1186,11 @@ def _reconstruct(lines: list[dict], body: float, title: str = "") -> list[Sectio
             flush()
             if cur.paragraphs:
                 sections.append(cur)
-            title = clean_heading(ln["text"])   # 자간 아티팩트 복원(textfix)
-            cur = Section(path=[title], section_type=classify_section(
-                re.sub(r'^\d+[\s.|)]*', '', title)))
+            # 논문 제목 파라미터(title)를 덮어쓰지 않는다 — 지금은 _body_start 가
+            # 먼저 끝나 결과가 같지만, 순서를 바꾸는 순간 조용히 깨지는 자리다.
+            head = clean_heading(ln["text"])    # 자간 아티팩트 복원(textfix)
+            cur = Section(path=[head], section_type=classify_section(
+                re.sub(r'^\d+[\s.|)]*', '', head)))
             prev = None
             continue
         if _is_frontmatter(ln["text"]):
@@ -1091,6 +1235,25 @@ def _coverage(cand: str, ref: set[str]) -> float:
     return sum(1 for s in sh if s in ref) / len(sh)
 
 
+# missing_prose 전용 최종 관문. 이 함수의 결과는 상위가 정본에 **넣는** 데 쓰므로
+# 본문 경로보다 한 겹 더 엄격하게 막는다(모듈 원칙: 오염이 누락보다 나쁘다).
+# 콜론 없는 게재이력 줄('Received July 4, 2013, Revised …')은 FRONT_RE 가 콜론을
+# 요구해 비껴간다. 날짜 꼴까지 요구하므로 본문 문장에 걸릴 여지가 없다.
+_PUBHIST_RE = re.compile(
+    r'^(received|revised|accepted|submitted)\s+'
+    r'(?:\w+\s+\d{1,2},?\s*\d{4}|\d{1,2}\s+\w+\s+\d{4})', re.I)
+
+
+def _injectable(text: str) -> bool:
+    """이 구간을 정본에 넣어도 되는가(참고문헌 항목·게재이력·front matter 배제)."""
+    t = text.strip()
+    if _PUBHIST_RE.match(t) or _is_frontmatter(t):
+        return False
+    if REF_ITEM_RE.match(t) and _looks_ref_entry(t):     # '1. Bae JM, … et al.'
+        return False
+    return True
+
+
 def missing_prose(pdf_path: str | Path, canonical_text: str, *,
                   title: str = "", min_words: int = 25,
                   cover_cutoff: float = 0.5) -> list[dict]:
@@ -1106,7 +1269,10 @@ def missing_prose(pdf_path: str | Path, canonical_text: str, *,
     남은 문단 중 정본과의 n-gram 겹침이 cover_cutoff 미만인 것만 낸다.
     title 을 주면 별쇄본에 섞인 다른 논문을 제목 기준으로 잘라낸다(권장).
 
-    반환: [{"page", "text", "words", "coverage", "section"} …] (읽기순서)
+    반환: [{"text", "words", "coverage", "section"} …] (읽기순서)
+      · words   : 단어 수
+      · coverage: 정본과의 n-gram 겹침 비율(0=정본에 전혀 없음)
+      · section : 이 구간이 속한 섹션 제목(폴백이 인식한 것)
     """
     with fitz.open(str(pdf_path)) as doc:
         body, lines, flow = _prepare(doc)
@@ -1121,12 +1287,11 @@ def missing_prose(pdf_path: str | Path, canonical_text: str, *,
             nw = len(t.split())
             if nw < min_words or not _PROSE_TAIL_RE.search(t):
                 continue
-            if parse_caption(t, min_desc=1):
+            if parse_caption(t, min_desc=1) or not _injectable(t):
                 continue
             cov = _coverage(t, ref)
             if cov < cover_cutoff:
-                out.append({"page": None, "text": t, "words": nw,
-                            "coverage": round(cov, 3),
+                out.append({"text": t, "words": nw, "coverage": round(cov, 3),
                             "section": sec.path[0] if sec.path else ""})
     return out
 

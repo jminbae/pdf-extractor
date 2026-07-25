@@ -100,7 +100,10 @@ class Document:
 SECTION_TYPE_MAP = {
     "abstract": "abstract", "summary of the article": "abstract",
 
-    "background": "intro", "introduction": "intro", "primer": "intro",
+    # 'Primer' 는 서론이 아니라 Nature Reviews 의 **논문 종류** 이름이다.
+    #   매핑에 넣었더니 10.1038/s41572-025-00670-x 의 43개 절 중 26개가
+    #   intro 로 오분류됐다(Management·Diagnosis·Quality of life 까지 전부).
+    "background": "intro", "introduction": "intro",
     "epidemiology": "intro", "rationale": "intro", "objective": "intro",
     "objectives": "intro", "aim": "intro", "aims": "intro", "purpose": "intro",
 
@@ -275,7 +278,9 @@ def classify_path(path: list[str]) -> str:
     않을 때만 leaf → 조상 순으로 내려가며 시도한다.
     파일럿 실측에서 root 우선/leaf 우선이 갈린 9건 모두 root 우선이 옳았다.
     """
-    parts = [p for p in (path or []) if p and p.strip()]
+    # 러닝헤더·페이지꼬리말이 제목으로 승격된 것(예: '0123456789();:')은
+    # 경로에서 건너뛴다. 남겨 두면 그 잡음이 root 로 앉아 문서 전체의 분류를 끌고 간다.
+    parts = [p for p in (path or []) if p and p.strip() and not is_junk_title(p)]
     if not parts:
         return "other"
     st = classify_section(parts[0])

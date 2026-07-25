@@ -840,7 +840,21 @@ def repair_sections(doc: dict, carry_forward: bool = True) -> dict:
     GROBID TEI 가 계층 없는 평면 경로를 내보내는 탓에 하위 절이 부모를 잃고
     80%가 'other' 로 떨어지는 문제(D1)의 실질적 해법이다. 캐리포워드는
     백매터 정지어를 만나면 멈추므로 감사의 글이 Results 로 오염되지 않는다.
+
+    **캐리포워드는 IMRaD 논문에서만 쓴다.** 원저는 소절이 상위 절에 속하므로
+    이어받는 것이 옳지만, 종설(Nature Reviews Primer 등)은 Management·Diagnosis·
+    Quality of life 처럼 대등한 주제 절이 나열될 뿐이라 이어받으면 문서 전량이
+    앞 절의 타입으로 물든다(실측: 10.1038/s41572-025-00670-x 43개 절 중 26개가
+    intro 로 오분류). 그래서 제목만으로 직접 분류된 타입이 2종 이상이고 그중
+    methods 나 results 가 있을 때만 이어받는다.
     """
+    direct = {_classify_path([clean_heading(p) for p in (s.get("path") or [])])
+              for s in doc.get("sections") or []}
+    direct.discard("other")
+    direct.discard("back")
+    if not ({"methods", "results"} & direct and len(direct) >= 2):
+        carry_forward = False
+
     prev_type = "other"
     for sec in doc.get("sections") or []:
         path = [clean_heading(p) for p in (sec.get("path") or [])]
