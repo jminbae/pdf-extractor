@@ -571,15 +571,21 @@ class Grobid:
     def __init__(self, url: str, notify=None) -> None:
         self.url = (url or "http://localhost:8070").rstrip("/")
         self.notify = notify
-        self.state = "unknown"          # unknown | starting | ok | off
-        self.secs = 0
+        self.state = "unknown"          # unknown | installing | starting | ok | off
+        self.secs = 0                   # starting 은 경과초, installing 은 퍼센트
         self.ready = threading.Event()
+        # 결판이 났다는 신호(켜졌든 못 켰든). 처리 쪽은 이것을 기다린다 —
+        # 첫 실행에서 엔진을 내려받는 데 걸리는 시간은 회선에 달렸고, 정해진
+        # 초만 기다리다 폴백으로 내려가면 **말없이 저품질 산출물**이 나온다.
+        self.settled = threading.Event()
         self._t: threading.Thread | None = None
 
     def _set(self, st: str, secs: int = 0) -> None:
         self.state, self.secs = st, secs
         if st == "ok":
             self.ready.set()
+        if st in ("ok", "off"):
+            self.settled.set()
         if self.notify:
             self.notify(st, secs)
 
@@ -594,10 +600,29 @@ class Grobid:
         if gs.is_alive(self.url, timeout=3.0):
             self._set("ok")
             return
-        self._set("starting", 0)
+        # 이 PC 에 엔진이 없으면 ensure 가 내려받아 설치한다(최초 1회, 수백 MB).
+        # 그동안의 진행률과, 켜지기를 기다리는 경과초는 **다른 것**이다.
+        # 한 자리에 섞어 보내면 "준비 중 87초"처럼 거짓을 보여주게 된다.
+        installing = gs.find_root() is None
+        self._set("installing" if installing else "starting", 0)
         t0 = time.time()
+
+        last = [-1]
+
+        def on_progress(v: int) -> None:
+            nonlocal installing
+            if installing and v >= 100:
+                installing = False          # 다 받았다 → 이제 기동을 기다린다
+                self._set("starting", 0)
+                return
+            v = int(v)
+            if v == last[0]:
+                return                      # 1MB 마다 부른다. 값이 같으면 보내지 않는다
+            last[0] = v
+            self._set("installing" if installing else "starting", v)
+
         ok = gs.ensure(self.url, timeout=GROBID_WARMUP_SEC,
-                       on_progress=lambda s: self._set("starting", int(s)))
+                       on_progress=on_progress)
         if ok:
             utils.log(f"[app] 분석 엔진 준비됨 ({time.time() - t0:.0f}초)")
         else:
@@ -605,9 +630,21 @@ class Grobid:
         self._set("ok" if ok else "off")
 
     def wait(self, seconds: float) -> bool:
+        """켜졌거나 못 켰다는 **결판**이 날 때까지 기다린다.
+
+        정해진 초만 기다리고 넘어가면, 첫 실행에서 엔진을 내려받는 중인 PC 는
+        말없이 폴백으로 떨어져 저품질 산출물을 낸다(품질 0.96 → 0.65, 표 0).
+        내려받는 중이면 회선 사정만큼 더 기다린다.
+        """
         if self.state == "ok":
             return True
-        return self.ready.wait(seconds)
+        deadline = time.time() + seconds
+        while True:
+            if self.settled.wait(max(0.0, deadline - time.time())):
+                return self.state == "ok"
+            if self.state != "installing":
+                return False                # 기동만 기다리던 것이면 약속대로 끝낸다
+            deadline = time.time() + seconds  # 내려받는 중이면 더 준다
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -836,8 +873,10 @@ class App:
         times: list[float] = []
         i = 0
         try:
-            if self.grobid.state in ("starting", "unknown"):
-                self.prog(1, total, targets[0].name, "논문 분석기 준비 중", 0.0)
+            if self.grobid.state in ("starting", "installing", "unknown"):
+                msg = ("논문 분석기 설치 중(처음 한 번)"
+                       if self.grobid.state == "installing" else "논문 분석기 준비 중")
+                self.prog(1, total, targets[0].name, msg, 0.0)
                 self.grobid.wait(GROBID_WARMUP_SEC)
             cfg = utils.load_config()
             # 처리 순서를 통에 담아 둔다. 원장이 목록 뒤쪽 논문을 클릭하면
@@ -1920,12 +1959,18 @@ window.pnx={on(m){
         openPaper(S.sel,{noHist:true,top:0});}}
   }else if(m.kind==="grobid"){
     /* 원장은 GROBID 가 뭔지 알 필요가 없다. 준비 상태만 조용히 보이면 된다. */
-    const g=$("#gro");g.className=m.state==="ok"?"ok":m.state==="starting"?"starting":
+    const g=$("#gro");
+    g.className=m.state==="ok"?"ok":
+      (m.state==="starting"||m.state==="installing")?"starting":
       m.state==="off"?"off":"";
+    /* 내려받는 중(퍼센트)과 켜지기를 기다리는 중(초)은 다른 일이다. */
     g.lastChild.textContent=m.state==="ok"?"논문 분석기 준비됨":
+      m.state==="installing"?("논문 분석기 설치 중… "+(m.sec||0)+"%"):
       m.state==="starting"?("논문 분석기 준비 중… "+(m.sec||0)+"초"):
       m.state==="off"?"간이 분석으로 진행":"분석기 확인 중";
-    g.title=m.state==="off"
+    g.title=m.state==="installing"
+      ?"처음 한 번만 내려받습니다(약 435MB). 다음부터는 바로 켜집니다"
+      :m.state==="off"
       ?"논문 분석기를 켜지 못해 PDF 자체 텍스트만 씁니다 — 추출은 계속됩니다":"";
   }else if(m.kind==="folder"){
     S.hist=[];S.hidx=-1;S.mem={};S.sel=-1;S.cursor=-1;navBtns();

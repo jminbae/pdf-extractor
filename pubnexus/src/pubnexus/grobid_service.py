@@ -75,7 +75,14 @@ def _java(root: Path) -> Path | None:
 # ── 설치 위치 찾기 ──────────────────────────────────────────────────────
 #  PC 마다 다르다. 고정하지 않고 아래 순서로 본다.
 def install_root() -> Path:
-    """우리가 설치하는 자리. 관리자 권한이 필요없는 앱 저장소 아래."""
+    """우리가 설치하는 자리. 관리자 권한이 필요없는 앱 저장소 아래.
+
+    `GROBID_ROOT` 를 지정했으면 거기에 깐다 — 지정한 자리를 두고 딴 데 까는
+    프로그램은 신뢰할 수 없다.
+    """
+    env = os.environ.get("GROBID_ROOT")
+    if env:
+        return Path(env)
     from . import store
     return store.root() / "grobid"
 
@@ -92,7 +99,13 @@ def _candidate_roots() -> list[Path]:
             seen.add(str(q).lower())
             out.append(q)
 
-    add(os.environ.get("GROBID_ROOT"))      # 손으로 지정한 것이 언제나 우선
+    env = os.environ.get("GROBID_ROOT")
+    if env:
+        # 손으로 지정했으면 **그 자리만** 본다. 비어 있으면 거기에 설치한다.
+        # 우선순위로만 두면 "지정했는데 딴 데 것을 쓰는" 일이 생겨, 어느 엔진이
+        # 도는지 알 수 없게 된다(검증도 불가능하다).
+        add(env)
+        return out
     add(install_root())                     # 우리가 설치한 것
     add(GROBID_ROOT)                        # C:\grobid — 예전 방식으로 깔아 둔 것
     for drive in ("C:", "D:", "E:"):
