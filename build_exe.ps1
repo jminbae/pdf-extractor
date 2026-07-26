@@ -43,7 +43,12 @@ Push-Location (Join-Path $repo "pubnexus")
 try {
     $args = @(
         "-m", "PyInstaller", "--noconfirm",
-        "--onefile", "--windowed",
+        # onefile 이 아니라 **onedir** 이다. onefile 은 실행할 때 자기 안을 임시
+        # 폴더에 풀어 돌리는데, 그 동작이 악성코드와 구조가 같아 백신이 잡는다.
+        # 실제로 Defender 가 Trojan:Win32/Wacatac.H!ml 로 지웠다(2026-07-26).
+        # 배포는 이 폴더를 Inno Setup 으로 묶은 설치프로그램 하나로 한다
+        # (tools\installer.iss). 받는 쪽이 보는 것은 여전히 파일 하나다.
+        "--onedir", "--windowed",
         "--name", "PDF Extractor",
         "--distpath", "$work\dist", "--workpath", "$work\work", "--specpath", $work,
         "--paths", "src",
@@ -73,8 +78,30 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "빌드 실패 (exit $LASTEXITCODE)" }
 } finally { Pop-Location }
 
-$out = "$work\dist\PDF Extractor.exe"
-if (-not (Test-Path $out)) { throw "결과물이 없다: $out" }
-Copy-Item $out (Join-Path $repo "PDF Extractor.exe") -Force
-$mb = [math]::Round((Get-Item $out).Length / 1MB, 1)
-"완료 — PDF Extractor.exe ($mb MB) → $repo"
+$app = "$work\dist\PDF Extractor\PDF Extractor.exe"
+if (-not (Test-Path $app)) { throw "결과물이 없다: $app" }
+
+# ── 설치프로그램으로 묶는다 ─────────────────────────────────────────────
+# 리포에는 exe 를 두지 않는다. 배포는 Releases 의 설치프로그램 하나로 한다
+# (50MB 짜리를 커밋에 얹지 않고, 백신에 지워질 파일을 리포에 남기지 않는다).
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+          "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+          "$env:ProgramFiles\Inno Setup 6\ISCC.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc) {
+    $mb = [math]::Round(((Get-ChildItem (Split-Path $app) -Recurse -File |
+           Measure-Object Length -Sum).Sum / 1MB), 1)
+    "완료 — 프로그램 폴더 ($mb MB): $(Split-Path $app)"
+    "  설치프로그램을 만들려면 Inno Setup 6 이 필요하다:"
+    "  winget install --id JRSoftware.InnoSetup"
+    return
+}
+
+& $iscc "/DAppDir=$(Split-Path $app)" "/O$work" (Join-Path $repo "tools\installer.iss")
+if ($LASTEXITCODE -ne 0) { throw "설치프로그램 만들기 실패 (exit $LASTEXITCODE)" }
+
+$setup = "$work\PDF-Extractor-Setup.exe"
+if (-not (Test-Path $setup)) { throw "설치프로그램이 없다: $setup" }
+$mb = [math]::Round((Get-Item $setup).Length / 1MB, 1)
+"완료 — PDF-Extractor-Setup.exe ($mb MB): $setup"
+"  올리기:  gh release upload v1.0 `"$setup`" --clobber"
