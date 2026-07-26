@@ -24,6 +24,112 @@ from . import utils
 # 본문에 박힌 인용 마커. grobid_client._cite_marker 가 [15] 형태로 남긴다.
 _CITE_MARK_RE = re.compile(r"\[(\d{1,3})\]")
 
+# 본문 글자에서 그림·표를 부르는 말. refs_figure 가 비어 있는 문서(전체의 40%)를
+# 위해 글자로도 찾는다. 'Supplementary Figure 1' 은 본문 그림이 아니다.
+_FIG_MENTION_RE = re.compile(
+    r"(?<!supp)(?<!supplementary\s)\bfigs?\.?\s*(\d{1,2})\b|\bfigures?\s*(\d{1,2})\b",
+    re.I)
+_TAB_MENTION_RE = re.compile(r"\btables?\.?\s*(\d{1,2})\b", re.I)
+
+
+def _float_number(item: dict, kind: str) -> int | None:
+    """그림·표의 지면 번호. 캡션에서 읽고, 없으면 id 꼬리 숫자로."""
+    cap = (item.get("caption") or "").strip()
+    if cap:
+        try:
+            from .captions import parse_caption
+            got = parse_caption(cap, min_desc=0)
+        except Exception:                       # noqa: BLE001
+            got = None
+        if got and not got["supp"] and got["num"] is not None:
+            want = "fig" if kind == "fig" else "tab"
+            if got["kind"] == want:
+                return int(got["num"])
+    m = re.search(r"(\d{1,3})\s*$", str(item.get("id") or ""))
+    return int(m.group(1)) if m else None
+
+
+def _table_block(t: dict) -> list[str]:
+    return ["", f"**{t.get('caption') or t['id']}**", "",
+            t.get("markdown") or "*(표 본문을 뽑지 못했습니다)*"]
+
+
+def _figure_block(f: dict) -> list[str]:
+    """그림 한 장. 이미지가 있으면 **마크다운 그림**으로 낸다.
+
+    `![캡션](fig1.png)` — 경로는 `figures[].image` 그대로(상대경로)다. 화면 쪽은
+    이것을 받아 자기 주소로 바꿔 진짜 이미지를 건다. 마크다운 파일로 그냥 열어도
+    그림 폴더 옆에서는 보인다. 이미지가 없으면 캡션만 남긴다.
+    """
+    cap = (f.get("caption") or "").strip()
+    img = (f.get("image") or "").strip()
+    if img:
+        return ["", f"![{cap}]({img})"]
+    return ["", f"**{cap}**"] if cap else []
+
+
+class _FloatPlacer:
+    """그림·표를 **처음 인용된 문단 뒤**에 놓는다. 남은 것은 끝으로.
+
+    두 가지 단서를 쓴다.
+      · `paragraphs[].refs_figure`·`refs_table` — 파서가 붙여 준 것(60%·33%)
+      · 문단 글자의 'Figure 2'·'Table 1' — 위가 비어 있는 문서를 위한 보완
+    """
+
+    def __init__(self, doc: dict) -> None:
+        self._figs = list(doc.get("figures") or [])
+        self._tabs = list(doc.get("tables") or [])
+        self._left_f = {id(f): f for f in self._figs}
+        self._left_t = {id(t): t for t in self._tabs}
+        self._fig_by_id = {f.get("id"): f for f in self._figs if f.get("id")}
+        self._tab_by_id = {t.get("id"): t for t in self._tabs if t.get("id")}
+        self._fig_by_num: dict[int, dict] = {}
+        self._tab_by_num: dict[int, dict] = {}
+        for f in self._figs:
+            k = _float_number(f, "fig")
+            if k is not None:
+                self._fig_by_num.setdefault(k, f)
+        for t in self._tabs:
+            k = _float_number(t, "tab")
+            if k is not None:
+                self._tab_by_num.setdefault(k, t)
+
+    def after(self, para: dict, text: str) -> list[str]:
+        """이 문단이 처음 부른 그림·표의 마크다운. 없으면 빈 목록."""
+        out: list[str] = []
+        for t in self._pick(para.get("refs_table"), text,
+                            _TAB_MENTION_RE, self._tab_by_id,
+                            self._tab_by_num, self._left_t, "tab"):
+            out += _table_block(t)
+        for f in self._pick(para.get("refs_figure"), text,
+                            _FIG_MENTION_RE, self._fig_by_id,
+                            self._fig_by_num, self._left_f, "fig"):
+            out += _figure_block(f)
+        return out
+
+    @staticmethod
+    def _pick(refs, text, mention_re, by_id, by_num, left, kind) -> list[dict]:
+        found: list[dict] = []
+
+        def take(item) -> None:
+            # 캡션뿐이어도 본문 제자리에 놓는다 — 있다는 사실 자체가 정보다.
+            if item is not None and id(item) in left:
+                del left[id(item)]
+                found.append(item)
+
+        for rid in (refs or ()):
+            take(by_id.get(rid))
+        for m in mention_re.finditer(text or ""):
+            num = next((g for g in m.groups() if g), None)
+            if num:
+                take(by_num.get(int(num)))
+        return found
+
+    def leftovers(self) -> tuple[list[dict], list[dict]]:
+        """아직 놓지 못한 것들. 본문 순서를 지켜 돌려준다."""
+        return ([t for t in self._tabs if id(t) in self._left_t],
+                [f for f in self._figs if id(f) in self._left_f])
+
 # 본문 링크와 목록 앵커가 만나는 지점. 화면(HTML) 쪽도 이 규칙을 써야 한다.
 REF_ANCHOR_FMT = "ref-{}"
 
@@ -106,6 +212,28 @@ def _link_citations(text: str, known: set[int]) -> str:
     return _CITE_MARK_RE.sub(repl, text or "")
 
 
+def _is_debris(ref: dict) -> bool:
+    """번호 없는 항목 중 **잘린 파편**인가.
+
+    지면 목록을 항목 단위로 끊다가 한 항목을 중간에서 자르면, 앞 조각은 번호를
+    갖고 남고 뒷조각이 '번호 없는 새 항목'이 된다. 실측한 뒷조각들:
+
+        'o C. Exp Appl Acarol 2013;60:117-126.'          ← 저자명 꼬리부터
+        'JAMA Dermatol. 2017;153(7):666-674. doi:…'      ← 저널 정보만
+        'Phototherapy for Vitiligo … jamadermatology.com' ← 러닝헤더(문헌도 아니다)
+
+    뒷조각에 DOI 가 실려 있으면 iCite 가 짝을 찾아 그럴듯한 제목까지 붙여 주므로
+    **화면에서는 진짜 문헌처럼 보인다.** 원장이 "이건 중복 아니냐"고 본 것이 이것이다.
+
+    가르는 잣대는 **원문(raw)의 유무**다. 번호를 확정한 항목도 원문은 번호를 떼고
+    저자명부터 시작한다(실측 4,681건). 그러니 원문이 있는데 번호가 없다는 것은
+    '지면에서 항목 하나를 온전히 읽었는데 번호만 못 셌다'는 뜻이 되어야 하는데,
+    실측 295건이 전부 중간부터 시작하는 조각이었다 — 그런 항목은 없다.
+    원문이 없는 것(iCite 목록에만 있는 것)은 온전하므로 남긴다.
+    """
+    return bool((ref.get("raw") or "").strip())
+
+
 def _references_block(doc: dict) -> list[str]:
     """맨 아래 참고문헌 절. **번호로 시작하는 평범한 줄**로 낸다.
 
@@ -119,13 +247,12 @@ def _references_block(doc: dict) -> list[str]:
     if not refs:
         return []
     numbered = [r for r in refs if r.get("number")]
-    rest = [r for r in refs if not r.get("number")]
+    rest = [r for r in refs if not r.get("number") and not _is_debris(r)]
     out = ["", "## References"]
     for r in sorted(numbered, key=lambda x: x["number"]):
         out += ["", f'{r["number"]}. {format_reference(r)}']
     if rest:
         # 번호를 확정하지 못한 항목 — 버리지 않고 보여주되 링크는 걸지 않는다.
-        #   parsed  : 지면에 있으나 몇 번인지 셀 수 없었던 항목
         #   icite   : API 에는 있는데 지면 목록에서 못 찾은 항목
         #   foreign : 같은 지면에 실린 **옆 논문**의 참고문헌
         out += ["", "### 번호 미확정 (본문 링크 없음)"]
@@ -177,6 +304,10 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
     # 표/그림 id → 캡션 조회용
     tab_by_id = {t["id"]: t for t in doc.get("tables", [])}
     fig_by_id = {f["id"]: f for f in doc.get("figures", [])}
+
+    # 그림·표를 **처음 인용된 문단 바로 뒤**에 놓는다(실제 논문 조판과 같다).
+    # 맨 아래로 몰면 'Figure 2 에서 보듯' 을 읽을 때마다 끝으로 갔다 돌아와야 한다.
+    placer = _FloatPlacer(doc)
 
     # 목록에 실제로 있는 지면 번호만 링크 대상으로 삼는다.
     known_nums = {int(r["number"]) for r in (doc.get("references") or [])
@@ -231,22 +362,18 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
             # 인용은 본문 안에 [15] 로 이미 박혀 있다 → 문단 아래에 따로 붙이지
             # 않고, 그 자리에서 눌러 목록으로 뛸 수 있게 링크로 바꾼다.
             out += ["", _link_citations(text, known_nums)]
+            out += placer.after(p, text)        # 이 문단이 처음 부른 그림·표
 
-    # 표
-    if doc.get("tables"):
+    # 본문에서 한 번도 부르지 않은 것은 갈 자리가 없다 → 끝에 모은다.
+    left_t, left_f = placer.leftovers()
+    if left_t:
         out += ["", "## Tables"]
-        for t in doc["tables"]:
-            out += ["", f"**{t.get('caption') or t['id']}**", ""]
-            out.append(t.get("markdown") or "*(표 본문 추출 실패 — MinerU 보강 대상)*")
-
-    # 그림 (캡션만). 내부 id(fig_1)는 화면에 내보내지 않는다 — 캡션에 이미
-    # 'Fig 1.' 이 인쇄돼 있어 'fig_1: Fig 1.' 처럼 두 번 나온다.
-    if doc.get("figures"):
-        caps = [(f.get("caption") or "").strip() for f in doc["figures"]]
-        caps = [c for c in caps if c]
-        if caps:
-            out += ["", "## Figures"]
-            out += [f"- {c}" for c in caps]
+        for t in left_t:
+            out += _table_block(t)
+    if left_f:
+        blocks = [b for f in left_f for b in _figure_block(f)]
+        if blocks:
+            out += ["", "## Figures"] + blocks
 
     # 참고문헌 — 지면 번호 순서로 맨 아래. 본문 [15] 가 여기 15번으로 뛴다.
     out += _references_block(doc)

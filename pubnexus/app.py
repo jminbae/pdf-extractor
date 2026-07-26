@@ -98,6 +98,8 @@ _CITE_RE = re.compile(r"\[\s*\d{1,3}(?:\s*[–—,-]\s*\d{1,3})*\s*\]")
 _LINK_RE = re.compile(r"\[((?:[^\[\]\n]|\[[^\[\]\n]*\])*?)\]\((#[-\w.:]{1,60})\)")
 #  렌더러가 원시 앵커를 넣는 경로가 남아 있을 수 있다 — 글자로 찍히면 안 된다.
 _RAW_A_RE = re.compile(r'<a\s+(?:id|name)\s*=\s*"([-\w.:]{1,60})"\s*>\s*</a>', re.I)
+#  ![캡션](fig1.png) — 렌더러가 처음 인용된 문단 뒤에 놓아 준 그림 한 장.
+_IMG_LINE_RE = re.compile(r"^!\[(.*)\]\(([^)\s]+)\)$")
 _REFHEAD_RE = re.compile(r"references|참고\s*문헌|bibliography|works cited", re.I)
 _REFNUM_RE = re.compile(r"^\s*\[?(\d{1,3})[\].]\s")
 _INLINE_RE = re.compile(r"(\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*)")
@@ -227,6 +229,17 @@ def chips_html(meta: dict) -> str:
     return "".join(out)
 
 
+#  '그림 추출 4장(1234KB)' 처럼 **잘 된 일의 개수**만 알리는 기록. 만든 사람에게는
+#  쓸모가 있어도 논문을 읽는 원장에게는 아니다. 화면에서는 뺀다.
+#  문제를 알리는 기록(스캔본 의심·DOI 미식별·… 실패/생략)은 그대로 남긴다.
+_STAT_NOTE_RE = re.compile(
+    r"^(?:그림 추출 \d|문단 복원 \d|표 복원 \d|표 아닌 것 제거 \d|참고문헌 \d)")
+
+
+def _is_stat_note(s: str) -> bool:
+    return bool(_STAT_NOTE_RE.match(s.strip()))
+
+
 def fig_path(sha1: str, rel: str) -> Path | None:
     """저장소 그림 폴더 안의 파일 하나. 폴더 밖이거나 없으면 None.
 
@@ -295,69 +308,58 @@ def _img_size(fp: Path) -> tuple[int, int] | None:
         return None
 
 
-def figures_html(doc: dict, sha1: str) -> str:
-    """그림을 실제 이미지로. 파일이 아직 없으면 **빈 자리를 만들지 않는다.**
+def figure_html(cap: str, img: str, sha1: str) -> str:
+    """그림 한 장을 HTML 로. 렌더러가 `![캡션](fig1.png)` 로 놓은 자리에 들어간다.
 
-    `figures[].image` 는 store.figs_dir(sha1) 기준 상대경로다(절대경로도 받는다).
-    한 장도 실제로 없으면 빈 문자열을 돌려 마크다운의 캡션 목록을 그대로 쓰게 한다.
+    `img` 는 store.figs_dir(sha1) 기준 상대경로다(절대경로도 받는다). 파일이
+    아직 없으면 **빈 자리를 만들지 않고** 캡션만 남긴다.
     """
-    figs = doc.get("figures") or []
-    if not figs:
-        return ""
     from pubnexus import store
-    base = store.figs_dir(sha1)
-    items: list[tuple[str, str, tuple[int, int] | None]] = []
-    for f in figs:
-        cap = str((f or {}).get("caption") or "").strip()
-        img = str((f or {}).get("image") or "").strip()
-        url = ""
-        wh: tuple[int, int] | None = None
-        if img:
-            p = Path(img)
-            fp = p if p.is_absolute() else (base / img)
-            if utils.path_exists(fp):
-                url = ("/fig?s=" + urllib.parse.quote(sha1) +
-                       "&amp;f=" + urllib.parse.quote(img))
-                wh = _img_size(fp)
-        if url or cap:
-            items.append((url, cap, wh))
-    if not any(u for u, _, _ in items):
-        return ""                       # 아직 그림 파일이 없다 → 자리를 만들지 않는다
-    out = ["<h2>Figures</h2>"]
-    for url, cap, wh in items:
-        # 본문의 'Figure 1' 이 찾아올 착지점. 번호 읽기는 captions 것을 그대로
-        # 쓴다 — 여기서 정규식을 새로 쓰면 'Supplementary Figure 1' 과 'Figure 1'
-        # 이 같은 id 를 갖는다(둘 다 있는 논문이 흔하다).
-        anchor = ""
-        if cap:
-            from pubnexus import captions as _cap
-            got = _cap.parse_caption(cap, min_desc=0)
-            if got and got["kind"] == "fig" and got["num"] is not None \
-                    and not got["supp"]:
-                anchor = f' id="fig-{got["num"]}"'
-        out.append(f'<figure class="fig"{anchor}>')
-        if url:
-            # 크기를 함께 보낸다 — 자리를 미리 잡아야 링크 착지점이 밀리지 않는다.
-            dim = f' width="{wh[0]}" height="{wh[1]}"' if wh else ""
-            out.append(f'<img src="{url}"{dim} loading="lazy" alt="">')
-        if cap:
-            out.append(f"<figcaption>{_inline(cap)}</figcaption>")
-        out.append("</figure>")
+    url, wh = "", None
+    if img:
+        p = Path(img)
+        fp = p if p.is_absolute() else (store.figs_dir(sha1) / img)
+        if utils.path_exists(fp):
+            url = ("/fig?s=" + urllib.parse.quote(sha1) +
+                   "&amp;f=" + urllib.parse.quote(img))
+            wh = _img_size(fp)
+    if not url and not cap:
+        return ""
+    # 본문의 'Figure 1' 이 찾아올 착지점. 번호 읽기는 captions 것을 그대로 쓴다 —
+    # 여기서 정규식을 새로 쓰면 'Supplementary Figure 1' 과 'Figure 1' 이 같은
+    # id 를 갖는다(둘 다 있는 논문이 흔하다).
+    anchor = ""
+    if cap:
+        from pubnexus import captions as _cap
+        got = _cap.parse_caption(cap, min_desc=0)
+        if got and got["kind"] == "fig" and got["num"] is not None \
+                and not got["supp"]:
+            anchor = f' id="fig-{got["num"]}"'
+    out = [f'<figure class="fig"{anchor}>']
+    if url:
+        # 크기를 함께 보낸다 — 자리를 미리 잡아야 링크 착지점이 밀리지 않는다.
+        dim = f' width="{wh[0]}" height="{wh[1]}"' if wh else ""
+        out.append(f'<img src="{url}"{dim} loading="lazy" alt="">')
+    if cap:
+        out.append(f"<figcaption>{_inline(cap)}</figcaption>")
+    out.append("</figure>")
     return "".join(out)
 
 
-def md_to_html(md: str, chips: str = "", figs: str = "") -> str:
+def md_to_html(md: str, chips: str = "", sha1: str = "") -> str:
     """to_markdown() 결과를 읽기 화면용 HTML 로.
 
     앞머리(제목·서지·저자)는 본문과 다른 대접을 한다. pub_types 줄은 **버린다** —
     그 자리는 키워드(chips)가 쓴다.
+
+    그림은 렌더러가 `![캡션](fig1.png)` 로 **처음 인용된 문단 뒤에** 놓아 준다.
+    여기서 그것을 진짜 이미지로 바꾼다(`sha1` 은 그림 폴더를 찾는 열쇠).
     """
     lines = md.replace("\r\n", "\n").split("\n")
     out: list[str] = []
     i, n = 0, len(lines)
     seen_h2 = False          # 첫 ## 전까지가 앞머리
     put_chips = False        # 키워드 칩을 앞머리에 한 번만
-    drop_figs = False        # 그림 절을 이미지판으로 갈아끼우는 중
     in_refs = False          # 참고문헌 절: 항목마다 #ref-N 앵커를 붙인다
     ul: list[str] = []
 
@@ -403,11 +405,6 @@ def md_to_html(md: str, chips: str = "", figs: str = "") -> str:
         if h:
             flush_ul()
             lv = len(h.group(1))
-            drop_figs = False
-            if figs and h.group(2).strip().lower() == "figures":
-                out.append(figs)     # 캡션 목록 대신 진짜 그림
-                drop_figs = True
-                continue
             if lv >= 2 and not seen_h2 and chips and not put_chips:
                 out.append(chips)
                 put_chips = True
@@ -419,10 +416,15 @@ def md_to_html(md: str, chips: str = "", figs: str = "") -> str:
             continue
 
         if line.startswith("- "):
-            if not drop_figs:
-                ul.append(_inline(line[2:]))
+            ul.append(_inline(line[2:]))
             continue
         flush_ul()
+
+        img = _IMG_LINE_RE.match(line)          # ![캡션](fig1.png) → 진짜 그림
+        if img:
+            out.append(figure_html(img.group(1).strip(), img.group(2).strip(),
+                                   sha1))
+            continue
 
         if line.startswith(">"):
             out.append(f'<blockquote>{_inline(line.lstrip("> "))}</blockquote>')
@@ -830,8 +832,7 @@ class App:
             d = dict(d, body_text=d["sections"])
         from pubnexus import render
         md = render.to_markdown(d)
-        html = md_to_html(md, chips_html(d.get("meta") or {}),
-                          figures_html(d, sha))
+        html = md_to_html(md, chips_html(d.get("meta") or {}), sha)
 
         secs = d.get("body_text") or []
         npar = sum(len(s.get("paragraphs") or []) for s in secs)
@@ -845,7 +846,8 @@ class App:
                  f"표 {len(d.get('tables') or [])}",
                  f"그림 {len(d.get('figures') or [])}",
                  f"참고문헌 {len(d.get('references') or [])}"]
-        notes = list((d.get("qc") or {}).get("notes") or [])
+        notes = [x for x in ((d.get("qc") or {}).get("notes") or [])
+                 if not _is_stat_note(str(x))]
         if nchar < 500:
             notes.insert(0, f"본문이 {nchar}자뿐 — 스캔본이거나 추출 실패일 수 있다")
         return {
@@ -1237,8 +1239,8 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .pg{margin:0 auto 14px;background:#fff;position:relative;
   box-shadow:0 1px 2px rgba(20,28,40,.10),0 3px 12px rgba(20,28,40,.06)}
 .pg img{width:100%;height:100%;display:block}
-.pg::before{content:attr(data-n);position:absolute;right:-2px;bottom:-17px;
-  font-size:10px;color:var(--mut2)}
+/* 쪽마다 '3 / 15' 를 찍지 않는다 — 스크롤할 때마다 눈에 걸린다.
+   지금 몇 쪽인지는 위 도구줄(#pgno)이 이미 말해 준다. */
 .empty{display:flex;height:100%;align-items:center;justify-content:center;
   color:var(--mut2);font-size:12.5px;flex-direction:column;gap:8px;padding:20px;
   text-align:center}
@@ -1304,10 +1306,6 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 #refpop .go{font-family:var(--ui);font-size:11px;color:var(--mut);
   background:none;border:0;padding:4px 0 0;cursor:pointer;display:block}
 #refpop .go:hover{color:var(--accent);text-decoration:underline}
-#refpop .pic{display:block;max-width:100%;max-height:52vh;height:auto;
-  border:1px solid var(--line);border-radius:4px;background:#fff}
-#refpop .cap{font-family:var(--ui);font-size:11.5px;color:var(--mut);
-  line-height:1.55;margin-top:7px}
 #art a.figref{color:var(--accent);text-decoration:none;cursor:pointer;
   border-bottom:1px dotted rgba(90,120,170,.5)}
 #art a.figref:hover{border-bottom-style:solid}
@@ -1708,7 +1706,7 @@ function buildPdf(r){
     $("#pgno").textContent="—";return;}
   const frag=document.createDocumentFragment();
   S.pages.forEach((wh,i)=>{const d=document.createElement("div");
-    d.className="pg";d.dataset.i=i;d.dataset.n=(i+1)+" / "+S.pages.length;
+    d.className="pg";d.dataset.i=i;
     frag.appendChild(d);S.els.push(d);});
   sc.appendChild(frag);
   layout();
@@ -1757,7 +1755,8 @@ window.addEventListener("resize",()=>{clearTimeout(rt);
 
 /* ── 분할선 ───────────────────────────────────────────────
    폭을 px 로 굳히지 않고 **비율(fr)** 로 유지한다 — 창 크기를 바꿔도
-   1 : 1 : 2 로 잡아둔 배분이 그대로 따라간다. 분할선을 두 번 누르면 기본값. */
+   1 : 2 : 2 로 잡아둔 배분이 그대로 따라간다. 분할선을 두 번 누르면 기본값.
+   PDF 는 늘 **폭맞춤**이다(zoom=1 이 곧 폭맞춤. layout() 이 칸 너비에서 다시 잰다). */
 const DEF_COLS="minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,2fr)";
 (function(){
   let cur=null,x0=0,a0=0,b0=0,c0=0;
@@ -1772,11 +1771,15 @@ const DEF_COLS="minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,2fr)";
       const st=getComputedStyle(cols).gridTemplateColumns.split(" ").map(parseFloat);
       a0=st[0];b0=st[2];c0=st[4];
       document.body.style.cursor="col-resize";e.preventDefault();});});
+  let pend=false;
   window.addEventListener("mousemove",e=>{
     if(cur===null)return;
     const dx=e.clientX-x0;
     if(cur===0){const a=Math.max(MIN,Math.min(a0+b0-MIN,a0+dx));put(a,a0+b0-a,c0);}
-    else{const b=Math.max(MIN,Math.min(b0+c0-MIN,b0+dx));put(a0,b,b0+c0-b);}});
+    else{const b=Math.max(MIN,Math.min(b0+c0-MIN,b0+dx));put(a0,b,b0+c0-b);}
+    /* PDF 도 끄는 동안 같이 커진다. 놓을 때까지 옛 크기로 있으면 얼마나
+       넓혀야 할지 가늠이 안 된다. 프레임당 한 번만 다시 잡는다. */
+    if(!pend){pend=true;requestAnimationFrame(()=>{pend=false;layout(true);});}});
   window.addEventListener("mouseup",()=>{if(cur===null)return;
     cur=null;document.body.style.cursor="";layout(true);});
 })();
@@ -1805,32 +1808,13 @@ function refPop(a,t){
   popClose();
   const p=document.createElement("div");
   p.id="refpop";
-  const isFig=t.tagName==="FIGURE";
-  const num=isFig?(t.id||"").replace("fig-","")
-                 :(a.textContent||"").replace(/[\[\]\s]/g,"");
-  p.innerHTML=(num?'<span class="num">'+(isFig?"그림 ":"참고문헌 ")+num+'</span>':"")+
+  const num=(a.textContent||"").replace(/[\[\]\s]/g,"");
+  p.innerHTML=(num?'<span class="num">참고문헌 '+num+'</span>':"")+
               '<div class="body"></div>'+
-              '<button class="go" type="button">'+
-              (isFig?"그림 자리로 →":"목록에서 보기 →")+'</button>';
-  const body=p.querySelector(".body");
-  if(isFig){
-    /* 그림은 글이 아니라 그림을 보여줘야 한다. 원본을 옮기면 id 가 겹치므로
-       이미지 주소만 가져다 새로 만든다. */
-    const im=t.querySelector("img");
-    if(im){const c=document.createElement("img");c.className="pic";
-      /* 크기를 함께 넘긴다 — 안 넘기면 높이 0 으로 재고 나서 이미지가 도착해
-         카드가 화면 밖으로 밀린다(본문에서 겪은 그 문제와 같다). */
-      ["width","height"].forEach(k=>{const v=im.getAttribute(k);
-        if(v)c.setAttribute(k,v);});
-      c.src=im.getAttribute("src");body.appendChild(c);}
-    const cap=t.querySelector("figcaption");
-    if(cap){const d=document.createElement("div");d.className="cap";
-      d.textContent=(cap.textContent||"").trim();body.appendChild(d);}
-  }else{
-    /* 항목 글만 넣는다. 원본을 그대로 옮기면 id 가 겹쳐 다음 클릭이 팝업을
-       가리키게 된다 — textContent 로 담아 그런 일을 막는다. */
-    body.textContent=(t.textContent||"").trim();
-  }
+              '<button class="go" type="button">목록에서 보기 →</button>';
+  /* 항목 글만 넣는다. 원본을 그대로 옮기면 id 가 겹쳐 다음 클릭이 팝업을
+     가리키게 된다 — textContent 로 담아 그런 일을 막는다. */
+  p.querySelector(".body").textContent=(t.textContent||"").trim();
   p.querySelector(".go").onclick=()=>{popClose();jumpTo(t);};
   document.body.appendChild(p);
 
@@ -1912,8 +1896,9 @@ $("#doc").addEventListener("click",e=>{
   const id=a.getAttribute("href").slice(1);
   const t=document.getElementById(id);
   if(!t)return;
-  /* 참고문헌도 그림도 **읽던 자리에서** 보여준다. 아래로 뛰면 자리를 잃는다. */
-  if(id.indexOf("ref-")===0||id.indexOf("fig-")===0){refPop(a,t);return;}
+  /* 참고문헌만 팝업이다. 목록이 맨 아래라 뛰면 읽던 자리를 잃는다.
+     그림·표는 이제 처음 인용된 문단 뒤에 있으니 그냥 그리로 간다(가깝다). */
+  if(id.indexOf("ref-")===0){refPop(a,t);return;}
   jumpTo(t);
 });
 

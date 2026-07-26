@@ -628,6 +628,43 @@ def _caption_block(pg: _FigPage, cap: _cap.Caption
     return best if cover > 0.5 * _area(cap.bbox) else cap.bbox
 
 
+def _open_to_pieces(pg, box, raw, cbox, band_w: float, cands=()
+                    ) -> tuple[float, float, float, float]:
+    """조각이 실제로 그려진 데(raw)까지 세로로 연다. 막는 것이 있으면 그대로.
+
+    구간(y0~y1)은 캡션 좌표로 어림한 값이다. 그림이 그보다 크면 아래위가 잘린다.
+    다만 아무 근거 없이 넓히면 옆 글이나 다음 그림을 물어 온다. 그래서 **늘어날
+    띠 안에 막는 것이 하나도 없을 때만** 연다.
+      · 자기 캡션 덩어리 — 그림이 아니다
+      · 본문·제목·러닝헤드(_is_barrier) — 여기서 그림이 끝난다는 신호
+      · 다른 조각이 아닌 것은 보지 않는다(그림 속 글자는 이미 조각에 들어 있다)
+    """
+    x0, y0, x1, y1 = box
+    for want, idx in ((raw[3], 3), (raw[1], 1)):
+        down = idx == 3
+        if (want - y1 if down else y0 - want) <= 1.0:
+            continue
+        # 띠는 **실제로 이어지는 조각의 가로 범위**로만 잡는다. 박스 전체 폭으로
+        # 잡으면, 그림 옆(아래)에 세워 실은 캡션이 걸려 늘 막힌다 — 정작 그림과는
+        # 가로로 겹치지도 않는데.
+        ext = [p.rect for p in cands
+               if (p.rect[3] > y1 + 1.0 if down else p.rect[1] < y0 - 1.0)]
+        if not ext:
+            continue
+        sx0, sx1 = min(r[0] for r in ext), max(r[2] for r in ext)
+        strip = (sx0, y1, sx1, want) if down else (sx0, want, sx1, y0)
+        if cbox and _inter(strip, cbox) > 0:
+            continue
+        if any(_inter(blk["bbox"], strip) > 0 and _is_barrier(blk, band_w)
+               for blk in pg.blocks):
+            continue
+        if down:
+            y1 = want
+        else:
+            y0 = want
+    return (x0, y0, x1, y1)
+
+
 def _cut_out(box, cut) -> tuple[float, float, float, float]:
     """box 에서 cut 을 도려낸다 — 네 방향으로 잘라 **가장 넓게 남는** 쪽.
 
@@ -669,11 +706,27 @@ def _region(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption]
                  and _covered(p.rect, zone) >= PIECE_IN_REGION]
         if not cands:
             return None
+        # 캡션 뒤에 깔아 둔 배경 사각형은 그림이 아니다. 이것을 조각으로 세면
+        # 박스가 캡션 칸까지 넓어지고, 그 폭 때문에 아래위가 잘려 나온다
+        # (실측: 캡션을 옆에 세운 조판에서 원형 도해의 아래 67pt 가 사라졌다).
+        if cbox:
+            keep = [p for p in cands
+                    if not (p.kind == "draw" and _covered(cbox, p.rect) > 0.9)]
+            if keep:
+                cands = keep
         cands = _grow(cands, above)
-        box = _union([p.rect for p in cands])
+        raw = _union([p.rect for p in cands])
         # 구간 안으로 자른다(조각이 살짝 삐져나온 경우)
-        box = (max(box[0], lo), max(box[1], y0),
-               min(box[2], hi), min(box[3], y1))
+        box = (max(raw[0], lo), max(raw[1], y0),
+               min(raw[2], hi), min(raw[3], y1))
+        # 구간(y0~y1)은 캡션 자리로 어림한 값이라, 큰 그림은 아래위가 구간 밖으로
+        # 이어진다. 그대로 자르면 그림이 잘려 나온다(실측: 캡션을 옆에 세운 조판
+        # 에서 원형 도해의 아래 67pt 가 사라졌다). **막는 것이 없을 때만** 조각이
+        # 실제로 그려진 데까지 연다 — 근거 없이 넓히지는 않는다.
+        box = _open_to_pieces(pg, box, raw, cbox, max(1.0, bx1 - bx0), cands)
+        # 연 만큼 한계도 넓힌다. 안 그러면 아래에서 여유를 준 뒤 원래 구간으로
+        # 다시 자르면서 방금 연 것이 도로 잘려 나간다.
+        y0, y1 = min(y0, box[1]), max(y1, box[3])
         # 그림 속 글자(축 라벨·패널 문자·범례)를 되붙인다 — 장벽이 아니고,
         # 도형 덩어리와 **실제로 세로로 맞물리는** 블록만. 맞물리지 않는 것은
         # 위아래 10pt 안의 짧은 조각(패널 문자 'a'·'b')일 때만 받는다.
