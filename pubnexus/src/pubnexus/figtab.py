@@ -57,25 +57,24 @@
 2026-07-26 수정 — 캡션 출처를 captions.py 로 바꿨다(geometry=True 가 기본)
   위 '알려진 한계' 첫 항목(합본 지면 이웃 논문 캡션 유입)이 이 모듈을 파이프라인에
   연결하지 못한 이유였다. 이제 캡션 목록을 geometry_caption_index() → captions.py 에서
-  받는다. captions 는 PDF 를 읽기순서 스트림으로 펴고 이웃 편 DOI 도장·'To the Editor'
-  표지로 이 논문 구간을 끊어, 구간 밖 캡션을 후보에서 뺀다.
+  받는다. captions 는 캡션을 좌표·글꼴로 뽑고, **소속은 boundary.py 구간 판정**에
+  물어 구간 밖 캡션을 후보에서 뺀다.
   167편 전수 A/B 실측(같은 코드·같은 PDF, geometry 만 바꿈):
-      geometry=False  보충 118건 · **새로 들어간 이웃 논문 캡션 2건**
-                      (10.1016/j.jaad.2016.05.022 → 이웃 레터 …2016.05.014 의
-                       'Table II. Final diagnoses made by the consulting inpatient
-                       dermatology team' / 10.1111/bjd.21054 → tab_pdf1)
-      geometry=True   보충 111건 · **새로 들어간 이웃 논문 캡션 0건**
+      geometry=False  보충 118건 · **새로 들어간 이웃 논문 캡션 1건**
+                      (10.1016/j.jaad.2016.05.022 tab_pdf2 = 이웃 레터
+                       …2016.05.014 의 'Table II. Final diagnoses made by the
+                       consulting inpatient dermatology team')
+      geometry=True   보충 115건 · **새로 들어간 이웃 논문 캡션 0건**
   캡션 종료 경계도 글자 크기 등급으로 잡으므로 '캡션이 본문을 삼킴'이 함께 줄어든다.
 
 남은 한계(리포트로만 남긴다)
   · 정본에 **이미 들어 있는** 이웃 논문 캡션은 지우지 않는다(과잉 삭제 안 함 원칙).
-    167편에 14건 남아 있으며 근본 수리는 상류(GROBID 분할)에서 해야 한다.
-  · captions 의 구간 판정이 이 논문 캡션을 이웃 것으로 잘못 버리는 일이 있다
-    (실측 24건 중 7건 — 정본 본문 자체가 이웃 글로 오염돼 정박이 엉뚱한 토막을
-    가리키는 문서들. 예: 10.1111/bjd.21054 의 'Table 1. Prior use of levodopa …').
-    오염 0 을 지키려고 재현율을 내준 결과다.
+    걷어내기는 boundary.apply_to_parsed 담당이다.
+  · 별지(Online Repository)에 실린 이 논문의 보조자료 캡션은 boundary 가 다른
+    구간으로 보아 버린다(실측 10.1016/j.jaci.2014.02.038 의 FIG E1~E3 ·
+    TABLE E1~E3). 오염 0 을 지키려고 재현율을 내준 자리다.
   · 보충한 캡션과 **같은 글이 본문 문단에도 남아 있는** 문서가 있었다(GROBID 캡션
-    누수). 이제 captions.strip_captions_from_body 가 그 본문 쪽을 지운다(실측 18편 → 0).
+    누수). 이제 captions.strip_captions_from_body 가 그 본문 쪽을 지운다(19편 → 0).
 """
 from __future__ import annotations
 
