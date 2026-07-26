@@ -1315,7 +1315,8 @@ def _parse_open_doc(doc, path: Path, meta: dict) -> Document:
         doi=meta.get("doi"), pmid=meta.get("pmid"), pmcid=meta.get("pmcid"),
         title=meta.get("title", ""), authors=meta.get("authors", []),
         journal=meta.get("journal", ""), year=meta.get("year"),
-        mesh=meta.get("mesh", []), pub_types=meta.get("pub_types", []),
+        mesh=meta.get("mesh", []), keywords=meta.get("keywords", []),
+        pub_types=meta.get("pub_types", []),
         rcr=meta.get("rcr"), citation_count=meta.get("citation_count"),
         is_open_access=bool(meta.get("is_open_access")),
     )

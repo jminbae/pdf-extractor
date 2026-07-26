@@ -174,11 +174,93 @@ def _tei_paragraph(p_elem) -> dict:
             "fig_ids": _dedup(figs), "table_ids": _dedup(tables)}
 
 
-def _build_refs(root) -> tuple[dict[str, Reference], dict[str, str]]:
-    refs, rid_to_ref = {}, {}
+def _marker_numbers(root, keys: set[str]) -> dict[str, int]:
+    """본문 인용 마커에서 '목록 항목 ↔ 지면 번호' 대응을 거둔다.
+
+    GROBID 는 <ref type="bibr" target="#b14">15</ref> 처럼 **인쇄된 번호와 목록
+    항목을 함께** 내보낸다. 이 대응이 지면 번호의 1차 근거다 — listBibl 의 나열
+    순서보다 강하다.
+
+    실측(TEI 캐시 134편, 마커 3,879개):
+      · 나열 순서(index+1)와 이 대응이 어긋난 논문이 **22편**. 그중
+        10.25259/ijdvl_558_2021 은 listBibl 첫 항목 b0 이 지면 **21번**이었다
+        (PDF 13쪽 확인: 지면 1번은 Forman D 'Global burden of human papillomavirus
+        and related diseases' = b20). 나열 순서를 믿었으면 72개 전부 틀렸다.
+      · 이 대응은 130편 **전부 1:1**이었다 — 한 항목이 두 번호를 갖거나 한 번호에
+        두 항목이 붙은 사례 0건. 그래서 다대일이 나오면 데이터가 이상한 것이므로
+        그 항목을 버린다(추정으로 메우지 않는다).
+    """
+    votes: dict[str, dict[int, int]] = {}
+    for ref in root.iter("{*}ref"):
+        if ref.get("type") != "bibr":
+            continue
+        tgt = (ref.get("target") or "").lstrip("#")
+        if tgt not in keys:
+            continue
+        nums = _display_nums(ref.text)
+        if len(nums) != 1:                 # '[12-14]' 처럼 여러 개를 가리키는 마커는
+            continue                       # 어느 항목이 몇 번인지 말해주지 않는다
+        n = int(nums[0])
+        if 0 < n <= 999:
+            votes.setdefault(tgt, {}).setdefault(n, 0)
+            votes[tgt][n] += 1
+
+    best = {k: max(v.items(), key=lambda kv: (kv[1], -kv[0]))[0] for k, v in votes.items()}
+    # 한 번호를 두 항목이 주장하면 둘 다 버린다(어느 쪽이 맞는지 근거가 없다).
+    owners: dict[int, list[str]] = {}
+    for k, n in best.items():
+        owners.setdefault(n, []).append(k)
+    return {k: n for k, n in best.items() if len(owners[n]) == 1}
+
+
+def _fill_numbers(keys: list[str], anchors: dict[str, int]) -> dict[str, int]:
+    """마커로 확정한 번호(anchors) 사이의 빈칸을 **셀 수 있을 때만** 메운다.
+
+    한 번도 인용되지 않은 항목에는 마커가 없다(실측: 3,375개 중 993개). 그래도
+    앞뒤 항목의 번호가 확정돼 있고 **자리 수와 번호 수가 정확히 맞으면** 그 사이는
+    한 가지로만 셀 수 있다(예: 54번·56번 사이의 한 자리는 55번). 수가 맞지 않으면
+    GROBID 가 항목을 합치거나 흘린 구간이므로 **비워 둔다** — 번호 없는 항목은
+    본문에서 링크되지 않을 뿐이지만, 틀린 번호는 [15] 를 엉뚱한 논문으로 보낸다.
+    """
+    if not anchors:
+        return {}
+    idx = {k: i for i, k in enumerate(keys)}
+    known = sorted(((idx[k], n) for k, n in anchors.items() if k in idx))
+    out = dict(anchors)
+    used = set(anchors.values())
+
+    def claim(pos: int, num: int) -> None:
+        if num >= 1 and num not in used:
+            out[keys[pos]] = num
+            used.add(num)
+
+    # 사이 구간 — 자리 수 == 번호 수일 때만
+    for (i, ni), (j, nj) in zip(known, known[1:]):
+        if j - i > 1 and nj - ni == j - i:
+            for step in range(1, j - i):
+                claim(i + step, ni + step)
+    # 앞뒤 꼬리 — 가장 가까운 확정점의 간격을 그대로 이어 본다
+    i0, n0 = known[0]
+    for step in range(1, i0 + 1):
+        claim(i0 - step, n0 - step)
+    i1, n1 = known[-1]
+    for step in range(1, len(keys) - i1):
+        claim(i1 + step, n1 + step)
+    return out
+
+
+def _build_refs(root) -> tuple[list[Reference], dict[str, int]]:
+    """참고문헌을 **지면 순서·지면 번호**로 만든다.
+
+    반환: (번호순 Reference 목록, 로컬키 → 지면번호). 두 번째 값으로 본문
+    cited_refs 를 번호에 다시 잇는다.
+    """
     back = root.find(".//{*}back")
     if back is None:
-        return refs, rid_to_ref
+        return [], {}
+
+    parsed: list[Reference] = []
+    order: list[str] = []
     for bs in back.iter("{*}biblStruct"):
         key = bs.get(XMLID)
         if not key:
@@ -200,11 +282,37 @@ def _build_refs(root) -> tuple[dict[str, Reference], dict[str, str]]:
             w = date.get("when") or (date.text or "")
             if w[:4].isdigit():
                 year = int(w[:4])
+        journal = ""
+        j_el = bs.find(".//{*}title[@level='j']")
+        if j_el is not None:
+            journal = norm_text("".join(j_el.itertext()))
+        authors = []
+        for pers in bs.iter("{*}author"):
+            sur = pers.find(".//{*}surname")
+            fore = pers.find(".//{*}forename")
+            nm = " ".join(x for x in ((sur.text if sur is not None else ""),
+                                      (fore.text if fore is not None else "")) if x)
+            if nm.strip():
+                authors.append(norm_text(nm))
         raw = norm_text("".join(bs.itertext()))[:400]
-        refs[key] = Reference(key=key, doi=doi, pmid=pmid, title=title,
-                              year=year, raw=raw)
-        rid_to_ref[key] = doi or key
-    return refs, rid_to_ref
+        order.append(key)
+        parsed.append(Reference(key=key, doi=doi, pmid=pmid, title=title,
+                                year=year, journal=journal, authors=authors,
+                                raw=raw, source="parsed"))
+
+    numbers = _fill_numbers(order, _marker_numbers(root, set(order)))
+    if not numbers:
+        # 번호 인용이 아예 없는 논문(저자-연도식). listBibl 나열 순서가 곧 지면
+        # 순서이므로 자리번호를 준다 — 화면에 목록을 번호와 함께 보여주기 위해서다.
+        numbers = {k: i + 1 for i, k in enumerate(order)}
+    for r in parsed:
+        r.number = numbers.get(r.key)
+
+    # 번호가 있는 것은 번호순, 없는 것은 나열 순서 그대로 뒤에 붙인다.
+    # (없는 것을 중간에 끼워 넣으면 '몇 번쯤' 이라는 없는 주장을 하게 된다)
+    numbered = sorted((r for r in parsed if r.number), key=lambda r: r.number)
+    rest = [r for r in parsed if not r.number]
+    return numbered + rest, numbers
 
 
 def _tei_table_markdown(figure) -> str:
@@ -696,9 +804,25 @@ def _restore_hyphens(text: str, real: set[tuple[str, str]],
     return _JOINED_RE.sub(repl, text)
 
 
+def _cited_numbers(cited_keys, key_num: dict[str, int]) -> list[str]:
+    """문단의 인용을 **지면 번호**로 바꾼다.
+
+    두 경로를 다 쓴다. (a) GROBID 가 target 을 붙인 인용은 로컬키로 번호를 찾고,
+    (b) target 을 못 붙인 인용('num:15')은 인쇄된 번호가 마커에 그대로 있으므로
+    그걸 쓴다 — 실측 4,350개 중 250개가 (b)라서, 버리면 인용이 통째로 증발한다.
+    번호를 못 찾으면 **넣지 않는다**.
+    """
+    out: list[str] = []
+    for k in cited_keys or []:
+        n = k[4:] if str(k).startswith("num:") else key_num.get(k)
+        if n and str(n) not in out:
+            out.append(str(n))
+    return out
+
+
 def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     root = etree.fromstring(tei_bytes)
-    refs, rid_to_ref = _build_refs(root)
+    refs, key_num = _build_refs(root)
 
     figures: list[Figure] = []
     tables: list[Table] = []
@@ -736,9 +860,8 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
                 pcount[0] += 1
                 sec.paragraphs.append(Paragraph(
                     id=f"p{pcount[0]}", text=info["text"],
-                    # 해소는 target 이 실제로 있는 것만. 표시번호(num:N)는
-                    # cited_keys 에만 남긴다 — 추정으로 출처를 만들지 않는다.
-                    cited_refs=[rid_to_ref.get(k, k) for k in info["cited_targets"]],
+                    # 본문 [15] ↔ references[].number == 15 로 잇는다.
+                    cited_refs=_cited_numbers(info["cited_keys"], key_num),
                     cited_keys=info["cited_keys"],
                     refs_figure=info["fig_ids"], refs_table=info["table_ids"]))
             if sec.paragraphs:
@@ -838,7 +961,8 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
         doi=meta.get("doi"), pmid=meta.get("pmid"), pmcid=meta.get("pmcid"),
         title=meta.get("title", ""), authors=meta.get("authors", []),
         journal=meta.get("journal", ""), year=meta.get("year"),
-        mesh=meta.get("mesh", []), pub_types=meta.get("pub_types", []),
+        mesh=meta.get("mesh", []), keywords=meta.get("keywords", []),
+        pub_types=meta.get("pub_types", []),
         rcr=meta.get("rcr"), citation_count=meta.get("citation_count"),
         is_open_access=bool(meta.get("is_open_access")),
     )
@@ -864,7 +988,7 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
         source="grobid", source_file=source_file, meta=m,
         abstract=abstract, abstract_source=abstract_source,
         body_text=body_text, figures=figures, tables=tables,
-        references=list(refs.values()),
+        references=refs,
     )
     if _abs_info:
         doc.qc["abstract"] = _abs_info

@@ -24,7 +24,10 @@ SCHEMA_VERSION = "1.0"
 class Paragraph:
     id: str
     text: str
-    cited_refs: list[str] = field(default_factory=list)   # 해소된 DOI 또는 로컬 ref key
+    # 이 문단이 인용한 참고문헌의 **지면 번호**(문자열). 본문 마커 [15] ↔ "15" ↔
+    # references[].number == 15. 화면은 이것으로 #ref-15 앵커를 만든다.
+    # 지면 번호를 확정하지 못한 인용은 담지 않는다(틀린 링크보다 없는 링크가 낫다).
+    cited_refs: list[str] = field(default_factory=list)
     cited_keys: list[str] = field(default_factory=list)    # GROBID 로컬 키(#b14 등) 원본
     refs_figure: list[str] = field(default_factory=list)
     refs_table: list[str] = field(default_factory=list)
@@ -55,12 +58,27 @@ class Table:
 
 @dataclass
 class Reference:
-    key: str                           # 로컬 키 (b14 등)
+    """참고문헌 한 건. **번호·순서는 지면에서, 내용은 iCite 에서** 온다.
+
+    지면(파싱)과 API 를 한 레코드에 합치는 이유: 파싱한 서지정보는 못 믿지만
+    (DOI 순열 뒤섞임 등) **순서와 원문은 맞고**, iCite 의 내용은 정확하지만
+    **순서가 지면 번호가 아니다**. 둘을 제목·DOI 로 짝지어 합쳐야 본문 [15] 를
+    눌러 15번 참고문헌으로 갈 수 있다.
+    """
+    key: str                           # 로컬 키 (b14 / iid3316-bib-0001 / pmid…)
+    number: int | None = None          # **지면에 인쇄된 번호**(1부터). 모르면 None
     doi: str | None = None
     pmid: str | None = None
     title: str = ""
     year: int | None = None
-    raw: str = ""                      # 원문 문자열
+    journal: str = ""
+    authors: list[str] = field(default_factory=list)
+    raw: str = ""                      # 지면 원문 문자열(파싱 결과 — 순서의 근거)
+    # parsed        = 지면에서만 (iCite 짝을 못 찾음 — raw 만 믿을 수 있다)
+    # icite         = iCite 에만 (지면에서 못 찾음 — number 는 None)
+    # parsed+icite  = 짝지어 합침 (번호도 내용도 맞는 상태)
+    source: str = "parsed"
+    match: str = ""                    # 짝지은 근거: doi | title | author-year | ""
 
 
 @dataclass
@@ -72,7 +90,8 @@ class Meta:
     authors: list[str] = field(default_factory=list)
     journal: str = ""
     year: int | None = None
-    mesh: list[str] = field(default_factory=list)
+    mesh: list[str] = field(default_factory=list)      # 색인자가 붙인 통제어휘
+    keywords: list[str] = field(default_factory=list)  # 저자가 붙인 키워드
     pub_types: list[str] = field(default_factory=list)
     rcr: float | None = None           # iCite Relative Citation Ratio
     citation_count: int | None = None
@@ -185,6 +204,32 @@ BACK_MATTER = frozenset({
 _JUNK_RE = re.compile(
     r"^(?:0123456789|capsule summary|j am acad dermatol|downloaded (?:from|for)|"
     r"see related|this article is protected|copyright|licen[sc]e)", re.I)
+
+# 제목 자리에 올라온 **제목이 아닌 것**. 실측(10.1111/jdv.16653 등)에서 나온 것들:
+#   · 인용 번호만 남은 조각 — '13-15', '31', '77,82' (위첨자 인용이 절 제목으로 승격)
+#   · 표 본문 조각 — 'TABLE 2 Strength of Recommendation Taxonomy', 'SORT Definition', 'B'
+#   · 초록의 구조 라벨 — 'Results:', 'Conclusion:', 'KEYWORDS' (본문 절이 아니다)
+# 이런 것을 절 제목으로 두면 화면이 논문 구조가 아니라 파편 목록처럼 보인다.
+_NOT_A_HEADING_RE = re.compile(
+    r"^(?:"
+    r"[\d]{1,3}(?:\s*[,\-–]\s*\d{1,3})*"                 # 13-15 / 31 / 77,82
+    r"|[A-Za-z]"                                          # 낱글자 'B'
+    r"|(?:table|fig(?:ure)?)\s*\.?\s*[\dIVXivx]+\b.*"     # 표·그림 본문 조각
+    r"|keywords?"                                         # KEYWORDS
+    r"|(?:results?|conclusions?|background|objectives?|methods?|"
+    r"limitations?|importance|findings?|meaning)\s*:"     # 초록 구조 라벨(콜론이 표식)
+    r")$", re.I)
+
+
+def is_not_a_heading(title: str) -> bool:
+    """제목 자리에 올라왔지만 제목이 아닌 것인가.
+
+    **정규화 전 문자열로 본다.** `normalize_title` 이 끝의 콜론을 지워 버리는데,
+    초록 구조 라벨(`Results:` `Conclusion:`)과 진짜 절 제목(`Conclusion`)을
+    가르는 신호가 바로 그 콜론이다. 지우고 나면 둘을 구분할 수 없다.
+    """
+    t = re.sub(r"\s+", " ", (title or "").strip())
+    return bool(t) and bool(_NOT_A_HEADING_RE.match(t))
 
 # "3.", "3.1.", "IV.", "a)" 같은 번호 접두
 _NUM_PREFIX_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*|[ivxlcdm]+|[a-z])[.)]\s+", re.I)

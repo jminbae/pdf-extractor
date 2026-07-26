@@ -63,6 +63,12 @@ from pubnexus import utils  # noqa: E402
 
 GROBID_WARMUP_SEC = 180          # 콜드 기동 40~50초. 느린 디스크를 감안해 넉넉히.
 
+# single.py 가 올려보내는 단계 이름 → 사람 말. 0%·100% 에 멈춰 보이지 않게 한다.
+_STAGE = {
+    "probe": "PDF 읽는 중", "doi": "DOI 확인", "metadata": "서지정보 조회",
+    "fulltext": "본문 추출", "assemble": "정리·수리", "done": "저장",
+}
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  Markdown(뷰) → HTML
@@ -79,12 +85,24 @@ _ITALIC_LINE_RE = re.compile(r"^\*([^*].*[^*])\*$")
 _BOLD_LINE_RE = re.compile(r"^\*\*(.+)\*\*$")
 _SUB_RE = re.compile(r"^<sub>(.*)</sub>$")
 _CITE_RE = re.compile(r"\[\s*\d{1,3}(?:\s*[–—,-]\s*\d{1,3})*\s*\]")
+_LINK_RE = re.compile(r"\[([^\]\n]{1,80})\]\((#[-\w.:]{1,60})\)")
+_REFHEAD_RE = re.compile(r"references|참고\s*문헌|bibliography|works cited", re.I)
+_REFNUM_RE = re.compile(r"^\s*\[?(\d{1,3})[\].]\s")
 _INLINE_RE = re.compile(r"(\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*)")
 
 
 def _inline(text: str) -> str:
     """평문 한 줄 → HTML. 이스케이프가 먼저, 서식이 나중."""
     esc = _html.escape(text, quote=False)
+    # 앵커 링크 [15](#ref-15) 는 먼저 떼어 보관한다 — 뒤의 인용 서식이 건드리지
+    # 않게. 참고문헌 절이 들어오면 이 링크로 본문↔목록을 오간다.
+    kept: list[str] = []
+
+    def _link(m: re.Match) -> str:
+        kept.append(f'<a class="cite" href="{m.group(2)}">[{m.group(1)}]</a>')
+        return f"\x00{len(kept) - 1}\x00"
+
+    esc = _LINK_RE.sub(_link, esc)
     out: list[str] = []
     pos = 0
     for m in _INLINE_RE.finditer(esc):
@@ -98,7 +116,11 @@ def _inline(text: str) -> str:
             out.append("<em>" + _cites(s[1:-1]) + "</em>")
         pos = m.end()
     out.append(_cites(esc[pos:]))
-    return "".join(out)
+    html_out = "".join(out)
+    if kept:
+        html_out = re.sub(r"\x00(\d+)\x00",
+                          lambda m: kept[int(m.group(1))], html_out)
+    return html_out
 
 
 def _cites(s: str) -> str:
@@ -145,21 +167,71 @@ def _table_html(rows: list[str]) -> str:
     return "".join(out)
 
 
-def md_to_html(md: str) -> str:
+def chips_html(meta: dict) -> str:
+    """제목 아래 칩 = **키워드**. MeSH(색인자 부여)가 먼저, 저자 키워드가 뒤.
+
+    'Journal Article' 같은 pub_types 는 여기 넣지 않는다 — 원장이 키워드 자리로
+    쓴다고 못박았다(데이터에는 그대로 남는다). 두 무리는 색만 은은하게 다르고
+    모양·크기는 같다. 어느 쪽인지는 마우스를 올리면 알 수 있으면 충분하다.
+    많으면 앞의 것만 두고 접는다 — 화면을 잡아먹으면 안 된다.
+    """
+    def clean(xs) -> list[str]:
+        out, seen = [], set()
+        for x in xs or []:
+            t = re.sub(r"\s+", " ", str(x)).strip()
+            k = t.lower()
+            if t and k not in seen:
+                seen.add(k)
+                out.append(t)
+        return out
+
+    mesh = clean(meta.get("mesh"))
+    kws = [k for k in clean(meta.get("keywords")) if k.lower() not in
+           {m.lower() for m in mesh}]
+    items = [("mesh", "MeSH 용어", m) for m in mesh] + \
+            [("kw", "저자 키워드", k) for k in kws]
+    if not items:
+        return ""                                   # 빈 자리를 만들지 않는다
+    show = 12
+    out = ['<p class="chips">']
+    for n, (cls, tip, txt) in enumerate(items):
+        hid = " hid" if n >= show else ""
+        out.append(f'<span class="chip {cls}{hid}" title="{tip}">'
+                   f'{_html.escape(txt)}</span>')
+    if len(items) > show:
+        out.append(f'<button class="chipmore">+{len(items) - show}개 더</button>')
+    out.append("</p>")
+    return "".join(out)
+
+
+def md_to_html(md: str, chips: str = "") -> str:
     """to_markdown() 결과를 읽기 화면용 HTML 로.
 
-    앞머리(제목·서지·저자·pub_types)는 본문과 다른 대접을 한다 — 사용자가
-    빨간 코드칩으로 나오던 pub_types 를 보기 싫다고 했다. 회색 라벨로 눕힌다.
+    앞머리(제목·서지·저자)는 본문과 다른 대접을 한다. pub_types 줄은 **버린다** —
+    그 자리는 키워드(chips)가 쓴다.
     """
     lines = md.replace("\r\n", "\n").split("\n")
     out: list[str] = []
     i, n = 0, len(lines)
     seen_h2 = False          # 첫 ## 전까지가 앞머리
+    put_chips = False        # 키워드 칩을 앞머리에 한 번만
+    in_refs = False          # 참고문헌 절: 항목마다 #ref-N 앵커를 붙인다
     ul: list[str] = []
+
+    def _li(x: str) -> str:
+        """참고문헌 항목이면 '15.' 을 읽어 id=ref-15 를 달아준다.
+
+        본문 [15] 링크가 이 항목으로 내려오게 하는 착지점이다. 렌더러가
+        앵커를 직접 넣어주면 그쪽이 우선이고, 없을 때 여기서 보완한다.
+        """
+        if not in_refs or 'id="ref-' in x:
+            return f"<li>{x}</li>"
+        m = _REFNUM_RE.match(re.sub(r"<[^>]+>", "", x))
+        return f'<li id="ref-{m.group(1)}">{x}</li>' if m else f"<li>{x}</li>"
 
     def flush_ul() -> None:
         if ul:
-            out.append("<ul>" + "".join(f"<li>{x}</li>" for x in ul) + "</ul>")
+            out.append("<ul>" + "".join(_li(x) for x in ul) + "</ul>")
             ul.clear()
 
     while i < n:
@@ -186,7 +258,11 @@ def md_to_html(md: str) -> str:
         if h:
             flush_ul()
             lv = len(h.group(1))
+            if lv >= 2 and not seen_h2 and chips and not put_chips:
+                out.append(chips)
+                put_chips = True
             seen_h2 = seen_h2 or lv >= 2
+            in_refs = bool(_REFHEAD_RE.search(h.group(2)))
             txt = _inline(h.group(2)).replace(
                 "›", '<span class="crumb">›</span>')
             out.append(f"<h{min(lv, 5)}>{txt}</h{min(lv, 5)}>")
@@ -211,11 +287,11 @@ def md_to_html(md: str) -> str:
             if m:
                 out.append(f'<p class="bib">{_inline(m.group(1))}</p>')
                 continue
-            if _ONLY_CODE_RE.match(line):               # pub_types
-                tags = re.findall(r"`([^`]+)`", line)
-                out.append('<p class="tags">' + "".join(
-                    f'<span class="tag">{_html.escape(t)}</span>'
-                    for t in tags) + "</p>")
+            if _ONLY_CODE_RE.match(line):
+                # pub_types 줄 — 화면에서는 버리고 그 자리에 키워드를 놓는다
+                if chips and not put_chips:
+                    out.append(chips)
+                    put_chips = True
                 continue
             out.append(f'<p class="byline">{_inline(line)}</p>')
             continue
@@ -373,7 +449,11 @@ class Grobid:
 class App:
     def __init__(self) -> None:
         self.window = None
-        self.cfg = utils.load_config()
+        try:
+            self.cfg = utils.load_config()
+        except Exception as e:  # noqa: BLE001 — 설정이 없어도 화면은 떠야 한다
+            utils.log(f"[app] config.yaml 을 읽지 못했다({e}) — 기본값으로 시작")
+            self.cfg = {}
         self.folder: Path | None = None
         self.pdfs: list[Path] = []
         self.jmap: dict[str, Path] = {}          # PDF 파일명 → JSON 경로
@@ -493,6 +573,7 @@ class App:
             d = dict(d, body_text=d["sections"])
         from pubnexus import render
         md = render.to_markdown(d)
+        html = md_to_html(md, chips_html(d.get("meta") or {}))
 
         secs = d.get("body_text") or []
         npar = sum(len(s.get("paragraphs") or []) for s in secs)
@@ -510,7 +591,7 @@ class App:
         if nchar < 500:
             notes.insert(0, f"본문이 {nchar}자뿐 — 스캔본이거나 추출 실패일 수 있다")
         return {
-            "extracted": True, "html": md_to_html(md),
+            "extracted": True, "html": html,
             "info": " · ".join(bits), "notes": notes,
             "paper_id": str(d.get("paper_id") or ""), "json": str(jp),
             "thin": nchar < 500,
@@ -528,27 +609,26 @@ class App:
     def _work(self, targets: list[Path]) -> None:
         from pubnexus import single
         total = len(targets)
-        self.push("run", {"on": True})
+        self.push("run", {"on": True, "total": total})
         fails: list[tuple[str, str]] = []
+        times: list[float] = []
+        i = 0
         try:
             if self.grobid.state in ("starting", "unknown"):
-                self.status("논문 분석기 준비 중 — 준비되면 시작합니다",
-                            pct=0, busy=True, force=True)
+                self.prog(1, total, targets[0].name, "논문 분석기 준비 중", 0.0)
                 self.grobid.wait(GROBID_WARMUP_SEC)
             cfg = utils.load_config()
             for i, p in enumerate(targets, 1):
                 if self.cancel.is_set():
-                    self.status(f"중지됨 — {i - 1}/{total}편까지 저장",
-                                pct=100.0 * (i - 1) / max(total, 1), force=True)
                     break
-                head = f"[{i}/{total}] {p.name}"
-                self.status(head, pct=100.0 * (i - 1) / max(total, 1),
-                            busy=True, force=True)
+                t0 = time.time()
+                self.prog(i, total, p.name, "준비", 0.0, times)
 
-                def prog(ev: dict, _h=head, _i=i, _t=total) -> None:
-                    frac = (_i - 1 + (ev.get("done") or 0) / max(ev.get("total") or 5, 1))
-                    self.status(f"{_h} — {ev.get('message') or ev.get('stage') or ''}",
-                                pct=100.0 * frac / max(_t, 1), busy=True)
+                def prog(ev: dict, _i=i, _n=p.name) -> None:
+                    steps = max(ev.get("total") or 5, 1)
+                    self.prog(_i, total, _n, _STAGE.get(ev.get("stage") or "",
+                                                        ev.get("message") or ""),
+                              (ev.get("done") or 0) / steps, times)
 
                 try:
                     # DOI 는 추출이 끝나야 안다 → 문서를 받아 여기서 이름을 짓는다.
@@ -557,20 +637,43 @@ class App:
                     dest = p.parent / f"{utils.slug(pid)}.json"
                     utils.write_json(dest, doc)
                     self.jcache.pop(str(dest), None)
+                    self.jmap[p.name] = dest
+                    self.push("mark", {"name": p.name})   # 목록에 즉시 ✓
                 except Exception as e:  # noqa: BLE001 — 파일별 격리
                     fails.append((p.name, f"{type(e).__name__}: {e}"))
                     utils.log(f"[app] 실패 {p.name}: {type(e).__name__}: {e}")
+                times.append(time.time() - t0)
         except Exception as e:  # noqa: BLE001
             fails.append(("(전체)", f"{type(e).__name__}: {e}"))
             utils.log(traceback.format_exc())
         finally:
+            stopped = self.cancel.is_set()
             self.scan_jsons()
-            self.push("run", {"on": False, "files": self.file_rows(),
-                              "fails": [{"name": n, "why": w} for n, w in fails[:20]],
-                              "nfail": len(fails)})
-            done = total - len(fails)
-            self.status(f"완료 {done}편" + (f" · 실패 {len(fails)}편" if fails else ""),
-                        pct=100.0, busy=False, force=True)
+            self.push("run", {
+                "on": False, "files": self.file_rows(), "stopped": stopped,
+                "done": max(i - (1 if stopped else 0), 0) - len(fails),
+                "total": total, "nfail": len(fails),
+                "fails": [{"name": n, "why": w} for n, w in fails[:30]]})
+
+    def prog(self, i: int, total: int, name: str, stage: str, sub: float,
+             times: list[float] | None = None) -> None:
+        """진행 표시 한 번. 남은 시간은 **믿을 만할 때만** 보낸다.
+
+        틀린 예측은 없느니만 못하다 — 다섯 편 넘게 처리해 실측이 쌓인 뒤에,
+        그것도 중앙값으로만 낸다(어쩌다 오래 걸린 한 편에 끌려가지 않게).
+        """
+        now = time.time()
+        if now - self._last_push < 0.12:
+            return
+        self._last_push = now
+        eta = None
+        if times and len(times) >= 5:
+            s = sorted(times[-12:])
+            med = s[len(s) // 2]
+            eta = int(med * (total - i + 1))
+        self.push("prog", {"i": i, "total": total, "name": name, "stage": stage,
+                           "pct": 100.0 * (i - 1 + min(max(sub, 0.0), 1.0)) / max(total, 1),
+                           "eta": eta})
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -679,7 +782,6 @@ class Api:
 
     def cancel(self) -> dict:
         self._app.cancel.set()
-        self._app.status("중지 요청됨 — 현재 논문이 끝나면 멈춥니다", force=True)
         return {"ok": True}
 
     def state(self) -> dict:
@@ -700,7 +802,7 @@ class Api:
 # ══════════════════════════════════════════════════════════════════════
 INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="ko"><head><meta charset="utf-8">
-<title>논문 추출 검수</title>
+<title>PDF Extractor</title>
 <style>
 :root{
   --bg:#f4f5f7; --panel:#fff; --line:#e7e9ee; --line2:#f0f1f4;
@@ -713,7 +815,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--ink);font-family:var(--ui);
-  font-size:13px;overflow:hidden;-webkit-font-smoothing:antialiased}
+  font-size:13px;overflow:hidden;-webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;height:100%}   /* 높이를 숫자로 빼지 않는다 */
 button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 ::-webkit-scrollbar{width:11px;height:11px}
 ::-webkit-scrollbar-thumb{background:#cfd4db;border-radius:8px;
@@ -723,7 +826,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 ::-webkit-scrollbar-track{background:transparent}
 
 /* ── 위쪽 막대 ───────────────────────────────────────────── */
-#top{display:flex;align-items:center;gap:10px;padding:9px 14px;
+#top{flex:none;display:flex;align-items:center;gap:10px;padding:9px 14px;
   background:var(--panel);border-bottom:1px solid var(--line)}
 .btn{padding:6px 13px;border-radius:7px;border:1px solid var(--line);
   background:#fff;color:var(--ink2);font-size:12.5px;line-height:1.4;
@@ -736,9 +839,10 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .btn.primary[disabled]{background:var(--accent);opacity:.35}
 .btn.ghost{border-color:transparent;color:var(--mut)}
 .btn.ghost:hover{background:#f2f4f7;color:var(--ink2)}
-#path{flex:1;min-width:0;color:var(--mut);font-size:12px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;
-  text-align:left}
+#path{flex:1;min-width:0;color:var(--ink2);font-size:12.5px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#path b{font-weight:600}
+#path span{color:var(--mut2);font-size:11.5px;margin-left:7px}
 #gro{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);
   padding:3px 9px;border-radius:20px;background:#f4f5f7;white-space:nowrap}
 #gro i{width:7px;height:7px;border-radius:50%;background:var(--mut2);
@@ -747,20 +851,25 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
   animation:pulse 1.1s ease-in-out infinite} #gro.off i{background:#d05a5a}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 
-/* ── 진행 막대 ───────────────────────────────────────────── */
-#prog{height:0;overflow:hidden;background:var(--panel);
-  border-bottom:1px solid transparent;transition:height .16s ease}
-#prog.on{height:34px;border-bottom-color:var(--line)}
-#prog .in{display:flex;align-items:center;gap:12px;padding:0 14px;height:34px}
-#bar{flex:1;height:4px;border-radius:3px;background:#e9ecf1;overflow:hidden}
-#bar span{display:block;height:100%;width:0;background:var(--accent);
-  border-radius:3px;transition:width .2s ease}
-#ptext{font-size:11.5px;color:var(--mut);white-space:nowrap;max-width:52%;
+/* ── 진행 표시 — 일이 없으면 자리를 차지하지 않는다 ────────── */
+#prog{flex:none;height:0;overflow:hidden;background:var(--panel);
+  border-bottom:1px solid transparent;transition:height .18s ease}
+#prog.on{height:41px;border-bottom-color:var(--line)}
+#prog .in{display:flex;align-items:center;gap:14px;padding:0 15px;height:38px}
+#pcount{font-size:12px;color:var(--ink2);font-variant-numeric:tabular-nums;
+  white-space:nowrap}
+#pstage{font-size:11.5px;color:var(--mut);white-space:nowrap}
+#pname{flex:1;min-width:0;font-size:11.5px;color:var(--mut);white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis}
+#peta{font-size:11.5px;color:var(--mut2);white-space:nowrap}
+#bar{height:3px;background:#eef0f4}
+#bar span{display:block;height:100%;width:0;background:var(--accent);
+  transition:width .35s cubic-bezier(.4,0,.2,1)}
+.sep{width:1px;height:12px;background:var(--line)}
 
 /* ── 3분할 ──────────────────────────────────────────────── */
-#cols{display:grid;height:calc(100% - 47px);grid-template-columns:250px 1px 1.02fr 1px 1fr}
-#cols.busy{height:calc(100% - 81px)}
+#cols{flex:1;min-height:0;display:grid;
+  grid-template-columns:minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,3fr)}
 .split{background:var(--line);cursor:col-resize;position:relative}
 .split::after{content:"";position:absolute;inset:0 -4px;z-index:5}
 .split:hover{background:var(--accent)}
@@ -774,9 +883,9 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 #q:focus{border-color:#c3cfe6;background:#fff;box-shadow:0 0 0 3px var(--accent-s)}
 #count{padding:0 12px 7px;font-size:11px;color:var(--mut2)}
 #list{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 6px 10px}
-.row{display:flex;gap:7px;align-items:flex-start;padding:6px 8px;border-radius:6px;
+.row{display:flex;gap:7px;align-items:flex-start;padding:6px 7px;border-radius:6px;
   cursor:default;font-size:11.5px;line-height:1.45;color:var(--ink2);
-  word-break:break-all}
+  overflow-wrap:anywhere;word-break:normal;hyphens:none}
 .row:hover{background:#f5f6f8}
 .row.sel{background:var(--accent-s);color:#1c3f80}
 .row .dot{flex:none;width:6px;height:6px;border-radius:50%;margin-top:5px;
@@ -795,7 +904,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .zbtn:hover{background:#f2f4f7;color:var(--ink)}
 #pgno{font-size:11.5px;color:var(--mut);min-width:56px;text-align:center;
   font-variant-numeric:tabular-nums}
-#scroll{flex:1;overflow:auto;background:#eceef1;padding:16px 0 30px;
+#scroll{flex:1;overflow:auto;background:#f1f2f4;padding:16px 0 30px;
   scroll-behavior:auto}
 .pg{margin:0 auto 14px;background:#fff;position:relative;
   box-shadow:0 1px 2px rgba(20,28,40,.10),0 3px 12px rgba(20,28,40,.06)}
@@ -808,45 +917,58 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 
 /* ── 오른쪽: 읽기 화면 ──────────────────────────────────── */
 #doc{flex:1;overflow:auto;background:#fff}
-#art{max-width:74ch;margin:0 auto;padding:34px 40px 90px}
-#art h1{font-family:var(--ui);font-size:24px;line-height:1.32;font-weight:650;
-  letter-spacing:-.012em;margin:0 0 14px;color:#151a21}
+#art{padding:24px 28px 70px}
+#art h1{font-family:var(--ui);font-size:23px;line-height:1.3;font-weight:650;
+  letter-spacing:-.012em;margin:0 0 11px;color:#151a21}
 #art h2{font-family:var(--ui);font-size:15.5px;font-weight:650;color:#182029;
-  margin:38px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line2);
+  margin:26px 0 9px;padding-bottom:5px;border-bottom:1px solid var(--line2);
   letter-spacing:-.005em}
 #art h3{font-family:var(--ui);font-size:14px;font-weight:640;color:#28313c;
-  margin:26px 0 7px}
+  margin:19px 0 6px}
 #art h4,#art h5{font-family:var(--ui);font-size:13px;font-weight:640;
-  color:#455060;margin:20px 0 6px}
+  color:#455060;margin:15px 0 5px}
 #art .crumb{color:var(--mut2);font-weight:400;margin:0 3px}
-#art p{font-family:var(--serif);font-size:15.3px;line-height:1.78;
-  color:#242a31;margin:0 0 15px;text-align:left;
+#art p{font-family:var(--serif);font-size:15.2px;line-height:1.72;
+  color:#242a31;margin:0 0 11px;text-align:left;
   overflow-wrap:break-word;hyphens:auto}
 #art p.bib{font-family:var(--ui);font-size:12px;color:var(--mut);margin:0 0 6px}
 #art p.byline{font-family:var(--ui);font-size:12.5px;color:var(--ink2);
   margin:0 0 12px;line-height:1.6}
-#art p.tags{margin:0 0 6px;display:flex;flex-wrap:wrap;gap:5px}
-#art .tag{font-family:var(--ui);font-size:10.5px;color:var(--mut);
-  background:#f4f5f7;border-radius:4px;padding:2px 7px;line-height:1.5;
-  letter-spacing:.01em}
+/* 키워드 칩 — MeSH 와 저자 키워드를 같은 모양, 색만 은은하게 다르게 */
+#art p.chips{margin:2px 0 10px;display:flex;flex-wrap:wrap;gap:4px;
+  align-items:center}
+#art .chip{font-family:var(--ui);font-size:10.5px;border-radius:4px;
+  padding:2.5px 7px;line-height:1.45;letter-spacing:.01em;
+  white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+#art .chip.mesh{background:#eef2f8;color:#5a6675}
+#art .chip.kw{background:#f4f5f6;color:#71767e}
+#art .chip.hid{display:none}
+#art .chipmore{font-family:var(--ui);font-size:10.5px;color:var(--mut2);
+  padding:2.5px 6px;border-radius:4px}
+#art .chipmore:hover{background:#f4f5f7;color:var(--ink2)}
 #art p.aside{font-family:var(--ui);font-size:11.5px;color:var(--mut)}
 #art p.cap{font-family:var(--ui);font-size:12.5px;font-weight:620;color:#2b333d;
-  margin:26px 0 8px}
+  margin:20px 0 7px}
 #art blockquote{margin:0 0 15px;padding:2px 0 2px 14px;
   border-left:2px solid var(--line);color:var(--ink2)}
-#art ul{font-family:var(--serif);font-size:14.6px;line-height:1.7;
-  color:#2b323a;margin:0 0 15px;padding-left:20px}
+#art ul{font-family:var(--serif);font-size:14.6px;line-height:1.65;
+  color:#2b323a;margin:0 0 11px;padding-left:20px}
 #art li{margin:0 0 6px}
 #art code{font-family:Consolas,"Cascadia Mono",monospace;font-size:.88em;
   background:#f4f5f7;border-radius:3px;padding:1px 4px;color:#48505a}
 #art .cite{color:#a8b0ba;font-size:.8em;vertical-align:.28em;
   letter-spacing:-.02em;margin:0 .5px}
-#art .twrap{overflow-x:auto;margin:0 0 22px;border:1px solid var(--line);
-  border-radius:8px;background:#fff}
+#art a.cite{text-decoration:none;cursor:pointer}
+#art a.cite:hover{color:var(--accent)}
+#art .hit{background:#fff6d8;border-radius:3px;
+  transition:background .5s ease}                /* 눌러서 찾아간 항목 잠깐 표시 */
+#art .twrap{overflow-x:auto;overscroll-behavior-x:contain;margin:0 0 18px;
+  border:1px solid var(--line);border-radius:8px;background:#fff}
 #art table{border-collapse:collapse;width:100%;font-family:var(--ui);
-  font-size:12.2px;line-height:1.5}
-#art th,#art td{padding:7px 11px;text-align:left;vertical-align:top;
-  border-bottom:1px solid var(--line2);white-space:normal;min-width:44px}
+  font-size:12.4px;line-height:1.5;table-layout:auto}
+#art th,#art td{padding:8px 12px;text-align:left;vertical-align:top;
+  border-bottom:1px solid var(--line2);white-space:normal;min-width:74px;
+  overflow-wrap:break-word;word-break:keep-all}   /* 한 글자씩 세로로 쌓이면 실패 */
 #art thead th{background:#fafbfc;font-weight:640;color:#333c46;
   border-bottom:1px solid #dfe3e9;position:sticky;top:0}
 #art tbody tr:last-child td{border-bottom:0}
@@ -863,11 +985,11 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 #veil{position:fixed;inset:0;background:rgba(24,29,36,.30);display:none;
   align-items:center;justify-content:center;z-index:50}
 #veil.on{display:flex}
-.card{background:#fff;border-radius:12px;padding:22px 24px 18px;width:400px;
-  box-shadow:0 12px 40px rgba(18,24,33,.22)}
+.card{background:#fff;border-radius:12px;padding:22px 24px 18px;width:460px;
+  max-width:82vw;box-shadow:0 12px 40px rgba(18,24,33,.22)}
 .card h3{margin:0 0 8px;font-size:15px;font-weight:640}
 .card p{margin:0 0 18px;font-size:12.5px;color:var(--ink2);line-height:1.65;
-  white-space:pre-line}
+  white-space:pre-line;max-height:46vh;overflow:auto}
 .card .r{display:flex;justify-content:flex-end;gap:8px}
 #toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);
   background:#232a33;color:#fff;padding:9px 16px;border-radius:8px;font-size:12px;
@@ -884,8 +1006,15 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
   <button class="btn ghost" id="bstop" style="display:none">중지</button>
 </div>
 
-<div id="prog"><div class="in"><div id="bar"><span></span></div>
-  <div id="ptext"></div></div></div>
+<div id="prog">
+  <div class="in">
+    <span id="pcount"></span><span class="sep"></span>
+    <span id="pstage"></span>
+    <span id="pname"></span>
+    <span id="peta"></span>
+  </div>
+  <div id="bar"><span></span></div>
+</div>
 
 <div id="cols">
   <div class="pane">
@@ -929,13 +1058,22 @@ const S={files:[],view:[],sel:-1,key:null,pages:[],zoom:1,fitW:0,bucket:1200,
 let tmr=null;
 function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("on");
   clearTimeout(tmr);tmr=setTimeout(()=>t.classList.remove("on"),2600);}
-function ask(title,msg,ok){return new Promise(res=>{
+function ask(title,msg,ok,alone){return new Promise(res=>{
   $("#mt").textContent=title;$("#mm").textContent=msg;$("#mo").textContent=ok||"계속";
+  $("#mc").style.display=alone?"none":"";
   $("#veil").classList.add("on");
   const done=v=>{$("#veil").classList.remove("on");
     $("#mo").onclick=null;$("#mc").onclick=null;res(v);};
   $("#mo").onclick=()=>done(true);$("#mc").onclick=()=>done(false);});}
 const api=()=>window.pywebview&&window.pywebview.api;
+/* 경로 전체를 늘어놓으면 지저분하다 — 폴더 이름만, 전체는 툴팁으로 */
+function setPath(p){
+  const el=$("#path");el.textContent="";el.title=p||"";
+  if(!p){el.textContent="폴더를 고르세요";return;}
+  const parts=p.replace(/[\\/]+$/,"").split(/[\\/]/);
+  const b=document.createElement("b");b.textContent=parts.pop()||p;
+  const s=document.createElement("span");s.textContent=parts.join("\\");
+  el.appendChild(b);el.appendChild(s);}
 
 /* ── 목록 ───────────────────────────────────────────────── */
 function setFiles(files){S.files=files||[];draw();}
@@ -949,6 +1087,7 @@ function draw(){
     const d=document.createElement("div");
     d.className="row"+(f.done?" done":"")+(i===S.sel?" sel":"");
     d.dataset.i=i;
+    d.title=f.name;
     d.innerHTML='<span class="dot"></span><span class="nm"></span>';
     d.lastChild.textContent=f.name;
     frag.appendChild(d);});
@@ -985,7 +1124,9 @@ function renderDoc(d){
       +'위쪽 <b>이 논문만</b> 을 누르면 이 한 편을 처리합니다</span></div>';
     $("#foot").textContent=d.error||"";return;}
   box.innerHTML='<article id="art"></article>';
-  $("#art").innerHTML=d.html||"";
+  const art=$("#art");
+  art.innerHTML=d.html||"";
+  linkCites(art);
   box.scrollTop=0;
   const f=$("#foot");f.textContent="";
   const s=document.createElement("span");s.textContent=d.info||"";f.appendChild(s);
@@ -998,8 +1139,26 @@ function renderDoc(d){
         +"</li>").join("")+"</ul>";}};
     f.appendChild(b);}
   if(d.json){const b=document.createElement("button");b.className="more";
-    b.textContent="폴더 열기";
+    b.textContent="저장된 곳 열기";
     b.onclick=()=>api()&&api().reveal(d.json);f.appendChild(b);}
+}
+
+/* 칩이 많으면 접어 두었다가 눌러서 펼친다 */
+$("#doc").addEventListener("click",e=>{
+  const b=e.target.closest(".chipmore");if(!b)return;
+  b.parentNode.querySelectorAll(".chip.hid").forEach(c=>c.classList.remove("hid"));
+  b.remove();});
+
+/* 참고문헌 목록이 있으면 본문 [15] 를 그 항목으로 가는 링크로 바꾼다.
+   렌더러가 링크를 직접 넣어주면 그대로 쓰고, 없으면 여기서 이어준다. */
+function linkCites(art){
+  if(!art.querySelector('[id^="ref-"]'))return;
+  art.querySelectorAll("span.cite").forEach(s=>{
+    const m=s.textContent.match(/^\[\s*(\d{1,3})\s*\]$/);
+    if(!m||!art.querySelector('#ref-'+m[1]))return;
+    const a=document.createElement("a");
+    a.className="cite";a.href="#ref-"+m[1];a.textContent=s.textContent;
+    s.replaceWith(a);});
 }
 
 /* ── PDF: 모든 쪽을 이어 붙이고, 보이는 곳만 그린다 ──────── */
@@ -1058,24 +1217,43 @@ $("#scroll").addEventListener("scroll",()=>{
 let rt=null;
 window.addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(()=>layout(true),120);});
 
-/* ── 분할선 ─────────────────────────────────────────────── */
+/* ── 분할선 ───────────────────────────────────────────────
+   폭을 px 로 굳히지 않고 **비율(fr)** 로 유지한다 — 창 크기를 바꿔도
+   1 : 1 : 2 로 잡아둔 배분이 그대로 따라간다. 분할선을 두 번 누르면 기본값. */
+const DEF_COLS="minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,3fr)";
 (function(){
-  let cur=null,x0=0,l0=0,m0=0,r0=0,tw=0;
-  const cols=$("#cols");
-  document.querySelectorAll(".split").forEach(s=>s.addEventListener("mousedown",e=>{
-    cur=+s.dataset.s;x0=e.clientX;
-    const st=getComputedStyle(cols).gridTemplateColumns.split(" ").map(parseFloat);
-    l0=st[0];m0=st[2];r0=st[4];tw=m0+r0;
-    document.body.style.cursor="col-resize";e.preventDefault();}));
+  let cur=null,x0=0,a0=0,b0=0,c0=0;
+  const cols=$("#cols"), MIN=150;
+  const put=(a,b,c)=>{cols.style.gridTemplateColumns=
+    a.toFixed(3)+"fr 1px "+b.toFixed(3)+"fr 1px "+c.toFixed(3)+"fr";};
+  document.querySelectorAll(".split").forEach(s=>{
+    s.title="끌어서 폭 조절 · 두 번 누르면 기본 비율(1 : 2 : 3)";
+    s.addEventListener("dblclick",()=>{cols.style.gridTemplateColumns=DEF_COLS;layout(true);});
+    s.addEventListener("mousedown",e=>{
+      cur=+s.dataset.s;x0=e.clientX;
+      const st=getComputedStyle(cols).gridTemplateColumns.split(" ").map(parseFloat);
+      a0=st[0];b0=st[2];c0=st[4];
+      document.body.style.cursor="col-resize";e.preventDefault();});});
   window.addEventListener("mousemove",e=>{
-    if(cur===null)return;const dx=e.clientX-x0;
-    if(cur===0){const w=Math.max(170,Math.min(460,l0+dx));
-      cols.style.gridTemplateColumns=w+"px 1px "+m0+"fr 1px "+r0+"fr";}
-    else{const m=Math.max(180,Math.min(tw-180,m0+dx));
-      cols.style.gridTemplateColumns=l0+"px 1px "+m+"fr 1px "+(tw-m)+"fr";}});
+    if(cur===null)return;
+    const dx=e.clientX-x0;
+    if(cur===0){const a=Math.max(MIN,Math.min(a0+b0-MIN,a0+dx));put(a,a0+b0-a,c0);}
+    else{const b=Math.max(MIN,Math.min(b0+c0-MIN,b0+dx));put(a0,b,b0+c0-b);}});
   window.addEventListener("mouseup",()=>{if(cur===null)return;
     cur=null;document.body.style.cursor="";layout(true);});
 })();
+
+/* ── 본문 안 링크: [15] → 아래 참고문헌 15번으로 부드럽게 ──────────
+   참고문헌 절 규격이 확정되기 전이라도, 앵커(#ref-15)가 오면 바로 동작한다. */
+$("#doc").addEventListener("click",e=>{
+  const a=e.target.closest('a[href^="#"]');
+  if(!a)return;
+  e.preventDefault();
+  const t=document.getElementById(a.getAttribute("href").slice(1));
+  if(!t)return;
+  t.scrollIntoView({behavior:"smooth",block:"center"});
+  t.classList.add("hit");setTimeout(()=>t.classList.remove("hit"),1400);
+});
 
 /* ── 추출 ───────────────────────────────────────────────── */
 $("#bone").onclick=async()=>{
@@ -1089,16 +1267,33 @@ $("#ball").onclick=async()=>{
     +"\n분량에 비례해 오래 걸리고, 중간에 멈춰도 다시 하면 이어집니다.";
   if(!await ask("전부 추출",msg,"시작"))return;
   const r=await api().extract("all"); if(!r.ok)toast(r.why||"시작하지 못했습니다");};
-$("#bstop").onclick=()=>api().cancel();
+$("#bstop").onclick=()=>{                       /* 눌린 티가 바로 나야 한다 */
+  $("#bstop").textContent="중지 중…";$("#bstop").disabled=true;
+  $("#pstage").textContent="이 논문을 마치면 멈춥니다";api().cancel();};
 $("#bopen").onclick=async()=>{const r=await api().pick_folder();
   if(r&&r.ok)toast("폴더를 읽었습니다");};
 
 /* ── 파이썬이 밀어넣는 신호 ─────────────────────────────── */
 window.pnx={on(m){
-  if(m.kind==="status"){
-    if(m.text!==undefined)$("#ptext").textContent=m.text;
+  if(m.kind==="status"){          /* 폴더 훑기처럼 편수가 없는 일 */
+    if(m.text!==undefined){$("#pcount").textContent="";$("#pstage").textContent=m.text;
+      $("#pname").textContent="";$("#peta").textContent="";}
     if(m.pct!==null&&m.pct!==undefined)$("#bar").firstChild.style.width=m.pct+"%";
     if(m.busy!==undefined&&m.busy!==null)showProg(m.busy||S.busy);
+  }else if(m.kind==="prog"){
+    $("#pcount").textContent=m.i+" / "+m.total;
+    $("#pstage").textContent=m.stage||"";
+    $("#pname").textContent=m.name||"";
+    $("#peta").textContent=m.eta?etaText(m.eta):"";   /* 못 믿을 값은 아예 안 쓴다 */
+    $("#bar").firstChild.style.width=(m.pct||0)+"%";
+  }else if(m.kind==="mark"){
+    const f=S.files.find(x=>x.name===m.name);
+    if(f&&!f.done){f.done=true;
+      const r=$("#list").querySelector('.row[data-i="'+S.files.indexOf(f)+'"]');
+      if(r)r.classList.add("done");
+      const c=$("#count").textContent.match(/^추출됨 (\d+)/);
+      if(c)$("#count").textContent=$("#count").textContent.replace(
+        /^추출됨 \d+/,"추출됨 "+(+c[1]+1));}
   }else if(m.kind==="grobid"){
     /* 원장은 GROBID 가 뭔지 알 필요가 없다. 준비 상태만 조용히 보이면 된다. */
     const g=$("#gro");g.className=m.state==="ok"?"ok":m.state==="starting"?"starting":
@@ -1109,30 +1304,47 @@ window.pnx={on(m){
     g.title=m.state==="off"
       ?"논문 분석기를 켜지 못해 PDF 자체 텍스트만 씁니다 — 추출은 계속됩니다":"";
   }else if(m.kind==="folder"){
-    $("#path").textContent=m.path||"";setFiles(m.files);
+    setPath(m.path);setFiles(m.files);
   }else if(m.kind==="run"){
     S.busy=!!m.on;showProg(S.busy);
     $("#bstop").style.display=S.busy?"":"none";
+    $("#bstop").textContent="중지";$("#bstop").disabled=false;
+    if(m.on){$("#pcount").textContent="0 / "+m.total;$("#pstage").textContent="시작";
+      $("#pname").textContent="";$("#peta").textContent="";
+      $("#bar").firstChild.style.width="0%";}
     draw();
     if(!m.on){
       if(m.files)setFiles(m.files);
       if(S.sel>=0)openPaper(S.sel);
-      if(m.nfail)toast(m.nfail+"편이 실패했습니다 — "+(m.fails[0]?m.fails[0].name:""));
+      report(m);
     }
   }}};
-function showProg(on){$("#prog").classList.toggle("on",!!on);
-  $("#cols").classList.toggle("busy",!!on);}
+function etaText(s){
+  if(s<75)return "1분 이내";
+  if(s<3600)return "약 "+Math.round(s/60)+"분 남음";
+  return "약 "+(s/3600).toFixed(1)+"시간 남음";}
+function showProg(on){$("#prog").classList.toggle("on",!!on);}
+/* 끝난 뒤 보고 — 실패를 조용히 넘기지 않는다 */
+function report(m){
+  const ok=m.done||0, nf=m.nfail||0;
+  if(!nf){toast(m.stopped?("중지했습니다 — "+ok+"편까지 저장됨")
+                         :(ok+"편 추출을 마쳤습니다"));return;}
+  const list=(m.fails||[]).map(f=>"· "+f.name+"\n   "+f.why).join("\n");
+  ask((m.stopped?"중지됨 — ":"")+ok+"편 완료 · "+nf+"편 실패",
+      "다음 논문은 처리하지 못했습니다. 나머지는 정상 저장됐습니다.\n\n"+list,
+      "확인",true);
+}
 
 /* ── 시작 ───────────────────────────────────────────────── */
 window.addEventListener("pywebviewready",async()=>{
   S.ready=true;
   const st=await api().state();
-  if(st.path)$("#path").textContent=st.path;
+  setPath(st.path);
   if(st.files&&st.files.length)setFiles(st.files);else draw();
   window.pnx.on({kind:"grobid",state:st.grobid,sec:st.sec});
 });
 fetch("/files").then(r=>r.json()).then(d=>{
-  if(d.path)$("#path").textContent=d.path;
+  if(d.path)setPath(d.path);
   if(d.files&&d.files.length&&!S.files.length)setFiles(d.files);}).catch(()=>{});
 </script></body></html>
 """
@@ -1149,6 +1361,71 @@ def _screen() -> tuple[int, int]:
         return 1600, 960
 
 
+def _own_hwnd() -> int:
+    """이 프로세스가 만든, 보이는 가장 큰 창 = 앱 창.
+
+    window.native.Handle 은 UI 스레드가 아니면 COM 예외가 나기 쉬워 쓰지 않는다.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        best, area, me = 0, 0, os.getpid()
+
+        def cb(h, _l):
+            nonlocal best, area
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+            if pid.value == me and u.IsWindowVisible(h):
+                r = wintypes.RECT()
+                u.GetWindowRect(h, ctypes.byref(r))
+                a = (r.right - r.left) * (r.bottom - r.top)
+                if a > area:
+                    best, area = h, a
+            return True
+
+        u.EnumWindows(ctypes.WINFUNCTYPE(
+            ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)(cb), 0)
+        return int(best)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def paint_caption(timeout: float = 8.0) -> bool:
+    r"""제목표시줄을 화면과 같은 흰색으로 칠한다(윈도우 11).
+
+    검정 제목표시줄 밑에 흰 화면이 붙으면 창이 두 동강 나 보인다. DWM 속성으로
+    캡션·글자·테두리 색을 지정하면 제목표시줄부터 본문까지 색이 이어진다.
+    COLORREF 는 0x00BBGGRR — RGB 순서가 아니다.
+    윈도우 10 구버전은 이 속성을 모른다 → 조용히 실패하고 기본 창틀로 간다.
+    """
+    import ctypes
+    from ctypes import wintypes
+    t0 = time.time()
+    hwnd = 0
+    while time.time() - t0 < timeout:
+        hwnd = _own_hwnd()
+        if hwnd:
+            break
+        time.sleep(0.15)
+    if not hwnd:
+        return False
+    try:
+        dwm = ctypes.windll.dwmapi
+
+        def put(attr: int, colorref: int) -> None:
+            v = ctypes.c_uint(colorref)
+            dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), ctypes.c_uint(attr),
+                                      ctypes.byref(v), ctypes.sizeof(v))
+
+        put(35, 0x00FFFFFF)      # DWMWA_CAPTION_COLOR — 본문과 같은 흰색
+        put(36, 0x0028231F)      # DWMWA_TEXT_COLOR    — #1f2328
+        put(34, 0x00EEE9E7)      # DWMWA_BORDER_COLOR  — #e7e9ee
+        return True
+    except Exception:  # noqa: BLE001 — 구버전 윈도우: 그냥 기본 창틀로 둔다
+        return False
+
+
 def build(folder: str | Path | None = None):
     """창을 만들어 돌려준다(테스트에서 직접 몰아보기 위해 분리)."""
     import webview
@@ -1156,17 +1433,24 @@ def build(folder: str | Path | None = None):
     app = App()
     port = serve(app)
     api = Api(app)
+    # 창을 **최대화해서** 띄운다. 세 칸을 나란히 보는 화면이라 넓을수록 좋고,
+    # 무엇보다 고해상도(175% 배율) 화면에서 요청한 크기가 배율만큼 부풀어
+    # 창 오른쪽이 화면 밖으로 나가는 일을 원천적으로 막는다.
     w, h = _screen()
     win = webview.create_window(
-        "논문 추출 검수", url=f"http://127.0.0.1:{port}/", js_api=api,
-        width=min(1720, w - 40), height=min(1020, h - 70),
-        min_size=(1120, 660), background_color="#f4f5f7", text_select=True)
+        "PDF Extractor", url=f"http://127.0.0.1:{port}/", js_api=api,
+        width=min(1360, max(1120, w - 120)), height=min(860, max(660, h - 120)),
+        min_size=(1120, 660), maximized=True,
+        background_color="#ffffff", text_select=True)
     app.window = win
 
-    start = Path(folder) if folder else utils.resolve(
-        (app.cfg.get("project") or {}).get("input_dir") or "")
+    # 설정에 시작 폴더가 없으면 아무 폴더도 열지 않는다 — 빈 값으로 resolve 하면
+    # 프로젝트 루트가 나와 리포 전체를 훑게 된다.
+    _cfg_dir = (app.cfg.get("project") or {}).get("input_dir") or ""
+    start = Path(folder) if folder else (utils.resolve(_cfg_dir) if _cfg_dir else None)
 
     def boot() -> None:
+        paint_caption()          # 제목표시줄을 본문과 같은 흰색으로(창이 뜬 뒤에)
         app.grobid.ensure_async()
         try:
             if start and start.is_dir():

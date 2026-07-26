@@ -101,8 +101,16 @@ def fetch_pubmed(http: HttpClient, pmid: str, email: str, api_key: str) -> dict:
         label = ab.get("Label")
         txt = "".join(ab.itertext()).strip()
         abstract_parts.append(f"{label}: {txt}" if label else txt)
+    # 저자가 붙인 키워드. MeSH 는 색인자가 붙인 통제어휘라 성격이 다르므로
+    # 따로 담는다(화면에서 두 무리를 색으로 구분해 보여준다).
+    kws, seen = [], set()
+    for k in art.findall(".//KeywordList/Keyword"):
+        t = "".join(k.itertext()).strip().strip(".;,")
+        if t and t.lower() not in seen:
+            seen.add(t.lower()); kws.append(t)
     return {
         "mesh": mesh,
+        "keywords": kws,
         "pub_types": ptypes,
         "abstract_pubmed": "\n".join(abstract_parts),
     }
@@ -131,12 +139,16 @@ def fetch_crossref(http: HttpClient, doi: str, email: str) -> dict:
     if not msg:
         return {}
     lic = [l.get("URL") for l in msg.get("license", [])] if msg.get("license") else []
+    # 이름을 **줄이지 않는다.** 'Bae JM' 보다 'Jung Min Bae' 가 읽기 좋고,
+    # 동명이인 구분에도 낫다. Crossref 는 given 을 전체로 주는데 종전 코드가
+    # 일부러 이니셜로 잘라 버리고 있었다.
     authors = []
     for a in msg.get("author", []) or []:
-        fam = a.get("family", ""); giv = a.get("given", "")
-        nm = (fam + " " + "".join(w[0] for w in giv.split() if w)) if fam else giv
-        if nm.strip():
-            authors.append(nm.strip())
+        fam = (a.get("family") or "").strip()
+        giv = (a.get("given") or "").strip()
+        nm = f"{giv} {fam}".strip() if fam else giv
+        if nm:
+            authors.append(nm)
     dp = (msg.get("published", {}) or msg.get("issued", {})).get("date-parts") or [[None]]
     return {
         "crossref_ref_count": msg.get("references-count"),
@@ -206,6 +218,26 @@ def collect_one(http: HttpClient, doi: str, email: str, api_key: str,
     for key in ("title", "journal", "year", "authors"):
         if not meta.get(key):
             meta[key] = meta.get(f"crossref_{key}") or meta.get(f"openalex_{key}") or meta.get(key)
+
+    # 저자명은 **풀어 쓴다.** Europe PMC 의 authorString 은 'Bae JM' 처럼 줄여서
+    # 준다. Crossref·OpenAlex 는 전체 이름을 주므로, 이름 수가 맞고 실제로
+    # 풀어져 있을 때만 그쪽으로 갈아탄다(수가 다르면 짝이 어긋나므로 손대지 않는다).
+    def _spelled_out(names: list) -> bool:
+        """이니셜(대문자 1~3자 덩어리)이 아니라 진짜 이름인가."""
+        if not names:
+            return False
+        import re as _re
+        full = sum(1 for n in names
+                   if len(_re.findall(r"[A-Za-z]{3,}", str(n))) >= 2)
+        return full >= max(1, len(names) // 2)
+
+    _cur = meta.get("authors") or []
+    for _src in ("crossref_authors", "openalex_authors"):
+        _cand = meta.get(_src) or []
+        if _cand and _spelled_out(_cand) and not _spelled_out(_cur) \
+                and (not _cur or len(_cand) == len(_cur)):
+            meta["authors"] = _cand
+            break
 
     # 이 DOI 가 실제로 존재하는가 — 기본키 게이트의 근거를 원장에 남긴다.
     # 세 곳 중 어디도 모르는 DOI 는 정규식을 통과했을 뿐 **해소되지 않는다**

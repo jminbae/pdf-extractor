@@ -128,9 +128,23 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
         elif opener:
             path = [opener] + path
 
+        # 실제 논문처럼 **상위 절 제목을 한 번만** 쓰고 그 아래에 소제목을 둔다.
+        #   JSON 은 절마다 전체 경로(['RESULTS','Subgroup analyses'])를 들고 있지만,
+        #   화면에 'RESULTS › 소제목' 을 소절마다 반복하면 읽기 불편하다.
+        #   직전 경로와 겹치는 앞부분은 건너뛰고 **새로 시작하는 단계만** 제목으로 낸다.
+        # 제목이 아닌 것(인용번호 조각·표 본문·초록 라벨)은 제목으로 내지 않는다.
+        # 정본 JSON 에는 남겨 두고 **화면에서만** 뺀다 — 구조 판단은 뒤에 고칠 수 있고,
+        # 그 사이에 원장이 보는 화면이 파편 목록처럼 보이면 안 된다.
+        from .schema import is_not_a_heading
+        path = [h for h in path if not is_not_a_heading(h)]
+
         if path and path != last_path:
-            depth = min(len(path), 4)
-            out += ["", "#" * (depth + 1) + " " + " › ".join(path)]
+            same = 0
+            while (same < len(path) and same < len(last_path)
+                   and path[same] == last_path[same]):
+                same += 1
+            for lvl in range(same, len(path)):
+                out += ["", "#" * min(lvl + 2, 5) + " " + path[lvl]]
             last_path = path
 
         for p in paras:

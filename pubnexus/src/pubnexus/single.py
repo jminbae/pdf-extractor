@@ -29,6 +29,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from . import utils
 from .utils import log
 
 # 설정 누락(구버전 config.yaml·frozen 배포)에도 동작하도록 하는 기본값.
@@ -272,6 +273,69 @@ def _extract(pdf: Path, cfg: dict, ctx: "_Ctx", *, out_json, on_progress,
             notes.append(f"표 아닌 것 제거 {_st['dropped']}개")
     except Exception as e:  # noqa: BLE001
         notes.append(f"표 복원 생략: {type(e).__name__}: {e}")
+
+    # 범위 밖(한글 본문) 판정 — 억지로 뽑아 엉터리를 남기지 않는다.
+    #   2단으로 조판된 한글 본문은 읽기 순서가 좌우로 섞여 '피부의 표 여 있는데'
+    #   같은 뒤죽박죽이 되고, 그 문단이 제목 자리까지 올라간다(실측 26편 중 5편).
+    #   영문 서지정보(제목·초록·저자)는 API 로 받은 것이라 정확하므로 **살린다**.
+    #   본문만 비우고 이유를 남긴다 — 나중에 한글을 지원할 때 이어서 하면 된다.
+    _body_txt = " ".join(p.get("text", "") for s in (d.get("body_text") or [])
+                         for p in (s.get("paragraphs") or []))
+    if _body_txt:
+        _han = sum(1 for ch in _body_txt if "가" <= ch <= "힣")
+        if _han / len(_body_txt) > 0.15:
+            d["body_text"] = []
+            d["scope"] = "non_english"
+            notes.append(f"한글 본문({_han / len(_body_txt):.0%}) — 현재 영어 논문만 "
+                         f"지원한다. 본문을 비우고 서지정보만 남긴다")
+            # 뒤죽박죽 문단이 제목으로 올라간 경우도 함께 걷어낸다.
+            _t = (d.get("meta") or {}).get("title") or ""
+            if len(_t) > 150 or (len(_t) > 90 and _t.rstrip().endswith(("다.", ".", ","))):
+                d["meta"]["title"] = ""
+                notes.append("제목 자리에 본문이 올라가 있어 비웠다")
+
+    # 합본 지면에서 **앞 논문의 DOI 를 이 논문 것으로 잡는** 사고를 바로잡는다.
+    #   probe 는 '앞쪽 페이지에서 처음 보이는 DOI' 를 쓴다. 그런데 research letter
+    #   지면은 앞 편의 꼬리와 이 편의 머리가 한 쪽에 같이 인쇄되므로, 읽기 순서상
+    #   앞 편의 DOI 가 먼저 나온다(실측: Schwannoma 편지가 앞 편 Nephrogenic
+    #   fibrosing dermopathy 의 10.1016/j.jaad.2006.04.061 로 파일링됐다).
+    #   경계 판정은 '어느 구간에 이 본문이 실제로 놓여 있나' 를 알므로 그것으로 고른다.
+    #   **Crossref 로 존재를 확인한 DOI 만 채택한다** — 추측한 DOI 를 기본키로 쓰면
+    #   조용히 틀린 레코드가 된다.
+    try:
+        from . import boundary
+        body_probe = " ".join(
+            p.get("text", "") for s in (d.get("body_text") or [])
+            for p in (s.get("paragraphs") or []))[:4000]
+        bmap = boundary.analyze(pdf, {"doi": d.get("paper_id"),
+                                      "title": (d.get("meta") or {}).get("title", "")},
+                                body_probe=body_probe)
+        conflict = bmap.identity_conflict or {}
+        better = (conflict.get("correct_doi") or "").strip().lower()
+        if better and better != str(d.get("paper_id", "")).lower():
+            if utils.verify_doi(better):
+                notes.append(f"신원 정정: {d.get('paper_id')} → {better} "
+                             f"({conflict.get('how', '경계판정')})")
+                d["paper_id"] = better
+                d.setdefault("meta", {})["doi"] = better
+                # 제목·저자도 앞 편 것이므로 새 DOI 로 다시 받는다.
+                try:
+                    from . import metadata
+                    _md = cfg.get("metadata") or {}
+                    fresh = metadata.collect_one(
+                        ctx.http, better, _md.get("email", ""),
+                        _md.get("ncbi_api_key", ""),
+                        (cfg.get("fulltext") or {}).get("europepmc_base", "")) or {}
+                    for k in ("title", "authors", "journal", "year", "pmid",
+                              "pmcid", "mesh", "pub_types", "abstract_pubmed"):
+                        if fresh.get(k):
+                            d["meta"][k] = fresh[k]
+                except Exception as e:  # noqa: BLE001
+                    notes.append(f"정정 후 메타 재조회 실패: {type(e).__name__}: {e}")
+            else:
+                notes.append(f"신원 의심({better}) — Crossref 미확인이라 두었다")
+    except Exception as e:  # noqa: BLE001 — 신원 판정 실패가 추출을 막지 않는다
+        notes.append(f"신원 판정 생략: {type(e).__name__}: {e}")
 
     try:
         from . import qc
