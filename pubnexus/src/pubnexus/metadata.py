@@ -326,6 +326,43 @@ def pdf_abstract(pdf_path, scan_pages: int = 2, limit: int = 6000) -> str:
     return utils.norm_text(body).strip()
 
 
+# 초록 끝에 눌어붙는 조판 부속물. 어휘 대조로는 못 잡는다 — 키워드 한 줄은
+# 초록 어휘의 4% 남짓이라 정밀도 0.96 으로 게이트를 통과한다(실측
+# 10.1002/iid3.316). 종류가 정해져 있으므로 **끝에서만** 결정적으로 잘라낸다.
+_ABS_TAIL_RES = (
+    # 키워드 줄. **대문자 표제이거나 콜론이 붙은 것만** 인정한다.
+    #   'Keywords: rosacea, ...'      → 키워드 줄 (자름)
+    #   'KEYWORDS ...' / 'K E Y W O R D S' → 키워드 줄 (자름)
+    #   '...using common keywords related to gastric cancer...' → **본문 문장** (안 자름)
+    # 소문자 'keywords' 를 무조건 자르면 Methods 문장 한가운데를 잘라
+    # 초록의 792~1112자를 통째로 날린다(실측 3편: jso.23438·jso.23618·s11695).
+    re.compile(r"\s*(?:K\s?E\s?Y\s?\s?W\s?O\s?R\s?D\s?S?\b|Key\s?[Ww]ords?\s*:)\s*.*$",
+               re.S),
+    # 저널 자기인용 꼬리 '(J Am Acad Dermatol 2018;79:836-42.)'
+    re.compile(r"\s*\([A-Z][A-Za-z .]{4,40}\s+\d{4};\d+[:;].*$"),
+    # 위 꼬리가 잘려 남은 고아 여는 괄호
+    re.compile(r"\s*\(\s*$"),
+    # 전자보충자료 상용구
+    re.compile(r"\s*(?:The online version of this article|Electronic supplementary"
+               r"|Supplementary information).*$", re.I | re.S),
+)
+
+
+def strip_abstract_tail(abstract: str) -> tuple[str, list[str]]:
+    """초록 끝의 키워드 줄·자기인용 꼬리를 제거한다 → (정리된 초록, 제거항목).
+
+    본문 내용은 절대 건드리지 않는다(끝에서만, 정해진 패턴만).
+    """
+    s = (abstract or "").strip()
+    removed: list[str] = []
+    for rx in _ABS_TAIL_RES:
+        m = rx.search(s)
+        if m and m.start() > 120:      # 초록 본체를 통째로 날리지 않게
+            removed.append(s[m.start():m.end()].strip()[:80])
+            s = s[:m.start()].rstrip()
+    return s, removed
+
+
 def _tokens(s: str) -> "collections.Counter":
     return collections.Counter(_WORD_RE.findall((s or "").lower()))
 
@@ -402,6 +439,12 @@ def choose_abstract(extracted: str, meta: dict, pdf_path=None,
     info: dict = {}
     if not extracted:
         return (api, "api", info) if api else ("", "none", info)
+
+    # 조판 부속물(키워드 줄 등)은 검증 전에 떼어낸다 — 그래야 남은 어휘 대조가
+    # '초록 내용' 자체를 보게 된다.
+    extracted, tail = strip_abstract_tail(extracted)
+    if tail:
+        info["abstract_tail_removed"] = tail
 
     verdict = verify_abstract(extracted, meta, pdf_path,
                               body_first=body_first, title=title)

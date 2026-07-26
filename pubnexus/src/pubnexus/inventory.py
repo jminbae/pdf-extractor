@@ -341,8 +341,17 @@ def resolve_misfiled_dois(records: list[dict], cfg: dict, *,
 
 
 def _crossref_title(http: HttpClient, doi: str, email: str) -> str:
-    data = http.get_json(f"https://api.crossref.org/works/{doi}",
-                         params={"mailto": email})
+    """DOI 의 서지 제목. 없는 DOI(404)는 예외가 아니라 빈 문자열이다.
+
+    후보 DOI 중에는 이어붙이기가 빗나간 것이 섞여 있는 게 정상이라
+    404 를 예외로 올리면 **첫 오답 하나가 그 논문 전체의 판정을 죽인다**
+    (실측: 이 때문에 163편 중 162편이 조용히 건너뛰어졌다).
+    """
+    try:
+        data = http.get_json(f"https://api.crossref.org/works/{doi}",
+                             params={"mailto": email}, retries=1)
+    except Exception:  # noqa: BLE001 — 404/네트워크 모두 '제목 없음'으로 다룬다
+        return ""
     return ((data or {}).get("message", {}).get("title") or [""])[0]
 
 

@@ -129,6 +129,15 @@ _SOFT_HYPHEN_RE = re.compile(r"­")
 _ALNUM_RE = re.compile(r"[a-z0-9]")
 
 
+def _bold_name(font: str) -> bool:
+    """서브셋 글꼴 이름에서 굵기를 읽는다('AdvTTfac587ca.B', 'Helvetica-Bold', '…-Semibold')."""
+    f = (font or "")
+    low = f.lower()
+    return ("bold" in low or "black" in low or "heavy" in low
+            or f.endswith((".B", "-B", ",B", ".BI", "-BI"))
+            or low.endswith("bd") or low.endswith("-md"))
+
+
 # ── 줄 모델 ──────────────────────────────────────────────────────────
 @dataclass
 class Line:
@@ -143,6 +152,7 @@ class Line:
     lead_size: float      # 첫 span 크기(라벨 크기)
     lead_font: str
     bold: bool            # 첫 span 이 굵은 글꼴인가
+    lead_distinct: bool = False   # 라벨 글꼴이 그 줄의 나머지와 다른가
     bbox_block: tuple[float, float, float, float] = (0, 0, 0, 0)
     first_of_block: bool = False
     page_width: float = 595.0
@@ -311,6 +321,54 @@ def parse_caption(text: str, *, min_desc: int = MIN_DESC_CHARS) -> dict | None:
 
 
 # ── PDF → 줄 ─────────────────────────────────────────────────────────
+def _merge_fragments(frags: list[Line]) -> list[Line]:
+    """같은 블록·같은 밑줄에 놓인 조각들을 한 줄로 합친다.
+
+    PyMuPDF 는 가로 간격이 크면 한 시각적 줄을 여러 line 으로 쪼갠다. Wiley 는
+    라벨과 설명 사이를 넓게 띄우므로(실측 10.1111/jocd.12338 blk25:
+    'FIGURE 1'(x398,y626) + 'Clinical photographs with'(x449,y626)) 합치지 않으면
+    라벨만 있는 줄이 되어 캡션으로 인식되지 못한다.
+    """
+    from collections import Counter
+
+    out: list[Line] = []
+    i = 0
+    frags = sorted(frags, key=lambda f: (round(f.y0, 1), f.x0))
+    while i < len(frags):
+        grp = [frags[i]]
+        j = i + 1
+        while j < len(frags):
+            g0 = min(f.y0 for f in grp)
+            g1 = max(f.y1 for f in grp)
+            c = frags[j]
+            ov = min(g1, c.y1) - max(g0, c.y0)
+            if ov <= 0 or ov < 0.55 * min(g1 - g0, c.y1 - c.y0):
+                break
+            grp.append(c)
+            j += 1
+        if len(grp) == 1:
+            out.append(grp[0])
+        else:
+            grp.sort(key=lambda f: f.x0)
+            sizes: Counter = Counter()
+            for f in grp:
+                sizes[f.size] += max(1, len(f.text))
+            head = grp[0]
+            out.append(Line(
+                page=head.page, block=head.block,
+                text=" ".join(f.text.strip() for f in grp),
+                x0=min(f.x0 for f in grp), y0=min(f.y0 for f in grp),
+                x1=max(f.x1 for f in grp), y1=max(f.y1 for f in grp),
+                size=sizes.most_common(1)[0][0],
+                lead_size=head.lead_size, lead_font=head.lead_font, bold=head.bold,
+                lead_distinct=(head.lead_distinct
+                               or any(f.lead_font != head.lead_font for f in grp[1:])),
+                bbox_block=head.bbox_block, first_of_block=head.first_of_block,
+                page_width=head.page_width))
+        i = j
+    return out
+
+
 def _page_lines(page, pno: int) -> list[Line]:
     from collections import Counter
 
@@ -329,8 +387,10 @@ def _page_lines(page, pno: int) -> list[Line]:
             if not txt.strip():
                 continue
             sizes: Counter = Counter()
+            fonts: Counter = Counter()
             for s in spans:
                 sizes[round(float(s["size"]), 1)] += max(1, len(s["text"]))
+                fonts[s.get("font", "")] += max(1, len(s["text"]))
             b = ln["bbox"]
             lead = spans[0]
             out.append(Line(
@@ -341,11 +401,20 @@ def _page_lines(page, pno: int) -> list[Line]:
                 lead_font=lead.get("font", ""),
                 bold=bool(int(lead.get("flags", 0)) & 2 ** 4)
                 or "bold" in lead.get("font", "").lower()
-                or "semibold" in lead.get("font", "").lower(),
+                or _bold_name(lead.get("font", "")),
+                lead_distinct=(lead.get("font", "") != fonts.most_common(1)[0][0]),
                 bbox_block=bb, first_of_block=first,
                 page_width=float(page.rect.width or 595.0)))
             first = False
-    return out
+    # 블록별로 같은 밑줄 조각을 합치고 first_of_block 을 다시 매긴다
+    merged: list[Line] = []
+    for bi in sorted({l.block for l in out}):
+        grp = _merge_fragments([l for l in out if l.block == bi])
+        for k, l in enumerate(grp):
+            l.first_of_block = (k == 0)
+        merged.extend(grp)
+    merged.sort(key=lambda l: (round(l.y0, 1), l.x0))
+    return merged
 
 
 def _assign_columns(lines: list[Line], page_width: float) -> None:
@@ -418,8 +487,14 @@ def _is_seed(line: Line, body: float) -> dict | None:
     got = parse_caption(line.text)
     if not got:
         return None
-    # 본문 크기와 같고 굵지도 않으면 본문 문장일 수 있다 → 라벨 뒤 구두점을 요구
-    if _same_size(line.size, body) and not line.bold:
+    # 캡션은 본문과 **조판이 다르다**. 넷 중 하나라도 있으면 캡션으로 본다.
+    #   · 글자 크기가 본문과 다르다(Springer 8.5 vs 10.0 등)
+    #   · 라벨이 굵다
+    #   · 라벨 글꼴이 그 줄의 나머지와 다르다
+    #     (실측 10.1111/jocd.12338 'FIGURE 1'(AdvTTfac587ca.B) +
+    #      'Clinical photographs with'(AdvTTa9c1b374) — 크기는 둘 다 본문과 같은 8.0)
+    #   · 번호 뒤에 구두점이 있다('Table 1. …')
+    if (_same_size(line.size, body) and not line.bold and not line.lead_distinct):
         t = prep(line.text)
         if not re.match(r"^(?:" + _FIGW + r"|" + _TABW + r")\s*\.?\s*"
                         + _NUM + r"[a-h]?\s*[.:|]", t):
@@ -591,21 +666,51 @@ def _anchored(lines: list[Line], grams: set[str], n: int = ANCHOR_NGRAM) -> list
     return hits
 
 
-def _stamps(lines: list[Line]) -> list[tuple[int, str]]:
-    """논문 경계 도장 — (읽기순서 인덱스, DOI)."""
+def _stamps(lines: list[Line], skip: set[str] | None = None) -> list[tuple[int, str]]:
+    """논문 경계 도장 — (읽기순서 인덱스, DOI).
+
+    도장은 **홀로 놓인 짧은 줄**이다. Wiley 참고문헌은 마지막 줄에 doi URL 을 두는데
+    (실측 10.1111/jdv.19451 에서 40줄) 그것을 도장으로 세면 지면이 40토막 난다.
+    그래서 (1) 이 논문 참고문헌의 DOI 는 제외하고 (2) 줄이 셋 이상인 블록은
+    참고문헌 덩어리로 보아 제외한다.
+    """
+    skip = skip or set()
+    nlines: dict[tuple[int, int], int] = {}
+    for l in lines:
+        nlines[(l.page, l.block)] = nlines.get((l.page, l.block), 0) + 1
     out = []
     for i, l in enumerate(lines):
         t = l.text.strip()
-        if len(t) > 130:
+        if len(t) > 130 or nlines.get((l.page, l.block), 1) > 3:
             continue
         m = _STAMP_RE.search(t)
         if m and len(m.group(0)) >= 0.5 * len(t):
-            out.append((i, m.group(1).rstrip(".").lower()))
+            d = m.group(1).rstrip(".").lower()
+            if d not in skip:
+                out.append((i, d))
             continue
         m = _STAMP_ALT_RE.match(t)
         if m:
-            out.append((i, m.group(1).rstrip(".").lower()))
+            d = m.group(1).rstrip(".").lower()
+            if d not in skip:
+                out.append((i, d))
     return out
+
+
+_REFHEAD_RE = re.compile(r"^\W{0,3}(?:REFERENCES?|References|참고문헌)\W{0,3}$")
+_EDITOR_RE = re.compile(r"^\W{0,3}(?:To the Editors?|Dear Editors?)\b", re.I)
+
+
+def _count_article_marks(lines: list[Line]) -> int:
+    """이 PDF 에 논문이 몇 편 실려 있나 — 편마다 한 번씩 찍히는 표지를 센다.
+
+    합본 지면 판정에 쓴다. DOI 도장이 없는 조판(실측 10.1016/j.jaad.2016.04.036 은
+    이웃 편 도장이 텍스트로 안 잡힌다)에서도 '레터 3편'을 알아내야 하기 때문이다.
+    표지는 (a) 홀로 놓인 'REFERENCES' 줄, (b) 'To the Editor:' 로 시작하는 줄.
+    """
+    refs = sum(1 for l in lines if _REFHEAD_RE.match(l.text.strip()))
+    eds = sum(1 for l in lines if _EDITOR_RE.match(l.text.strip()))
+    return max(refs, eds)
 
 
 def article_span(lines: list[Line], doc: dict) -> tuple[int, int, str]:
@@ -613,48 +718,76 @@ def article_span(lines: list[Line], doc: dict) -> tuple[int, int, str]:
 
     판정 불가면 (-1, -1, 사유) 를 돌려준다 — 그 경우 캡션을 하나도 쓰지 않는다.
     """
+    lo, hi, _, _, why = _spans(lines, doc)
+    return lo, hi, why
+
+
+def _segments(lines: list[Line], cuts: list[int]) -> list[tuple[int, int]]:
+    segs: list[tuple[int, int]] = []
+    a = 0
+    for c in sorted(set(cuts)):
+        if a <= c < len(lines):
+            segs.append((a, c))
+            a = c + 1
+    segs.append((a, len(lines) - 1))
+    return [(x, y) for x, y in segs if x <= y]
+
+
+def _spans(lines: list[Line], doc: dict) -> tuple[int, int, int, int, str]:
+    """(본문 구간 lo,hi · 보조자료까지 포함한 느슨한 구간 lo,hi · 근거).
+
+    본문 캡션은 좁은 구간으로, 보조자료 캡션(FIG E1 · Table S2)은 느슨한 구간으로
+    판정한다. 보조자료는 본문 뒤 'Online Repository' 쪽에 따로 실려 본문 표지
+    ('To the Editor') 경계 밖에 있기 때문이다(실측 10.1016/j.jaci.2014.02.038 은
+    5~10쪽이 FIG E1~E3 · TABLE E1~E3 이고 모두 이 논문 것이다).
+    """
     grams = _doc_ngrams(doc)
     hits = _anchored(lines, grams)
+    n = len(lines)
     if len(hits) < ANCHOR_MIN_LINES:
-        return -1, -1, f"본문 정박 줄 {len(hits)}개 < {ANCHOR_MIN_LINES} — 소유 판정 포기"
-    lo, hi = hits[0], hits[-1]
+        return (-1, -1, -1, -1,
+                f"본문 정박 줄 {len(hits)}개 < {ANCHOR_MIN_LINES} — 소유 판정 포기")
 
     stamps = _stamps(lines)
     distinct = {d for _, d in stamps}
-    if len(distinct) < 2:
-        # 도장이 한 종류뿐 = 이 PDF 는 한 편짜리다 → 지면 전체가 이 논문 것이다.
+    marks = _count_article_marks(lines)
+    n_art = max(len(distinct), marks)
+    if n_art < 2:
+        # 한 편짜리 지면 → 지면 전체가 이 논문 것이다.
         # (실측 10.1001/jamapediatrics.2017.5203 은 1쪽 본문·2쪽 그림+참고문헌 구성이라
         #  정박 구간만 쓰면 2쪽 'Figure 2. After treatment with oral, low-dose
         #  isotretinoin …' 을 놓친다)
-        return 0, len(lines) - 1, f"단일 편(DOI 도장 {len(distinct)}종) — 지면 전체"
+        return 0, n - 1, 0, n - 1, f"단일 편(편 표지 {n_art}개) — 지면 전체"
 
-    # 합본 지면: 도장 줄에서 스트림을 토막 내고 **정박 줄이 가장 많은 토막**을 고른다.
-    # 도장이 편 머리에 찍히는 조판(Annals of Dermatology)과 편 끝에 찍히는 조판
-    # (Elsevier 레터)이 섞여 있어 도장의 역할을 미리 가정하지 않는다.
-    cuts = sorted({i for i, _ in stamps})
-    segs: list[tuple[int, int]] = []
-    a = 0
-    for c in cuts:
-        if c >= a:
-            segs.append((a, c))
-        a = c + 1
-    segs.append((a, len(lines) - 1))
-    counts = [sum(1 for h in hits if x <= h <= y) for x, y in segs]
-    best = max(range(len(segs)), key=lambda k: counts[k])
-    lo2, hi2 = segs[best]
-    # 한 편 안에 DOI 줄이 더 있을 수 있다 → 정박이 충분한 이웃 토막은 이어 붙인다
-    thr = max(ANCHOR_MIN_LINES, 0.35 * counts[best])
-    k = best
-    while k - 1 >= 0 and counts[k - 1] >= thr:
-        k -= 1
-        lo2 = segs[k][0]
-    k = best
-    while k + 1 < len(segs) and counts[k + 1] >= thr:
-        k += 1
-        hi2 = segs[k][1]
-    return (lo2, hi2,
-            f"합본 {len(distinct)}편 · 도장 {len(cuts)}줄로 {len(segs)}토막 · "
-            f"정박 최다 토막 채택(정박 {counts[best]}/{len(hits)}줄, 읽기순서 {lo2}~{hi2})")
+    own = (doc.get("paper_id") or "").strip().lower()
+
+    def _is_own(d: str) -> bool:
+        return bool(own) and (d == own or d.startswith(own) or own.startswith(d))
+
+    # 경계 후보 둘. 이웃 편 DOI 도장은 **그 편의 끝**, 'To the Editor' 표지는
+    # **다음 편의 시작**이다. 내 DOI 도장은 한 편 안에 여러 번 찍힐 수 있어 경계로
+    # 삼지 않는다.
+    stamp_cuts = [i for i, d in stamps if not _is_own(d)]
+    mine_cuts = [i for i, d in stamps if _is_own(d)]
+    ed_cuts = [i - 1 for i, l in enumerate(lines)
+               if i and _EDITOR_RE.match(l.text.strip())]
+
+    def _pick(cuts: list[int], label: str) -> tuple[int, int, int, str]:
+        segs = _segments(lines, cuts)
+        cnt = [sum(1 for h in hits if x <= h <= y) for x, y in segs]
+        # 정박 줄이 가장 많은 토막. 같으면 내 DOI 도장이 든 쪽.
+        k = max(range(len(segs)),
+                key=lambda t: (cnt[t],
+                               sum(1 for c in mine_cuts if segs[t][0] <= c <= segs[t][1])))
+        return segs[k][0], segs[k][1], cnt[k], f"{label} {len(segs)}토막 중 {k}번"
+
+    lo2, hi2, c2, w2 = _pick(stamp_cuts + ed_cuts, "이웃 도장+표지")
+    lo1, hi1, _, _ = _pick(stamp_cuts, "이웃 도장")
+    # 느슨한 구간은 좁은 구간을 반드시 포함한다
+    lo1, hi1 = min(lo1, lo2), max(hi1, hi2)
+    why = (f"합본 {n_art}편(이웃 도장 {len(set(stamp_cuts))} · 표지 {marks}) — "
+           f"{w2}, 정박 {c2}/{len(hits)}줄 · 본문 {lo2}~{hi2} · 보조자료 {lo1}~{hi1}")
+    return lo2, hi2, lo1, hi1, why
 
 
 def owned_captions(pdf_path: str | Path, doc: dict, *,
@@ -663,11 +796,16 @@ def owned_captions(pdf_path: str | Path, doc: dict, *,
     """(이 논문 캡션, 이웃 논문으로 판정해 버린 캡션, 근거)."""
     lines = lines if lines is not None else document_lines(pdf_path)
     caps = extract_captions(pdf_path, lines=lines, typeset=typeset)
-    lo, hi, why = article_span(lines, doc)
+    lo, hi, llo, lhi, why = _spans(lines, doc)
     if lo < 0:
         return [], caps, why
-    mine = [c for c in caps if lo <= c.start <= hi]
-    other = [c for c in caps if not (lo <= c.start <= hi)]
+
+    def _own(c: Caption) -> bool:
+        a, b = (llo, lhi) if c.supp else (lo, hi)
+        return a <= c.start <= b
+
+    mine = [c for c in caps if _own(c)]
+    other = [c for c in caps if not _own(c)]
     return mine, other, why
 
 

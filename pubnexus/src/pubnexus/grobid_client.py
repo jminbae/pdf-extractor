@@ -24,7 +24,7 @@ from pathlib import Path
 import requests
 from lxml import etree
 
-from . import utils
+from . import metadata, utils
 from .schema import (Document, Meta, Section, Paragraph, Figure, Table,
                      Reference, BACK_MATTER, classify_section, classify_path,
                      normalize_title)
@@ -850,21 +850,25 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
             "".join(p.itertext()) for p in ab.iter("{*}p"))) or \
             norm_text("".join(ab.itertext()))
 
-    api_abstract = meta.get("abstract_pubmed") or meta.get("abstract") or ""
-    if extracted_abstract:
-        abstract, abstract_source = extracted_abstract, "extracted"
-    elif api_abstract:
-        abstract, abstract_source = api_abstract, "api"
-    else:
-        abstract, abstract_source = "", "none"
+    # 뽑은 초록을 무조건 믿지 않는다 — 합본 지면에서는 옆 논문의 초록이나
+    # 이 논문의 서론 첫 문단이 그 자리에 들어온다. 문법적으로 멀쩡해서
+    # 길이·null 검사를 전부 통과하므로, 증인(API 정본 / PDF 의 Abstract 표제
+    # 뒤 텍스트)과 대조해 고른다. pmc_xml 과 같은 판정을 쓴다.
+    _first = next((p.text for s in body_text for p in s.paragraphs if p.text), "")
+    abstract, abstract_source, _abs_info = metadata.choose_abstract(
+        extracted_abstract, meta, source_file or None,
+        body_first=_first, title=meta.get("title") or "")
 
-    return Document(
+    doc = Document(
         paper_id=meta.get("doi") or meta.get("pmid") or "unknown",
         source="grobid", source_file=source_file, meta=m,
         abstract=abstract, abstract_source=abstract_source,
         body_text=body_text, figures=figures, tables=tables,
         references=list(refs.values()),
     )
+    if _abs_info:
+        doc.qc["abstract"] = _abs_info
+    return doc
 
 
 def _drop_empty_stale(norm_dir: Path, doi: str) -> None:

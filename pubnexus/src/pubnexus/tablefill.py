@@ -851,8 +851,14 @@ def check_markdown(md: str) -> dict:
     if ndata <= 1 and ncols >= COLLAPSE_COLS:
         p.append("collapsed")
     if data:
-        last = data[-1]
-        if len(last) < ncols and last and _OPEN_TAIL.search(last[-1] or ""):
+        last = [c for c in data[-1] if c.strip()]
+        tail = last[-1] if last else ""
+        # 셀 중간에서 잘린 표. 실측: '| Black | 2 (4) | 8 (23) | 1 (4) | 4 ('
+        # — 행 길이는 멀쩡한데 마지막 값이 '4 (' 에서 끊겼다. 그래서 길이가
+        # 아니라 **괄호가 열린 채 끝났는가**를 본다.
+        if _OPEN_TAIL.search(tail) or tail.count("(") > tail.count(")"):
+            p.append("truncated")
+        elif len(data[-1]) < ncols:
             p.append("truncated")
     if UNREADABLE in (md or ""):
         p.append("unreadable")
@@ -870,10 +876,13 @@ _TABLE_CAPTION = re.compile(
     r"^\s*\(?\s*(?:table|tab\.|tabla|tableau)\s*"
     r"(?:[ivxlIVXL]{1,5}|\d{1,3}|[A-Z]\d?)\s*[.:)\-–—|]?(?:\s|$)", re.I)
 # 참고문헌 항목: '3. Zhong SY, Chen YX, Fang M et al. …' / '… 1999; 135: 790-793.'
+# 'et al. + 연도' 는 **넣으면 안 된다** — 연구 특성표는 행마다 'Arakawa et al
+# 2015' 를 담으므로 진짜 표가 통째로 참고문헌으로 오인된다(실측:
+# 10.1111/phpp.12596 의 'TA B LE 1 Characteristics of studies included in this
+# review' 가 이 조건 하나로 지워질 뻔했다).
 _REF_ITEM = re.compile(
     r"(?:^\s*\d{1,3}[.)]\s+[A-Z][A-Za-z'’-]+\s+[A-Z]{1,3}\b)"
-    r"|(?:\b(?:19|20)\d\d\s*;\s*\d+\s*(?:\(\d+\))?\s*:\s*\d+)"
-    r"|(?:\bet\s+al\b.{0,80}\b(?:19|20)\d\d\b)")
+    r"|(?:\b(?:19|20)\d\d\s*;\s*\d+\s*(?:\(\d+\))?\s*:\s*\d+)")
 # 지면 장식(워터마크·저작권·다운로드 안내). 표 셀에 있으면 표가 아니다.
 _FURNITURE = re.compile(
     r"(?:Creative\s+Commons|OA\s+articles?\s+are\s+governed|Protected\s+by\s+copyright"
@@ -912,17 +921,95 @@ def fake_table_reason(caption: str, markdown: str) -> str | None:
             return 0.0
         return sum(1 for r in data if pat.search(" ".join(r))) / len(data)
 
+    # 참고문헌·지면장식 판정은 **내용(데이터 행)으로만** 한다. 캡션만 보고
+    # 지우면 안 된다 — 이 코퍼스에는 캡션이 워터마크로 뒤바뀐 **진짜 표**가
+    # 있다(실측: 10.1111/jdv.19451 tab_4 의 캡션은 ', 2023, 11, OA articles are
+    # governed by the applicable Creative Commons License' 이지만 내용은 PDF
+    # 6쪽의 'TA B L E 4 Modified assessment check list.' 그 자체다).
     if _SIDEBAR.search(blob):
         return "sidebar_box"
-    if hit_frac(_REF_ITEM) >= FAKE_MIN_HITS or _REF_ITEM.search(caption or ""):
+    if hit_frac(_REF_ITEM) >= FAKE_MIN_HITS:
         return "reference_list"
-    if hit_frac(_FURNITURE) >= FAKE_MIN_HITS or _FURNITURE.search(caption or ""):
+    if hit_frac(_FURNITURE) >= FAKE_MIN_HITS:
         return "page_furniture"
     if ncols < 2:
         return "single_column"
-    if _flows_as_prose([r for r in rows if r]):
-        return "prose_flow"
+    # _flows_as_prose 는 **지우는 근거로 쓰지 않는다.** 불릿 목록을 한 열에
+    # 담은 진짜 표가 문단처럼 흐르기 때문이다(실측: 10.1111/jdv.19450 의
+    # 'TA B L E 1 Phototherapy pearls in vitiligo' — PDF 4쪽에 3열로 실재하는데
+    # 오른쪽 열이 '• Early localized…' 불릿이라 문단으로 판정됐다).
+    # 추출 단계의 _validate 에서는 계속 쓴다(거기서는 '만들지 않는' 판단이라
+    # 보수적인 쪽이 안전한 반면, 여기서는 '지우는' 판단이라 반대다).
     return None
+
+
+_FIG_HEAD = re.compile(r"^fig(?:ure)?(?:[ivxl]{1,5}|\d{1,3})")
+FIG_TOKEN_MIN = 5          # 겹침을 따질 최소 낱말 수
+FIG_TOKEN_FRAC = 0.7       # 이 비율 이상 겹치면 그림 캡션으로 본다
+
+
+def _long_tokens(s: str) -> set[str]:
+    return {t for t in re.findall(r"[A-Za-z]{4,}", (s or "").lower())}
+
+
+def caption_in_pdf_figure(pages: list[_Page], caption: str) -> bool:
+    """이 캡션이 PDF 의 **그림 캡션**과 같은 것인가 → 표가 아니라 그림이다.
+
+    낱말 겹침으로 본다(부분문자열이 아니라). 조판이 'FI G U R E 1 The Vitiligo
+    Extent Score for a Target Area (VESTA).' 인데 추출된 캡션은 '. Total
+    repigmentation 100 VESTA Vitiligo Extent Score for a Target Area' 처럼
+    어순과 앞머리가 달라져 있어 부분문자열로는 걸리지 않는다.
+    실측: 10.1111/pcmr.12730 tab_0 은 Figure 1 의 채점 양식이지 표가 아니다
+    (PDF 2쪽에서 확인).
+    """
+    toks = _long_tokens(caption)
+    if len(toks) < FIG_TOKEN_MIN:
+        return False
+    for pg in pages:
+        for block in pg.blocks:
+            if not block or not _FIG_HEAD.match(_key(block[0]["text"])):
+                continue
+            body = " ".join(ln["text"] for ln in block[:6])
+            ftoks = _long_tokens(body)
+            if not ftoks:
+                continue
+            if len(toks & ftoks) / len(toks) >= FIG_TOKEN_FRAC:
+                return True
+    return False
+
+
+def caption_in_pdf_table(pages: list[_Page], caption: str) -> bool:
+    """이 캡션이 PDF 의 **진짜 표 캡션 안에** 들어 있는가.
+
+    GROBID 가 캡션 앞머리 'Table 1' 을 잃는 조판이 있다(자간을 벌린
+    'TA B L E 1' 은 낱말로 붙지 않는다). 그러면 캡션만 봐서는 표인지 알 수
+    없다. PDF 블록 머리에서 'Table N' 으로 시작하는 캡션을 모아, 그 안에
+    이 문자열이 들어 있으면 **표가 실재한다**고 보고 지우지 않는다.
+    """
+    key = _key(caption)
+    if len(key) < CAP_MIN_KEY:
+        return False
+    needle = key[:max(CAP_MIN_KEY, min(len(key), 60))]
+    for pg in pages:
+        for block in pg.blocks:
+            if not block:
+                continue
+            head = _key(block[0]["text"])
+            if not _PDF_TABLE_HEAD.match(head):
+                continue
+            whole = "".join(ln["key"] for ln in block[:6])
+            if needle in whole:
+                return True
+    return False
+
+
+# 'Supplemental Table I' · 'Appendix Table 2' · 'Online Table 3' 도 표다.
+# 실측: 10.1016/j.jaad.2018.06.016 의 'Supplemental Table I. Adverse events of
+# micropunch grafting, by various factors (N = 230)'(PDF 9쪽)이 같은 논문
+# Fig 4 캡션과 낱말이 겹쳐 '그림'으로 지워질 뻔했다.
+_PDF_TABLE_HEAD = re.compile(
+    r"^(?:supplement(?:al|ary)?|appendix|online|web|extended|additional|e)?"
+    r"tab(?:le)?(?:[ivxl]{1,5}|\d{1,3})")
 
 
 # ── 표 하나 복원 ────────────────────────────────────────────────────
@@ -1163,24 +1250,76 @@ def extract_table(pages: list[_Page], caption: str) -> tuple[str, dict]:
     if info.get("continued_page"):
         info["span"]["continued_page"] = info["continued_page"]
 
-    # 표 본문 줄들의 글자 크기(중앙값). 각주는 이보다 크지 않다.
-    sizes = sorted(ln.get("size") or 0.0 for ln in pg.lines
-                   if ys[0] < (_rot(ln["bbox"], mode)[1]) < ys[-1]
-                   and rx0 - 6 < _rot(ln["bbox"], mode)[0] < rx1 + 6)
+    # 표 본문 글자 크기의 **천장**. 각주는 표 본문보다 크지 않다.
+    # 중앙값을 쓰면 안 된다 — 기호 글꼴(★ 등)이 작은 크기로 잡혀 중앙값을
+    # 끌어내린다(실측: 10.1002/jso.23438 Table III 은 6.0pt 67줄 · 7.5pt 52줄
+    # 이라 중앙값이 6.0 이 되어 7.5pt 각주가 통째로 버려졌다).
+    sizes = [ln.get("size") or 0.0 for ln in pg.lines
+             if ys[0] < (_rot(ln["bbox"], mode)[1]) < ys[-1]
+             and rx0 - 6 < _rot(ln["bbox"], mode)[0] < rx1 + 6]
     sizes = [s for s in sizes if s]
-    body_h = sizes[len(sizes) // 2] if sizes else 0.0
+    body_h = max(sizes) if sizes else 0.0
     note = _footnote_below(pg, mode, (rx0, ys[0], rx1, ys[-1]), stop_y, body_h)
     if note:
         info["footnote"] = note
     return md, info
 
 
-# ── 문서 단위 ───────────────────────────────────────────────────────
-def fill_document(doc: dict, pdf_path) -> tuple[dict, dict]:
-    """정본 문서의 빈 표를 PDF 에서 복원. (수정된 doc, 통계) 반환.
+# ── 수리 판정: 새 추출이 기존 markdown 을 **확실히** 이길 때만 바꾼다 ──
+_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
-    입력 doc 은 건드리지 않는다(깊은 복사본을 돌려준다). 이미 markdown 이 있는
-    표는 손대지 않으며, 복원에 실패한 표도 **빈 채로 그대로** 두고 사유만 남긴다.
+
+def _num_counts(md: str) -> dict[str, int]:
+    c: dict[str, int] = {}
+    for tok in _NUM.findall(md or ""):
+        tok = tok.rstrip(",")
+        c[tok] = c.get(tok, 0) + 1
+    return c
+
+
+def better_reason(old_md: str, new_md: str, info: dict) -> str | None:
+    """새 추출로 갈아탈 수 없는 이유. 갈아탈 만하면 None.
+
+    임상 논문이다. **틀린 숫자가 든 표는 없는 표보다 훨씬 해롭다.** 그래서
+    '더 나아 보인다'가 아니라 **잃는 것이 하나도 없다**를 조건으로 삼는다.
+      · 새 표에 못 읽은 글자(U+FFFD)가 있으면 안 된다 — 글꼴 인코딩이 깨진
+        조판에서 PDF 텍스트층은 '26·0' 을 '26\\x010' 으로 준다. 여기서는
+        GROBID 쪽 값이 더 낫다(실측: 10.1111/bjd.15560 표 3개).
+      · 기존 표에 있던 **수 토큰이 하나도 빠지지 않아야** 한다(개수까지).
+        이 한 조건이 이웃 논문 표를 끌어오는 사고와 영역을 잘못 잡아 행을
+        잘라먹는 사고를 동시에 막는다.
+      · 구조 검사를 통과해야 한다.
+      · 데이터 행이 기존보다 적으면 안 된다.
+    """
+    if not new_md:
+        return "no_extraction"
+    if info.get("unreadable"):
+        return "unreadable_glyphs"
+    chk_new = check_markdown(new_md)
+    if not chk_new["ok"]:
+        return "new_" + chk_new["problems"][0]
+    chk_old = check_markdown(old_md)
+    if chk_new["ndata"] < chk_old["ndata"]:
+        return "fewer_rows"
+    old_n, new_n = _num_counts(old_md), _num_counts(new_md)
+    missing = [k for k, v in old_n.items() if new_n.get(k, 0) < v]
+    if missing:
+        return "loses_numbers:" + ",".join(sorted(missing)[:6])
+    return None
+
+
+# ── 문서 단위 ───────────────────────────────────────────────────────
+def fill_document(doc: dict, pdf_path, *, repair: bool = True,
+                  drop_fake: bool = True) -> tuple[dict, dict]:
+    """정본 문서의 표를 PDF 로 채우고·고치고·걸러 낸다. (수정된 doc, 통계).
+
+    입력 doc 은 건드리지 않는다(깊은 복사본을 돌려준다). 세 갈래로 나뉜다.
+      1. **관문** — 표가 아닌 것(참고문헌 목록·약어 상자·지면 장식·본문 문단)을
+         `tables[]` 에서 뺀다. 캡션이 'Table N' 이면 절대 빼지 않는다.
+      2. **채움** — markdown 이 빈 표를 PDF 좌표로 복원한다(기존 동작).
+      3. **수리** — markdown 이 있으나 구조 검사에 걸린 표를, 새 추출이
+         `better_reason() is None` 일 때만 갈아 끼운다. 아니면 그대로 둔다.
+    복원에 성공한 표에는 각주(`footnote`)와 지면 좌표(`pdf_span`)도 담는다.
     """
     import copy
 
@@ -1188,33 +1327,88 @@ def fill_document(doc: dict, pdf_path) -> tuple[dict, dict]:
 
     out = copy.deepcopy(doc)
     tables = out.get("tables") or []
-    targets = [i for i, t in enumerate(tables)
-               if not ((t or {}).get("markdown") or "").strip()]
     stats: dict[str, Any] = {
         "paper_id": out.get("paper_id"),
         "pdf": str(pdf_path),
         "tables_total": len(tables),
-        "empty": len(targets),
-        "filled": 0,
-        "failed": 0,
-        "reasons": {},
-        "items": [],
+        "empty": 0, "filled": 0, "failed": 0,
+        "broken": 0, "repaired": 0, "repair_declined": 0,
+        "dropped": 0, "footnotes": 0,
+        "reasons": {}, "declined": {}, "items": [],
     }
-    if not targets:
+    if not tables:
         return out, stats
+
+    def bump(d: str, k: str) -> None:
+        stats[d][k] = stats[d].get(k, 0) + 1
 
     pdoc = fitz.open(str(pdf_path))
     try:
         pages = [_Page(p) for p in pdoc]
-        for i in targets:
-            t = tables[i]
-            caption = (t.get("caption") or "").strip()
-            try:
-                md, info = extract_table(pages, caption)
-            except Exception as e:              # noqa: BLE001 — 표 하나 실패로 문서를 버리지 않는다
-                md, info = "", {"reason": f"error:{type(e).__name__}"}
-            item = {"id": t.get("id"), "caption": caption[:120]}
-            item.update({k: v for k, v in info.items() if v not in (None, 0, False)})
+        return _fill_with_pages(out, tables, pages, stats, bump,
+                                repair=repair, drop_fake=drop_fake)
+    finally:
+        pdoc.close()
+
+
+def _fill_with_pages(out, tables, pages, stats, bump, *, repair, drop_fake):
+    # ── 1. 관문 ─────────────────────────────────────────────────────
+    kept: list[dict] = []
+    for t in tables:
+        cap = (t.get("caption") or "").strip()
+        why = fake_table_reason(cap, t.get("markdown") or "") if drop_fake else None
+        if drop_fake and not why and not _TABLE_CAPTION.match(cap) \
+                and caption_in_pdf_figure(pages, cap):
+            why = "figure_not_table"
+        if why and caption_in_pdf_table(pages, cap):
+            # PDF 에 이 문구를 담은 진짜 표 캡션이 있다 → 지우지 않는다
+            why = None
+        if why:
+            stats["dropped"] += 1
+            stats["items"].append({"id": t.get("id"), "status": "dropped",
+                                   "reason": why, "caption": cap[:120]})
+            continue
+        kept.append(t)
+    out["tables"] = tables = kept
+
+    # 수리는 **구조 검사에 걸린 표에만** 걸지 않는다. 열 밀림·셀 병합처럼
+    # markdown 구조만 봐서는 멀쩡해 보이는 결함이 있기 때문이다(실측:
+    # 'Scatizzi | Italy | Cohort (M) 30 (14/16) 30 (16/14) | 69 (43-86)' —
+    # 세 값이 한 칸에 뭉쳤는데 행 길이는 일정하다). 대신 **받아들이는 조건**을
+    # 좁게 잡는다(better_reason). 새 추출이 기존 값을 하나도 잃지 않을 때만
+    # 갈아 끼우므로, 전부 시도해도 안전하다.
+    todo = []
+    for t in tables:
+        md = (t.get("markdown") or "").strip()
+        if not md:
+            stats["empty"] += 1
+            todo.append((t, "fill"))
+            continue
+        if not check_markdown(md)["ok"]:
+            stats["broken"] += 1
+        todo.append((t, "repair" if repair else "note"))
+    if not todo:
+        return out, stats
+
+    for t, job in todo:
+        caption = (t.get("caption") or "").strip()
+        try:
+            md, info = extract_table(pages, caption)
+        except Exception as e:                  # noqa: BLE001 — 표 하나 실패로 문서를 버리지 않는다
+            md, info = "", {"reason": f"error:{type(e).__name__}"}
+        item = {"id": t.get("id"), "job": job, "caption": caption[:120]}
+        item.update({k: v for k, v in info.items()
+                     if k not in ("span",) and v not in (None, 0, False)})
+        if info.get("span"):
+            t["pdf_span"] = info["span"]
+        if info.get("footnote") and not (t.get("footnote") or "").strip():
+            t["footnote"] = info["footnote"]
+            t["footnote_source"] = "pdf_tablefill"
+            stats["footnotes"] += 1
+
+        if job == "note":
+            item["status"] = "note_only"
+        elif job == "fill":
             if md:
                 t["markdown"] = md
                 t["markdown_source"] = "pdf_tablefill"
@@ -1222,12 +1416,23 @@ def fill_document(doc: dict, pdf_path) -> tuple[dict, dict]:
                 item["status"] = "filled"
             else:
                 stats["failed"] += 1
-                r = info.get("reason") or "unknown"
-                stats["reasons"][r] = stats["reasons"].get(r, 0) + 1
+                bump("reasons", info.get("reason") or "unknown")
                 item["status"] = "failed"
-            stats["items"].append(item)
-    finally:
-        pdoc.close()
+        else:                                   # repair
+            why = better_reason(t.get("markdown") or "", md, info)
+            if why is None:
+                item["before"] = check_markdown(t["markdown"])["problems"]
+                t["markdown_before_repair"] = t["markdown"]
+                t["markdown"] = md
+                t["markdown_source"] = "pdf_tablefill_repair"
+                stats["repaired"] += 1
+                item["status"] = "repaired"
+            else:
+                stats["repair_declined"] += 1
+                bump("declined", why.split(":")[0])
+                item["status"] = "declined"
+                item["declined"] = why[:120]
+        stats["items"].append(item)
     return out, stats
 
 

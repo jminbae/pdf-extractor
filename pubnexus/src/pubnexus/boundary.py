@@ -76,11 +76,42 @@ NOT_TITLE_RE = re.compile(
     r'conflicts?\s+of\s+interest|funding\s+sources?|disclosure|author\s+contributions?|'
     r'supporting\s+information|abstract|summary|key\s?words?|see\s+related|'
     r'linked\s+(?:article|comment)|editor\'?s?\s+note|table\s+\d|fig(?:ure)?\.?\s*\d|'
-    r'appendix|erratum|correction)\b', re.I)
+    r'appendix|erratum|correction|short\s+report|brief\s+report|original\s+article|'
+    r'review\s+article|images?\s+in|journal\s+of\b|clinical\s+letter|'
+    # 절 제목 — 이것들이 제목 런으로 승격되면 논문 한가운데가 경계가 된다
+    r'(?:introduction|background|methods?|materials?|results?|discussion|conclusions?|'
+    r'limitations?|patients?\s+and\s+methods|case\s+report|statistical\s+analysis|'
+    r'data\s+availability|ethics?|consent|orcid|competing\s+interests?|'
+    r'author\s+information|to\s+the\s+editor|dear\s+editor)\s*[:.]?\s*$)', re.I)
 
 AUTHORLINE_RE = re.compile(
     r'^[A-Z][A-Za-z\'`’.\- ]+,?\s*(?:M\.?D\.?|Ph\.?D\.?|MSc|MBBS|MPH|iD\b)',
     re.I)
+
+# 제목이 아니라 저자·소속·교신 줄인지. 저자 블록을 제목으로 오인하면 논문
+# 한가운데(저자 서명 자리)가 새 논문의 시작으로 잡힌다(실측 10.1111/jdv.16226
+# 은 저자 블록 세 줄이 각각 구간이 되어 5개로 쪼개졌다).
+_FUNC_WORDS = {"the", "of", "and", "in", "with", "for", "a", "an", "to", "on",
+               "after", "by", "from", "is", "are", "as", "at", "using", "during",
+               "into", "versus", "vs", "case", "report"}
+
+
+def _looks_author(text: str) -> bool:
+    t = text.strip()
+    if "@" in t or re.search(r'\b(?:e-?mail|correspondence|department|university|'
+                             r'hospital|college of medicine)\b', t, re.I):
+        return True
+    words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", t)
+    if len(words) < 2:
+        return False
+    if any(w.lower() in _FUNC_WORDS for w in words):
+        return False
+    caps = sum(1 for w in words if w[:1].isupper())
+    if caps / len(words) < 0.8:
+        return False
+    return bool(t.count(",") >= 1
+                or re.search(r'\b(?:MD|PhD|MSc|MBBS|MPH|iD)\b', t)
+                or re.search(r'\d\s*[,*]', t))
 
 
 def _norm(s: str) -> str:
@@ -246,7 +277,10 @@ def _doi_markers(lines: list[dict]) -> dict[int, str]:
     일이 흔하다(Wiley). 그것까지 표식으로 세면 참고문헌 목록 한가운데가 경계가
     되어 본문이 두 동강 난다(실측 10.1111/dth.13157: 참고문헌의
     `10.1097/IOP.0b013e3182141c37` 가 구간 이름표로 뽑혔다).
-    진짜 표식은 위아래로 빈 줄만큼 떨어져 있으므로 **세로 간격**으로 가른다.
+    가르는 잣대는 **아래쪽 간격**이다(실측 7편의 DOI 줄 12개를 재 보니
+    참고문헌 안에 딸려 온 것은 아래 간격이 줄높이의 0.40배로 붙어 있고, 진짜
+    이음매 표식은 0.95~7.2배로 떨어져 있었다). 위쪽 간격은 0.33~1.83배로 흩어져
+    구분에 쓸 수 없다 — 표식 DOI 는 앞 편 참고문헌 마지막 줄 바로 아래에 붙는다.
     """
     from collections import defaultdict
     groups: dict[tuple, list[dict]] = defaultdict(list)
@@ -264,6 +298,10 @@ def _doi_markers(lines: list[dict]) -> dict[int, str]:
     out = {}
     for ln in lines:
         d = _is_doi_line(ln)
+        # PLOS 는 표·그림마다 하위 DOI 를 따로 찍는다(…0179088.t002). 이건 논문의
+        # 신원이 아니다.
+        if d and re.search(r'\.(?:[tgs]\d{3}|s\d{3})$', d, re.I):
+            continue
         if d and ln["i"] in iso:
             out[ln["i"]] = d
     return out
@@ -309,10 +347,17 @@ class Segment:
     doi: str | None = None
     title: str = ""
     evidence: list[str] = field(default_factory=list)
+    doi_alt: str | None = None           # 경계에 놓여 양쪽 후보인 DOI
+
+    def has_doi(self, doi: str) -> bool:
+        doi = doi.strip().lower().rstrip(".")
+        return doi in {(d or "").strip().lower().rstrip(".")
+                       for d in (self.doi, self.doi_alt) if d}
 
     def to_dict(self) -> dict:
         return dict(index=self.index, start=self.start, end=self.end,
-                    doi=self.doi, title=self.title, evidence=list(self.evidence))
+                    doi=self.doi, doi_alt=self.doi_alt, title=self.title,
+                    evidence=list(self.evidence))
 
 
 @dataclass
@@ -404,57 +449,132 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
                if _is_opener(ln) and ln["i"] not in run]
     doi_lines = _doi_markers(lines)
 
-    # 2) 서두를 닻으로 제목 런을 거슬러 올라가 절단점을 만든다
-    cuts: dict[int, dict] = {}
-    for oi in openers:
-        j = oi - 1
-        head_doi = None
-        # 서두 바로 앞의 단독 DOI 줄(BJD 유형)은 이 편의 머리다
-        while j >= 0 and (lines[j]["i"] in run or not lines[j]["text"].strip()):
-            j -= 1
-        if j >= 0 and j in doi_lines:
-            head_doi = doi_lines[j]
-            j -= 1
-        title_lines: list[dict] = []
-        guard = 0
-        while j >= 0 and guard < 14:
-            ln = lines[j]
-            if ln["i"] in run:
-                j -= 1
-                guard += 1
-                continue
-            if not _titleish(ln, body_size, body_font):
-                break
-            # 제목 런은 같은 페이지·같은 단 안에서 이어져야 한다
-            if title_lines and (ln["page"] != title_lines[-1]["page"]
-                                or ln["col"] != title_lines[-1]["col"]):
-                break
-            title_lines.append(ln)
-            j -= 1
-            guard += 1
-        title_lines.reverse()
-        # 저자 블록만 잡힌 경우(제목 없음)는 제목으로 인정하지 않는다
-        while title_lines and AUTHORLINE_RE.match(title_lines[-1]["text"].strip()):
-            title_lines.pop()
+    # 2) 제목 런을 찾고, 그 옆의 증거(서두 / 머리DOI / 앞 편 꼬리DOI)로 절단점을
+    #    인정한다. 서두만 닻으로 삼으면 서두가 아예 없는 저널을 통째로 놓친다 —
+    #    CED 는 '제목 → doi: 10.1111/ced.13226 → 본문' 이고(실측 10.1111/ced.13226
+    #    은 3편이 실린 지면인데 구간 1개로 잡혔다), EJD 는 '앞 편 doi → 제목 →
+    #    본문' 이다(10.1684/ejd.2018.3344).
+    idx_run = set(run)
+    live = [ln for ln in lines if ln["i"] not in idx_run]
 
-        if title_lines:
-            start = title_lines[0]["i"]
-            ev = ["제목런+서두"]
-        elif head_doi:
-            start = oi
-            ev = ["머리DOI+서두"]
-        else:
-            # 앞 편의 꼬리 DOI 가 바로 앞에 있으면 그것으로 경계를 인정한다
-            prev_doi = [k for k in doi_lines if k < oi and oi - k <= 4]
-            if prev_doi:
-                start = oi
-                ev = ["앞편 꼬리DOI+서두"]
-            else:
-                continue                       # 근거 부족 → 절단점으로 쓰지 않는다
-        title = " ".join(l["text"].strip() for l in title_lines).strip()
-        prev = cuts.get(start)
-        if prev is None or (not prev["title"] and title):
-            cuts[start] = dict(title=title, doi=head_doi, ev=ev, opener=oi)
+    def _next_live(i: int, k: int) -> list[dict]:
+        out = []
+        for ln in lines[i + 1:]:
+            if ln["i"] in idx_run:
+                continue
+            out.append(ln)
+            if len(out) >= k:
+                break
+        return out
+
+    title_runs: list[list[dict]] = []
+    cur: list[dict] = []
+    for ln in live:
+        if _titleish(ln, body_size, body_font):
+            if cur:
+                p = cur[-1]
+                broken = (ln["page"] != p["page"] or ln["col"] != p["col"]
+                          or ln["y0"] - p["y1"] > max(6.0, (p["y1"] - p["y0"]) * 1.6))
+                if broken:
+                    title_runs.append(cur)
+                    cur = []
+            cur.append(ln)
+        elif cur:
+            title_runs.append(cur)
+            cur = []
+    if cur:
+        title_runs.append(cur)
+
+    def _prose_run(after: list[dict], need: int = 3) -> bool:
+        """이어지는 본문 산문 줄이 need 개 이상인가(= 여기서 논문이 시작한다)."""
+        n = 0
+        for ln in after:
+            if (abs(ln["size"] - body_size) < 0.35 and ln["font"] == body_font
+                    and len(ln["text"].strip()) >= 25):
+                n += 1
+                if n >= need:
+                    return True
+            elif n:
+                return False
+        return False
+
+    cuts: dict[int, dict] = {}
+    for tr in title_runs:
+        while tr and (AUTHORLINE_RE.match(tr[-1]["text"].strip())
+                      or _looks_author(tr[-1]["text"])):
+            tr.pop()
+        if not tr or len(tr) > 12:
+            continue
+        if any(_looks_author(l["text"]) for l in tr):
+            continue
+        title = " ".join(l["text"].strip() for l in tr).strip()
+        # 짧은 줄은 제목으로 인정하지 않는다 — 'Young-Min Park' 같은 저자 한 줄이
+        # 제목으로 승격되면 논문 한가운데가 경계가 된다(실측 10.5021/ad.2018.30.5.630).
+        if len(title) < 20 or len(title) > 300 or len(title.split()) < 3:
+            continue
+        after = _next_live(tr[-1]["i"], 10)
+        head_doi_at = next((k for k, ln in enumerate(after[:2])
+                            if ln["i"] in doi_lines), None)
+        head_doi = doi_lines[after[head_doi_at]["i"]] if head_doi_at is not None else None
+        opener_at = next((ln["i"] for ln in after[:3] if _is_opener(ln)), None)
+        # 앞쪽 3줄 안의 단독 DOI = 앞 편의 꼬리
+        prev_tail = None
+        seen = 0
+        for ln in reversed(lines[:tr[0]["i"]]):
+            if ln["i"] in idx_run:
+                continue
+            seen += 1
+            if seen > 3:
+                break
+            if ln["i"] in doi_lines:
+                prev_tail = ln["i"]
+                break
+
+        # 구조 증거: 제목 바로 뒤에서 논문이 실제로 시작하는가
+        body_after = after[head_doi_at + 1:] if head_doi_at is not None else after
+        starts_here = opener_at is not None or _prose_run(body_after)
+        ev = []
+        if opener_at is not None:
+            ev.append("제목런+서두")
+        if head_doi and starts_here:
+            ev.append("제목런+머리DOI")
+        if prev_tail is not None and starts_here:
+            ev.append("앞편 꼬리DOI+제목런")
+        # 서두도 인접 DOI 도 없으면 경계로 인정하지 않는다. 구조만으로 자르면
+        # 절 제목·그림 캡션이 전부 새 논문의 시작이 된다.
+        if not ev:
+            continue
+        cuts[tr[0]["i"]] = dict(title=title, doi=head_doi, ev=ev, opener=opener_at)
+
+    # 제목 런이 없는데 앞 편 꼬리 DOI 바로 뒤에 서두가 오는 경우(제목 조판이
+    # 본문과 구분되지 않는 PDF)도 경계로 인정한다.
+    for oi in openers:
+        if any(s <= oi < s + 20 for s in cuts):
+            continue
+        prev = [k for k in doi_lines if k < oi and oi - k <= 4]
+        if prev and oi not in cuts:
+            cuts[oi] = dict(title="", doi=None, ev=["앞편 꼬리DOI+서두"], opener=oi)
+
+    # 한 제목이 여러 런으로 쪼개지면 절단점이 연달아 생긴다(2단 판정이 제목의
+    # 첫 줄만 전폭으로 보는 경우 등 — 실측 10.1111/phpp.12784·10.1111/pai.13931·
+    # 10.1016/j.jid.2018.09.024·10.5021/ad.2017.29.6.817 에서 제목 한 개가 구간
+    # 두 개가 됐다). 가까운 절단점은 하나로 합치고 제목도 이어 붙인다.
+    merged: dict[int, dict] = {}
+    for s in sorted(cuts):
+        if merged:
+            last = max(merged)
+            gap = sum(1 for ln in lines[last:s] if ln["i"] not in idx_run)
+            if gap <= 6:
+                m = merged[last]
+                m["title"] = (m["title"] + " " + cuts[s]["title"]).strip()
+                m["doi"] = m["doi"] or cuts[s]["doi"]
+                m["opener"] = m["opener"] if m["opener"] is not None else cuts[s]["opener"]
+                for e in cuts[s]["ev"]:
+                    if e not in m["ev"]:
+                        m["ev"].append(e)
+                continue
+        merged[s] = cuts[s]
+    cuts = merged
 
     # 3) 구간 만들기 — 첫 절단점 앞의 머리 구역(prefix) 처리
     #    Wiley 계열은 1쪽 맨 위에 'Received … | DOI: 10.1111/…' 와 저널 표제를
@@ -485,17 +605,87 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
         c = cuts[s]
         segments.append(Segment(k, s, e, c["doi"], c["title"], list(c["ev"])))
 
-    # 4) 꼬리 DOI 로 이름표 보강(Elsevier/JEADV/EJD 유형)
+    # 4) DOI 줄을 구간에 배정한다. **이음매에 놓인 DOI 를 먼저 처리해야 한다** —
+    #    앞 구간 안에 있다고 무조건 그 구간의 꼬리로 삼으면, 뒤 편의 머리 DOI 를
+    #    앞 편이 가져가 이름표가 통째로 어긋난다(실측 10.5021/ad.2018.30.5.630 은
+    #    다음 편 Steatocystoma 의 DOI ...633 을 자기 이름표로 달았다).
+    seam: dict[int, str] = {}
+    for k in range(len(segments) - 1):
+        b = segments[k + 1]
+        near = [i for i in doi_lines if b.start - 4 <= i < b.start]
+        for i in near:
+            seam[i] = "?"
+
+    # 이음매 DOI 가 앞 편의 꼬리인지 뒤 편의 머리인지는 **조판만으로 갈리지 않는다.**
+    #   · JEADV  `DOI: 10.1111/jdv.16524`  → 위쪽 GvHD 편지의 것(꼬리)
+    #   · Elsevier `http://dx.doi.org/10.1016/j.jaad.2016.04.002` → 꼬리
+    #   · Ann Dermatol `https://doi.org/10.5021/ad.2018.30.5.630` → 아래 LGR4 논문의 것(머리)
+    # 세 경우의 좌표·글꼴 배치가 사실상 같다. 그래서 기본값은 다수 관행인 '꼬리'로
+    # 두되, **그 DOI 가 이 레코드의 paper_id 이고 아래 구간의 제목이 이 레코드의
+    # 제목과 일치하면** 그때만 '머리'로 뒤집는다(그 편이 이 논문이라는 독립 증거가
+    # 두 개 겹친 경우다).
+    def _title_hit(seg: Segment) -> bool:
+        if not want_title or len(want_title) < 20:
+            return False
+        t = _norm_title(seg.title)
+        if len(t) < 20:
+            return False
+        import difflib
+        return (t == want_title or t in want_title or want_title in t
+                or difflib.SequenceMatcher(None, t, want_title).ratio() >= 0.82)
+
+    for i in list(seam):
+        nxt = next((s for s in segments if s.start - 4 <= i < s.start), None)
+        if (want_doi and doi_lines[i].strip().lower().rstrip(".") == want_doi
+                and nxt is not None and _title_hit(nxt)):
+            seam[i] = "next"
+        else:
+            seam[i] = "prev"
+
     for seg in segments:
         if seg.doi:
             continue
-        tail = [d for i, d in doi_lines.items() if seg.start <= i < seg.end]
-        if len(tail) == 1:
-            seg.doi = tail[0]
-            seg.evidence.append("꼬리DOI")
-        elif len(tail) > 1:
-            seg.doi = tail[-1]
-            seg.evidence.append(f"꼬리DOI(후보 {len(tail)})")
+        owned = []
+        for i, d in doi_lines.items():
+            if not (seg.start <= i < seg.end):
+                continue
+            if seam.get(i) == "next":       # 뒤 편의 머리다 — 내 것이 아니다
+                continue
+            owned.append(d)
+        # 내 구간이 시작하기 직전의 이음매 DOI 가 '뒤 편(=나)의 머리' 로 판정됐다면
+        for i, side in seam.items():
+            if side == "next" and seg.start - 4 <= i < seg.start:
+                owned.append(doi_lines[i])
+        if len(owned) == 1:
+            seg.doi = owned[0]
+            seg.evidence.append("DOI 표식")
+        elif len(owned) > 1:
+            seg.doi = owned[-1]
+            seg.evidence.append(f"DOI 표식(후보 {len(owned)})")
+
+    # 4b) 구간 **사이**에 홀로 놓인 DOI 줄은 어느 쪽 것인지 줄만 봐서는 모른다.
+    #     JEADV 는 앞 편의 꼬리로 찍고(10.1111/jdv.16524 = 앞의 GvHD 편지),
+    #     Ann Dermatol 은 뒤 편의 머리로 찍는다(10.5021/ad.2018.30.5.630 = 뒤의
+    #     LGR4 논문). 조판이 똑같아 위치로는 갈리지 않으므로 **양쪽 후보**로 둔다.
+    #     어느 쪽에 더 가까이 붙어 조판됐는지(세로 간격)로 먼저 가르고, 두 간격이
+    #     엇비슷할 때만 양쪽 후보로 남긴다. 실측: Ann Dermatol 은 DOI→제목 27pt /
+    #     앞 참고문헌→DOI 85pt(뒤 편 머리), JAAD 는 22pt/31pt·JEADV 는 20pt/57pt
+    #     (둘 다 앞 편 꼬리).
+    for k in range(len(segments) - 1):
+        a, b = segments[k], segments[k + 1]
+        near = [i for i in doi_lines if b.start - 4 <= i < b.start]
+        if not near:
+            continue
+        i = near[-1]
+        d = doi_lines[i]
+        if seam.get(i) != "both":
+            continue
+        if a.doi == d and not b.doi:
+            b.doi_alt = d
+            b.evidence.append("경계 DOI(양쪽 후보)")
+        elif b.doi == d and not a.doi:
+            a.doi_alt = d
+            a.evidence.append("경계 DOI(양쪽 후보)")
 
     # 5) 문자 스트림 + 인덱스
     line_seg = [0] * len(lines)
@@ -513,47 +703,96 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
     bm = BoundaryMap(path, segments, None, False, "", None,
                      stream, pos2line, line_seg, lines)
 
-    if len(segments) < 2:
-        bm.reason = "구간 1개 — 합본 지면이 아님"
-        return bm
-
     # 6) 이 논문의 구간 지목
-    by_doi = [s.index for s in segments
-              if s.doi and want_doi and s.doi.lower().rstrip(".") == want_doi]
+    #    구간이 하나뿐이어도 여기를 지난다 — 자를 것은 없지만 **paper_id 가 그
+    #    논문의 것이 맞는지**는 확인해야 한다(실측 10.1111/jdv.17073 은 합본이
+    #    아니라 연계 논평의 DOI 로 잘못 파일링된 경우다).
+    #    제목 일치가 DOI 일치보다 강한 증거다 — DOI 줄은 앞뒤 어느 편 것인지
+    #    조판만으로 갈리지 않는 자리에 놓이는 일이 있지만(4b 참조), PDF 에 찍힌
+    #    제목이 PubMed 제목과 같으면 그 구간이 이 논문이라는 뜻이다.
+    by_doi = [s.index for s in segments if want_doi and s.has_doi(want_doi)]
     by_title = []
     if want_title and len(want_title) >= 20:
+        import difflib
         for s in segments:
             t = _norm_title(s.title)
-            if not t:
+            if len(t) < 20:
                 continue
-            if t == want_title or (len(t) >= 20 and (t in want_title or want_title in t)):
+            # 포함 관계만 보면 쪽번호가 앞에 붙은 제목('979 Decreased risk…')이
+            # 어긋난다(실측 10.1016/j.jaad.2020.09.016). 유사도도 함께 본다.
+            if (t == want_title or t in want_title or want_title in t
+                    or difflib.SequenceMatcher(None, t, want_title).ratio() >= 0.82):
                 by_title.append(s.index)
 
     meta_pick = None
     how = ""
-    if len(by_doi) == 1:
-        meta_pick, how = by_doi[0], "DOI 일치"
-    elif len(by_title) == 1:
+    if len(by_title) == 1:
         meta_pick, how = by_title[0], "제목 일치"
+        if by_doi == by_title:
+            how = "제목+DOI 일치"
+    elif len(by_doi) == 1:
+        meta_pick, how = by_doi[0], "DOI 일치"
 
     body_pick = None
     if body_probe:
         hits = [h for h in bm.locate(body_probe, probes=40) if h >= 0]
         if hits:
             from collections import Counter
-            c = Counter(hits)
-            top, n = c.most_common(1)[0]
-            if n >= len(hits) * 0.55:
+            c = Counter(hits).most_common()
+            top, n = c[0]
+            second = c[1][1] if len(c) > 1 else 0
+            if n >= len(hits) * 0.55 or (n >= len(hits) * 0.40 and n >= second * 2):
                 body_pick = top
 
+    # 6b) paper_id 검증 — 이 논문이라고 지목한 구간이 PDF 에 자기 DOI 를 찍어
+    #     두었는데 그것이 paper_id 와 다르면, 기본키가 남의 논문 것이다.
+    #     경계로 고칠 수 있는 문제가 아니므로 **보고만** 한다(metadata 담당 몫).
+    #     단, 구간 자체는 옳게 지목했으므로 걸러내기는 그대로 진행한다.
+    if meta_pick is not None and want_doi:
+        mseg = segments[meta_pick]
+        if mseg.doi and not mseg.has_doi(want_doi):
+            bm.identity_conflict = dict(
+                paper_id=want_doi, correct_doi=mseg.doi,
+                own_segment=meta_pick, own_title=mseg.title,
+                how=how, evidence=list(mseg.evidence),
+                note="구간은 확실히 지목됐고 그 구간의 DOI 가 paper_id 와 다름")
+
+    if len(segments) < 2:
+        s0 = segments[0]
+        if (not bm.identity_conflict and want_doi and s0.doi
+                and not s0.has_doi(want_doi)):
+            bm.identity_conflict = dict(
+                paper_id=want_doi, correct_doi=s0.doi, own_segment=0,
+                own_title=s0.title, how="단일 논문 PDF", evidence=list(s0.evidence),
+                note="PDF 에 찍힌 이 논문의 DOI 가 paper_id 와 다름")
+        bm.reason = "구간 1개 — 합본 지면이 아님"
+        if bm.identity_conflict:
+            bm.reason += " (다만 paper_id 가 PDF 의 DOI 와 다르다)"
+        return bm
+
     if meta_pick is None:
+        # PDF 안 어느 구간의 DOI 도 paper_id 와 같지 않고 제목도 안 맞는다면
+        # 기본키가 이 PDF 의 어느 논문도 가리키지 않는다는 뜻이다(보고만 한다).
+        known = [s.doi for s in segments if s.doi]
+        if known and not bm.identity_conflict and want_doi:
+            bm.identity_conflict = dict(
+                paper_id=want_doi, correct_doi=None, candidates=known,
+                body_segment=body_pick, meta_segment=None,
+                body_title=(segments[body_pick].title if body_pick is not None else ""),
+                meta_title=meta.get("title") or "",
+                note="paper_id 가 PDF 안 어느 논문의 DOI 와도 일치하지 않고 제목도 안 맞음")
         bm.reason = "이 논문의 구간을 DOI·제목 어느 쪽으로도 지목하지 못함 → 자르지 않음"
         return bm
-    if body_pick is not None and body_pick != meta_pick:
+    if (body_pick is not None and body_pick != meta_pick
+            and how != "제목+DOI 일치" and len(by_title) != 1):
+        # 메타는 A 구간을, 정본 본문은 B 구간을 가리킨다 → 지목 자체가 불확실하다.
+        # 여기서 자르면 본문 전체가 날아갈 수 있으므로 아무것도 하지 않는다.
         bm.identity_conflict = dict(
-            meta_segment=meta_pick, body_segment=body_pick,
-            meta_doi=segments[meta_pick].doi, meta_title=segments[meta_pick].title,
-            body_doi=segments[body_pick].doi, body_title=segments[body_pick].title)
+            paper_id=want_doi, correct_doi=segments[body_pick].doi,
+            body_segment=body_pick, body_title=segments[body_pick].title,
+            meta_segment=meta_pick, meta_title=segments[meta_pick].title,
+            evidence=list(segments[body_pick].evidence),
+            note="메타가 가리키는 구간과 정본 본문이 놓인 구간이 다름")
         bm.reason = ("메타가 가리키는 구간과 정본 본문이 놓인 구간이 다름 "
                      "→ paper_id 오배정 의심, 자르지 않음")
         return bm
