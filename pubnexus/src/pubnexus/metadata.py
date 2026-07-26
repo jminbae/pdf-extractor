@@ -38,8 +38,10 @@
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -204,6 +206,16 @@ def collect_one(http: HttpClient, doi: str, email: str, api_key: str,
     for key in ("title", "journal", "year", "authors"):
         if not meta.get(key):
             meta[key] = meta.get(f"crossref_{key}") or meta.get(f"openalex_{key}") or meta.get(key)
+
+    # 이 DOI 가 실제로 존재하는가 — 기본키 게이트의 근거를 원장에 남긴다.
+    # 세 곳 중 어디도 모르는 DOI 는 정규식을 통과했을 뿐 **해소되지 않는다**
+    # ('10.1200/jco.18' 처럼 조판으로 잘린 접두부). 네트워크 장애로 전부
+    # 실패한 경우와 구분하려고 '조회는 됐는데 없더라'만 False 로 기록한다.
+    tried = set(meta["sources_ok"]) | set(meta["sources_fail"])
+    if {"crossref", "europepmc", "openalex"} <= tried:
+        meta["doi_resolved"] = bool(
+            meta.get("crossref_title") or meta.get("pmid")
+            or meta.get("openalex_id"))
     return meta
 
 
@@ -243,6 +255,280 @@ def collect_all(config: dict | None = None, force: bool = False) -> list[dict]:
     n_xml = sum(bool(m.get("in_epmc")) for m in out)
     log(f"[1단계] 완료 → {meta_dir}  (원문XML {n_xml}/{len(out)})")
     return out
+
+
+# ── 정본 초록 판정 ───────────────────────────────────────────────────
+# 파서(GROBID TEI / JATS)가 뽑은 초록은 '그 자리에 있던 글자'일 뿐 **이 논문의
+# 초록이라는 보장이 없다.** 2단 조판 레터에서는 앞 논문의 꼬리·서론 첫 문단·
+# 키워드 줄이 그대로 초록 자리에 들어오며, 셋 다 문법적으로 멀쩡한 과학
+# 문장이라 길이·null·문자율 검사를 전부 통과한다.
+#
+# 그래서 초록은 두 개의 독립 증인으로 검증한다:
+#   1) PDF 의 'Abstract' 표제 뒤 텍스트  (pdf_abstract)      — 문서 자체의 증언
+#   2) PubMed/EuropePMC 의 정본 초록      (meta.abstract_*)   — 외부 권위
+# 둘 중 하나라도 확보되면 추출 초록을 대조할 수 있다.
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+# 'Abstract' 표제. 저널마다 'ABSTRACT' · 'A B S T R A C T'(자간분리) ·
+# 'Abstract |'(JAMA) 로 조판이 갈린다. 줄 시작에서만 인정한다 —
+# 본문 중 'in the abstract' 같은 산문에 걸리지 않게.
+_ABS_HEAD_RE = re.compile(
+    r"^[ \t]*(?:A\s?B\s?S\s?T\s?R\s?A\s?C\s?T|Abstract|SUMMARY|Summary)"
+    r"[ \t]*[|:.]?[ \t]*$|^[ \t]*Abstract[ \t]*[|:][ \t]*(?=\S)",
+    re.M)
+
+# 초록의 끝. 키워드 줄·서론 표제·저작권 상용구 중 가장 먼저 오는 것.
+_ABS_STOP_RE = re.compile(
+    r"^[ \t]*(?:K\s?E\s?Y\s?\s?W\s?O\s?R\s?D\s?S?|Key[ \t]?words?|KEYWORDS?)\b"
+    r"|^[ \t]*(?:\d[.\s|]*)?(?:INTRODUCTION|Introduction|BACKGROUND\s*$)"
+    r"|^[ \t]*(?:©|Copyright\b|This is an open access)"
+    r"|^[ \t]*(?:What'?s already known|What is already known)",
+    re.M)
+
+
+def pdf_abstract(pdf_path, scan_pages: int = 2, limit: int = 6000) -> str:
+    """PDF 의 'Abstract' 표제 뒤 텍스트를 그대로 돌려준다(없으면 "").
+
+    **이것이 초록 검증의 1차 증인이다.** 표제 자체가 없으면 "" 를 돌려주는데,
+    그것은 '초록이 없는 letter/correspondence' 라는 뜻이지 결함이 아니다.
+    호출부는 ""(표제 없음)과 '표제는 있는데 내용이 다름'을 반드시 구분해야 한다.
+
+    2단 조판에서 읽기 순서가 섞일 수 있으므로 이 반환값은 **어휘 대조용**이며
+    그대로 정본 초록으로 삼지 않는다(대체는 API 초록으로만 한다).
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return ""
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception:  # noqa: BLE001 — PDF 없음/손상은 '판정 불가'
+        return ""
+    try:
+        text = "".join(doc[i].get_text()
+                       for i in range(min(scan_pages, doc.page_count)))
+    except Exception:  # noqa: BLE001
+        return ""
+    finally:
+        try:
+            doc.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    m = _ABS_HEAD_RE.search(text)
+    if not m:
+        return ""
+    body = text[m.end():m.end() + limit]
+    stop = _ABS_STOP_RE.search(body)
+    if stop and stop.start() > 80:      # 표제 직후 오탐 방지(최소 길이)
+        body = body[:stop.start()]
+    return utils.norm_text(body).strip()
+
+
+def _tokens(s: str) -> "collections.Counter":
+    return collections.Counter(_WORD_RE.findall((s or "").lower()))
+
+
+def lexical_agreement(a: str, b: str) -> tuple[float, float]:
+    """(정밀도, 재현율) = a 가 b 에 얼마나 담겼나 / b 가 a 에 얼마나 담겼나.
+
+    rapidfuzz 의 token_set_ratio 를 쓰면 안 된다 — 집합 기반이라
+    297자 초록 vs 1498자 정본이 96 점을 받는다(실측). 잘림(재현율 하락)과
+    이물질 혼입(정밀도 하락)은 **방향이 다른 결함**이므로 따로 재야 한다.
+    """
+    A, B = _tokens(a), _tokens(b)
+    if not A or not B:
+        return (0.0, 0.0)
+    inter = sum((A & B).values())
+    return (inter / sum(A.values()), inter / sum(B.values()))
+
+
+# PubMed 가 '초록 없음'이라고 말해도 믿을 수 있는 문헌 종류.
+# 원저(Journal Article)는 초록이 있는 게 정상이므로 여기 넣지 않는다 —
+# PubMed 수집 실패를 '초록 없는 논문'으로 오판하면 멀쩡한 초록을 지운다.
+_NO_ABSTRACT_TYPES = frozenset({
+    "letter", "comment", "editorial", "case reports",
+    "published erratum", "news", "biography", "historical article",
+})
+
+
+def has_no_abstract(meta: dict, pdf_path=None) -> bool:
+    """이 문헌은 애초에 초록이 없다 — 를 **증거로** 판정한다.
+
+    세 조건이 모두 참일 때만 True:
+      1) PubMed 레코드를 실제로 받아왔다(pmid + sources_ok 에 'pubmed')
+         → '수집 실패로 초록이 비었다'와 '원래 초록이 없다'를 구분한다
+      2) 그 레코드에 초록이 없다
+      3) PDF 에 'Abstract' 표제가 없다
+      4) 문헌 종류가 letter/comment/editorial/case report 류다
+
+    실측 근거: abstract 가 빈 49편은 전부 PDF 에 Abstract 표제가 없는
+    letter/correspondence 였고(오탐 0/49), 이 판정과 정확히 일치한다.
+    """
+    if not meta.get("pmid") or "pubmed" not in (meta.get("sources_ok") or []):
+        return False
+    if (meta.get("abstract_pubmed") or meta.get("abstract") or "").strip():
+        return False
+    types = {str(t).strip().lower() for t in (meta.get("pub_types") or [])}
+    if not types & _NO_ABSTRACT_TYPES:
+        return False
+    return not (pdf_abstract(pdf_path) if pdf_path else "")
+
+
+def choose_abstract(extracted: str, meta: dict, pdf_path=None,
+                    body_first: str = "", title: str = "") -> tuple[str, str, dict]:
+    """정본 초록과 그 출처를 정한다 → (abstract, abstract_source, info).
+
+    abstract_source 값:
+      "extracted"        문서에서 뽑은 초록이 검증을 통과함
+      "api"              추출 초록이 검증에 실패해 PubMed/EPMC 정본으로 대체
+      "extracted_unver"  대조할 증인이 없어 검증하지 못한 추출 초록(그대로 둠)
+      "none"             초록이 없음 — 표제도 API 초록도 없는 letter. 결함 아님
+      "extracted_bad"    검증 실패했으나 대체할 정본이 없다(표면화만, 내용은 보존)
+
+    수리 정책 — **손실 없는 수리만 한다**:
+      R1 API 정본이 있으면 그것으로 대체한다(권위 있는 출처, 본문은 무관).
+      R2 '이 문헌엔 초록이 없다'가 증거로 확정되면 비운다. 이때 지워지는 글자는
+         info['abstract_removed'] 로 반드시 넘겨준다 — 그 글자는 대개 본문 경계
+         오판으로 초록 자리에 온 **본문**이므로, 본문 담당이 되살릴 수 있어야 한다.
+      R3 그 밖의 실패는 표면화만 하고 내용을 건드리지 않는다.
+
+    PDF 에서 뽑은 초록은 2단 조판에서 읽기 순서가 섞이므로 **검증에만** 쓰고
+    정본으로 승격하지 않는다.
+    """
+    api = (meta.get("abstract_pubmed") or meta.get("abstract") or "").strip()
+    extracted = (extracted or "").strip()
+    info: dict = {}
+    if not extracted:
+        return (api, "api", info) if api else ("", "none", info)
+
+    verdict = verify_abstract(extracted, meta, pdf_path,
+                              body_first=body_first, title=title)
+    info["abstract_check"] = verdict
+
+    # R2 — 초록이 없는 문헌인데 무언가 들어와 있다(증인 없음 포함)
+    if not api and has_no_abstract(meta, pdf_path):
+        info["abstract_removed"] = extracted
+        info["abstract_check"] = {
+            "ok": False,
+            "reasons": (verdict["reasons"] or []) + ["paper_has_no_abstract"],
+            "signals": verdict["signals"]}
+        return "", "none", info
+
+    if verdict["ok"] is None:            # 증인 없음 → 판정 불가, 손대지 않는다
+        return extracted, "extracted_unver", info
+    if verdict["ok"]:
+        return extracted, "extracted", info
+    if api:                              # R1
+        return api, "api", info
+    return extracted, "extracted_bad", info   # R3 — 표면화만
+
+
+# 임계값 — 실측으로 정했다(정상 86편의 최저 재현율 0.89, 결함 11편의 최고 0.78).
+_ABS_MIN_RECALL = 0.85       # 이보다 낮으면 잘림/딴 논문
+_ABS_MIN_PRECISION = 0.80    # 이보다 낮으면 이물질 혼입(키워드·이웃논문)
+
+
+def verify_abstract(abstract: str, meta: dict, pdf_path=None,
+                    body_first: str = "", title: str = "") -> dict:
+    """추출 초록이 '이 논문의 초록'인지 판정. 결과 dict:
+
+        ok       True(통과) / False(실패) / None(증인 없음 = 판정 불가)
+        reasons  실패 사유 목록
+        signals  측정값(감사 추적용)
+
+    증인 우선순위: API 정본 초록 > PDF 'Abstract' 표제 뒤 텍스트.
+    증인이 하나도 없으면 None 을 돌려준다 — '통과'로 위장하지 않는다.
+    """
+    abstract = (abstract or "").strip()
+    reasons: list[str] = []
+    sig: dict = {}
+    if not abstract:
+        return {"ok": None, "reasons": [], "signals": sig}
+
+    # (a) 본문 첫 문단과 동일 → 서론이 초록 자리에 들어온 사고
+    if body_first:
+        p, r = lexical_agreement(abstract, body_first)
+        sig["abs_vs_body1"] = round(min(p, r), 3)
+        if min(p, r) >= 0.90:
+            reasons.append("abstract_is_body_first_paragraph")
+
+    # (b) 제목과 어휘가 하나도 안 겹침 → 다른 논문의 초록
+    if title:
+        t = {w for w in _WORD_RE.findall(title.lower()) if len(w) > 3}
+        a = set(_WORD_RE.findall(abstract.lower()))
+        if t:
+            ov = len(t & a) / len(t)
+            sig["abs_vs_title"] = round(ov, 3)
+            if ov == 0.0:
+                reasons.append("abstract_title_zero_overlap")
+
+    # (c) 정본 대조 — API 초록이 1순위 증인
+    api = (meta.get("abstract_pubmed") or meta.get("abstract") or "").strip()
+    ref, witness = (api, "api") if api else ("", "")
+    if not ref and pdf_path:
+        pa = pdf_abstract(pdf_path)
+        if pa:
+            ref, witness = pa, "pdf_heading"
+    if ref:
+        p, r = lexical_agreement(abstract, ref)
+        sig["abs_precision"] = round(p, 3)
+        sig["abs_recall"] = round(r, 3)
+        sig["abs_witness"] = witness
+        if r < _ABS_MIN_RECALL:
+            reasons.append("abstract_truncated_or_foreign")
+        if p < _ABS_MIN_PRECISION:
+            reasons.append("abstract_polluted")
+
+    ok = None if (not ref and not reasons) else (not reasons)
+    return {"ok": ok, "reasons": reasons, "signals": sig}
+
+
+# ── 신원(기본키) 판정 ────────────────────────────────────────────────
+# 2단 조판 저널에서는 한 PDF 에 앞 논문의 꼬리가 같이 실린다. 그 꼬리에 박힌
+# DOI 로 파일링되면 **DOI 는 멀쩡히 해소되는데 제목·저자·PMID 가 전부 남의
+# 것**이 된다(10.1111/jdv.16524 실측). DOI 해소 검사로는 절대 못 잡는다.
+#
+# 폰트 기반 PDF 제목추출은 러닝헤드에 속아 이 판정의 증인이 되지 못했다
+# (실측 오탐 26/167). 대신 **수집 당시 파일명**을 증인으로 쓴다 — 다만
+# 파일명이 제목 구실을 할 때만. 아니면 판정을 포기한다(모르면 모른다고 둔다).
+
+_FNAME_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-[A-Za-z]*-?\S*\s+")
+
+
+def _filename_title(source_file: str) -> str:
+    """파일명에서 제목 구실을 하는 부분을 떼어낸다. 못 믿으면 ""."""
+    stem = Path(str(source_file or "")).stem
+    stem = _FNAME_PREFIX_RE.sub("", stem).strip()
+    if len(stem) < 20:
+        return ""                      # 'Reply' 같은 무정보 파일명
+    letters = [c for c in stem if c.isalpha()]
+    if not letters:
+        return ""
+    # 라틴 문자 비중이 낮으면 서지 제목과 언어가 달라 대조가 무의미하다
+    # (한국어 파일명 vs 영문 record 제목 — 불일치가 아니라 번역이다)
+    if sum(c.isascii() for c in letters) / len(letters) < 0.8:
+        return ""
+    return stem
+
+
+_IDENTITY_MIN = 70        # 실측: 알려진 신원오류 10편 전부 70 미만, 정상 최저 84.9
+
+
+def verify_identity(record_title: str, source_file: str) -> dict:
+    """레코드의 제목이 이 PDF 의 논문 제목과 같은가.
+
+    ok=None 은 '증인이 없어 판정 불가' — 통과로 위장하지 않는다.
+    """
+    from rapidfuzz import fuzz
+    fname = _filename_title(source_file)
+    rec = re.sub(r"<[^>]+>", "", record_title or "").strip()
+    if not fname or len(rec) < 15:
+        return {"ok": None, "score": None, "witness": None}
+    score = fuzz.token_set_ratio(rec.lower(), fname.lower())
+    return {"ok": score >= _IDENTITY_MIN, "score": round(score, 1),
+            "witness": "filename"}
 
 
 # ── 헬퍼 ────────────────────────────────────────────────────────────

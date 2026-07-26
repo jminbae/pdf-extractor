@@ -10,7 +10,7 @@ from pathlib import Path
 
 from lxml import etree
 
-from . import utils, jats
+from . import utils, jats, metadata
 from .schema import (Document, Meta, Section, Paragraph, Figure, Table,
                      Reference, classify_section)
 from .utils import HttpClient, norm_text, log
@@ -196,8 +196,8 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     body = root.find(".//{*}body")
     if body is not None:
         for sec in body.findall("{*}sec"):
-            sections.extend(_walk_sections(sec, [], rid_to_ref,
-                                           figures, tables, pcount, ref_ids))
+            body_text.extend(_walk_sections(sec, [], rid_to_ref,
+                                            figures, tables, pcount, ref_ids))
         # 섹션 없이 <body> 직속 <p> 만 있는 경우
         loose = [c for c in body if jats._local(c.tag) == "p"]
         if loose:
@@ -238,13 +238,19 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
         if ab is not None:
             extracted_abstract = jats.abstract_text(ab, ref_ids)
 
-    api_abstract = meta.get("abstract_pubmed") or meta.get("abstract") or ""
-    if extracted_abstract:
-        abstract, abstract_source = extracted_abstract, "extracted"
-    elif api_abstract:
-        abstract, abstract_source = api_abstract, "api"
-    else:
-        abstract, abstract_source = "", "none"
+    # 뽑았다고 해서 '이 논문의 초록'인 것은 아니다 — 표제 뒤 텍스트·API 정본과
+    # 대조해 확정한다(metadata.choose_abstract). 검증 결과는 qc.abstract 로 남긴다.
+    _first = ""
+    for _s in body_text:
+        for _p in _s.paragraphs:
+            if _p.text:
+                _first = _p.text
+                break
+        if _first:
+            break
+    abstract, abstract_source, _abs_info = metadata.choose_abstract(
+        extracted_abstract, meta, source_file or None,
+        body_first=_first, title=meta.get("title") or "")
 
     m = _meta_from_dict(meta)
     doc = Document(
@@ -254,11 +260,13 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
         meta=m,
         abstract=abstract,
         abstract_source=abstract_source,
-        body_text=sections,
+        body_text=body_text,
         figures=figures,
         tables=tables,
         references=list(refs.values()),
     )
+    if _abs_info:
+        doc.qc["abstract"] = _abs_info
     return doc
 
 

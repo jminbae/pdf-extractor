@@ -136,11 +136,54 @@ def _find_doi(text: str, doi_re: re.Pattern) -> str | None:
     return utils.clean_doi(m.group(0)) if m else None
 
 
-def _extract_title(page) -> str:
-    """1페이지에서 가장 큰 폰트의 텍스트(=제목)를 추출. 인접 동일크기 줄 병합.
+# 제목 자리에 앉은 조판 부속물 — 이것들은 본문 제목보다 폰트가 큰 일이 흔하다.
+# (실측: 이 필터가 없으면 title_guess 가 'Author Offprint' · 'References' ·
+#  'LETTERS RESEARCH LETTERS' · '+ Supplemental content' 로 잡혀
+#  신원 대조 게이트가 30편을 오탐한다)
+_TITLE_JUNK_RE = re.compile(
+    r"^(?:references?|acknowledge?ments?|author\s+offprint|offprint"
+    r"|research\s+letters?|letters?\s*(?:to\s+the\s+editor)?|reply"
+    r"|correspondence|image\s+gallery|editorial|commentary|erratum"
+    r"|supplement(?:al|ary)?(?:\s+content)?|see\s+also|continued"
+    r"|abstract|introduction|summary|discussion|conclusions?"
+    r"|original\s+articles?|brief\s+reports?|case\s+reports?|review"
+    r"|clinical\s+challenge|solution|key\s+points)$", re.I)
 
-    '가장 긴 줄' 휴리스틱보다 안정적 — 본문/소속/캡션 조각에 속지 않고,
-    한국어·영어 제목을 모두 잡는다. DOI 미표기 논문의 Crossref 회수에 핵심.
+# 저널 머리말(권/호/쪽/월) 줄
+_TITLE_RUNNING_RE = re.compile(
+    r"^(?:\W*\d[\d\s,.:;|–—-]*)?(?:vol\.?\s*\d|no\.?\s*\d"
+    r"|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)", re.I)
+
+
+def _is_plausible_title(t: str) -> bool:
+    """이 문자열을 논문 제목으로 믿어도 되는가.
+
+    믿을 수 없으면 title_guess 를 비워 둔다 — 엉터리 제목을 남기면
+    Crossref 제목매칭이 남의 논문을 물어오고(기본키 오염), 신원 대조
+    게이트가 멀쩡한 논문을 불합격시킨다. **모르면 모른다고 둔다.**
+    """
+    t = (t or "").strip(" .,:;|-–—")
+    if len(t) < 20:
+        return False
+    core = re.sub(r"[^\w\s]", " ", t).strip()
+    if _TITLE_JUNK_RE.match(core):
+        return False
+    if _TITLE_RUNNING_RE.match(t):
+        return False
+    words = [w for w in core.split() if w]
+    if len(words) < 3:
+        return False
+    # 숫자·기호 덩어리(쪽번호·표 조각)는 제목이 아니다
+    letters = sum(ch.isalpha() for ch in t)
+    return letters / max(len(t), 1) >= 0.6
+
+
+def _extract_title(page) -> str:
+    """1페이지에서 제목을 추출. 큰 폰트부터 훑되 조판 부속물은 건너뛴다.
+
+    폰트 크기 하나만 보면 2단 조판 레터에서 러닝헤드('LETTERS')나
+    'Author Offprint' 도장이 제목을 이긴다. 그래서 큰 폰트 그룹을 차례로
+    내려가며 **제목다운 첫 후보**를 고르고, 끝까지 없으면 "" 를 돌려준다.
     """
     lines = []  # (size, y, text)
     for b in page.get_text("dict")["blocks"]:
@@ -153,12 +196,16 @@ def _extract_title(page) -> str:
                 lines.append((round(sz, 1), l["bbox"][1], txt))
     if not lines:
         return ""
-    max_sz = max(s for s, _, _ in lines)
-    # 최대 폰트 줄들(제목은 1~2줄에 걸치기도) — 위→아래 순서로 병합
-    title_lines = sorted((y, t) for s, y, t in lines if s >= max_sz - 0.1)
-    title = utils.norm_text(" ".join(t for _, t in title_lines))
-    # 저널 머리말류(전부 대문자 & 매우 짧음)만 걸러냄
-    return title[:300]
+    for size in sorted({s for s, _, _ in lines}, reverse=True)[:6]:
+        group = sorted((y, t) for s, y, t in lines if abs(s - size) < 0.15)
+        cand = utils.norm_text(" ".join(t for _, t in group))[:300]
+        if _is_plausible_title(cand):
+            return cand
+        # 같은 크기 줄이 여럿이면 러닝헤드가 섞였을 수 있다 → 한 줄씩도 본다
+        for _, t in group:
+            if _is_plausible_title(t):
+                return utils.norm_text(t)[:300]
+    return ""
 
 
 def assign_dup_groups(records: list[dict]) -> None:
@@ -219,11 +266,103 @@ def verify_truncated_dois(records: list[dict], cfg: dict, *,
                     break
         except Exception as e:  # noqa: BLE001 — 한 편 실패가 전체를 막지 않는다
             _record_failure(work, "inventory.doi_verify", r.get("file", old or ""), e)
-        _emit(on_progress, {"stage": "inventory", "phase": "doi_verify",
-                            "done": j, "total": len(targets)})
+        _notify(on_progress, {"stage": "inventory", "phase": "doi_verify",
+                              "done": j, "total": len(targets)})
     if n:
         log(f"[0단계] DOI 교정 {n}편")
     return n
+
+
+def resolve_misfiled_dois(records: list[dict], cfg: dict, *,
+                          on_progress=None, should_cancel=None) -> int:
+    """앞 논문의 DOI 로 파일링된 레코드를 이 PDF 의 진짜 DOI 로 바로잡는다.
+
+    2단 조판 저널은 한 PDF 에 앞 논문의 꼬리를 함께 싣는다. 그 꼬리의 DOI 가
+    먼저 잡히면 레코드 전체(제목·저자·PMID·MeSH)가 남의 것이 된다. DOI 자체는
+    멀쩡히 해소되므로 **해소 검사로는 절대 못 잡는다** — 제목으로 판정한다.
+
+    후보는 **그 PDF 안에 실제로 인쇄된 DOI 로 제한한다.** Crossref 제목검색을
+    믿으면 엉뚱한 곳으로 간다(실측: '10.1111/1346-8138.12933' 의 제목검색 1위가
+    Qeios 프리프린트 10.32388/5t88py 였다. 정답 10.1111/1346-8138.12936 은
+    그 PDF 안에 인쇄돼 있었다). 인쇄된 DOI + Crossref 제목 일치 둘 다 만족할
+    때만 바꾸고, 아니면 손대지 않는다.
+    """
+    md = cfg["metadata"]
+    thr = (cfg.get("identify", {}) or {}).get("title_match_threshold", 90)
+    work = utils.resolve(cfg["project"]["work_dir"])
+    http = HttpClient(email=md["email"], delay=md["request_delay_sec"],
+                      timeout=md["timeout_sec"])
+    from . import metadata as _md
+
+    targets = [r for r in records
+               if r.get("doi") and not r.get("identity_verified")
+               and _md._filename_title(r.get("file", ""))]
+    if not targets:
+        return 0
+    log(f"[0단계] 신원 대조 {len(targets)}편 (파일명 제목 ↔ DOI 서지제목)")
+    n = 0
+    for j, r in enumerate(targets, 1):
+        if _cancelled(should_cancel):
+            log(f"[0단계] 취소 요청 — 신원 대조 {j - 1}/{len(targets)} 에서 중단")
+            break
+        want = _md._filename_title(r.get("file", ""))
+        try:
+            cur = _crossref_title(http, r["doi"], md["email"])
+            if cur and fuzz.token_set_ratio(want.lower(), cur.lower()) >= thr:
+                r["identity_verified"] = True
+                continue
+            # 이 PDF 에 인쇄된 다른 DOI 중 제목이 맞는 것을 찾는다
+            best = None
+            for cand in _pdf_doi_candidates(Path(r["file"]), cfg):
+                if cand == r["doi"]:
+                    continue
+                t = _crossref_title(http, cand, md["email"])
+                if not t:
+                    continue
+                s = fuzz.token_set_ratio(want.lower(), t.lower())
+                if s >= thr and (best is None or s > best[0]):
+                    best = (s, cand, t)
+            if best:
+                log(f"        {r['doi']} → {best[1]}  ({best[0]}) {best[2][:60]}")
+                r["doi_previous"] = r["doi"]
+                r["doi"] = best[1]
+                r["doi_source"] = f"pdf+identity({best[0]})"
+                r["identity_verified"] = True
+                n += 1
+            elif cur:
+                r["identity_mismatch"] = True   # 표면화만 — 정답을 못 찾았다
+        except Exception as e:  # noqa: BLE001
+            _record_failure(work, "inventory.identity", r.get("file", ""), e)
+        _notify(on_progress, {"stage": "inventory", "phase": "identity",
+                              "done": j, "total": len(targets)})
+    if n:
+        log(f"[0단계] 신원 교정 {n}편")
+    return n
+
+
+def _crossref_title(http: HttpClient, doi: str, email: str) -> str:
+    data = http.get_json(f"https://api.crossref.org/works/{doi}",
+                         params={"mailto": email})
+    return ((data or {}).get("message", {}).get("title") or [""])[0]
+
+
+def _pdf_doi_candidates(path: Path, cfg: dict) -> list[str]:
+    """PDF 전체 텍스트에 인쇄된 DOI(줄바꿈으로 끊긴 것 이어붙인 것 포함)."""
+    doi_re = re.compile(cfg["identify"]["doi_regex"], re.I)
+    try:
+        doc = fitz.open(path)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        text = "".join(doc[i].get_text() for i in range(doc.page_count))
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        try:
+            doc.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return utils.doi_candidates(text, doi_re, limit=24)
 
 
 def resolve_missing_dois(records: list[dict], cfg: dict, *,

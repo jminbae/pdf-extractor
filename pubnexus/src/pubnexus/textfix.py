@@ -343,6 +343,47 @@ def clean_paragraph(s: str) -> str:
     return _tidy_spaces(s)
 
 
+# ── 러닝헤더(저널명)가 문장 한복판에 박힌 경우 ──────────────────────
+#
+# 페이지 머리말이 본문 컬럼과 같은 흐름으로 추출되면 문장 중간에 저널명이
+# 통째로 끼어든다. 실측 10.1002/jso.23438:
+#   PDF  'The publication year, country, type of study, …'
+#   정본 'The publication year, Journal of Surgical Oncology country, type of study,'
+# _JUNK_PATTERNS 는 저널명을 하드코딩해 둔 것만 잡는다(JAAD 등). 저널명은
+# meta 에 이미 있으므로 그것을 증거로 쓰는 편이 일반적이고 정확하다.
+#
+# 다만 본문이 자기 저널을 정상적으로 언급하는 일도 있다('published in the
+# Journal of Surgical Oncology in 2013'). 그래서 **문장 한복판이고**, 앞 낱말이
+# 관사·전치사가 아니며, 뒤가 소문자로 이어질 때만 지운다 — 러닝헤더 삽입은
+# 문법을 끊고 지나가지만 정상 언급은 앞에 관사·전치사를 달고 온다.
+_HDR_PREV_STOP = frozenset("""
+the in of to from by for at on with our this that a an and or journal
+published appear appears appeared see cited citing via
+""".split())
+
+
+def strip_running_header(text: str, journal: str) -> str:
+    """문장 한복판에 삽입된 러닝헤더(저널명)를 걷어낸다."""
+    j = (journal or "").strip()
+    if len(j) < 12 or not text:
+        return text
+    pat = re.compile(r"\s*" + r"\s+".join(re.escape(w) for w in j.split()) + r"\s*",
+                     re.I)
+
+    def repl(m: re.Match) -> str:
+        before, after = text[:m.start()], text[m.end():]
+        if not before.strip() or re.search(r"[.!?:;]\s*$", before):
+            return m.group(0)                 # 문장 첫머리 — 러닝헤더가 아니다
+        if not re.match(r"[a-z]", after):
+            return m.group(0)                 # 뒤가 소문자로 안 이어진다
+        prev = re.findall(r"[A-Za-z]+", before)
+        if prev and prev[-1].lower() in _HDR_PREV_STOP:
+            return m.group(0)                 # 'in the Journal of …' 정상 언급
+        return " "
+
+    return _tidy_spaces(pat.sub(repl, text))
+
+
 def strip_caption_leak(s: str) -> tuple[str, list[str]]:
     """본문/초록 끝에 붙어 들어온 figure·table 캡션을 떼어낸다.
 

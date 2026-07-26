@@ -74,6 +74,8 @@ RULE_X_JOIN = 4.0          # 토막난 선분을 이을 x 간격(JKMS 는 열마
 RULE_DEDUP_Y = 3.0         # 겹줄(이중선)을 한 줄로 본다
 RULE_X0_TOL = 6.0          # 같은 표의 괘선으로 볼 x0 오차
 RULE_X1_TOL = 16.0         # 같은 표의 괘선으로 볼 x1 오차
+RULE_CAP_X0_TOL = 26.0     # 괘선 x0 가 캡션 x0 보다 이만큼 오른쪽까지는 같은 표
+RULE_CAP_OVERLAP = 25.0    # 괘선이 캡션 칸과 가로로 겹쳐야 할 최소 길이
 MIN_COL_GAP = 4.0          # 열 경계로 인정할 빈 세로 띠의 최소 폭
 CHAR_BREAK = 1.2           # 공백 글자 없이 이만큼 벌어지면 낱말을 끊는다
 CAP_MIN_KEY = 30           # 캡션 대조에 쓸 정규화 키 최소 길이
@@ -98,6 +100,9 @@ _ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7,
 # '8 (3.9)' 가 '08 (3.9)0.0..' 가 된다. 색이 흰색이면서 채움 문자뿐일 때만 버린다.
 _FILLER = re.compile(r"^[0.\s\-–—]+$")
 _WHITE = 0xFFFFFF
+# 글꼴 인코딩이 깨져 **읽지 못한 한 글자** 자리. 지우면 양옆 숫자가 붙어
+# 거짓 값이 되므로(위 _cell_text 주석) 이 표식을 남긴다.
+UNREADABLE = "�"
 
 
 # ── 문자열 정규화 ───────────────────────────────────────────────────
@@ -112,13 +117,29 @@ def _key(s: str) -> str:
 def _cell_text(s: str) -> str:
     """셀 문자열 정리 — markdown 표를 깨뜨리는 문자와 제어문자를 막는다.
 
-    제어문자를 지우는 이유: ToUnicode 표가 없는 글꼴은 '∼' 같은 글자를
-    U+0002 로 내놓는다(실측: 표 5 의 '1998∼2004'). 정보가 없는 쓰레기라
-    정본에 남기지 않는다.
+    제어문자가 나오는 이유: ToUnicode 표가 없는 서브셋 글꼴은 기호를 슬롯
+    코드 그대로 내놓는다(실측: 표 5 의 '1998∼2004' 가 U+0002).
+
+    **그냥 지우면 안 된다.** 지우는 순간 양옆이 들러붙어 *없던 수*가 만들어진다.
+    실측(눈으로 확인): 10.1111/bjd.15560 3쪽 Table 1 은 렌더링상 '292 (26·0)'
+    인데 텍스트층은 '292 (26\\x010)' 이다. 제어문자를 지우면 '292 (260)' —
+    26.0% 가 260 이 된다. 임상 표에서 이건 빈칸보다 훨씬 해롭다.
+    슬롯의 뜻은 문서마다 다르므로(같은 U+0001 이 JAAD 에선 '©',
+    10.1016/j.jaad.2013.05.012 에선 'μ', BJD 에선 '·') 추측해서 채우지 않는다.
+    양옆이 영숫자일 때만 U+FFFD 를 남겨 **읽지 못했다는 사실**을 보존한다.
+    그 표는 info['unreadable'] 로 세어, 수리 판정에서 기존 값을 이기지 못하게 한다.
     """
     s = utils.norm_text(s)
-    s = "".join(c for c in s if unicodedata.category(c) not in ("Cc", "Cf"))
-    s = re.sub(r"\s{2,}", " ", s)
+    out: list[str] = []
+    for i, c in enumerate(s):
+        if unicodedata.category(c) in ("Cc", "Cf"):
+            prev = out[-1] if out else ""
+            nxt = s[i + 1] if i + 1 < len(s) else ""
+            if prev.isalnum() and nxt.isalnum():
+                out.append(UNREADABLE)
+            continue
+        out.append(c)
+    s = re.sub(r"\s{2,}", " ", "".join(out))
     return s.replace("|", r"\|").strip()
 
 
@@ -168,8 +189,17 @@ class _Page:
                 if not txt.strip():
                     continue
                 d = tuple(ln.get("dir") or (1.0, 0.0))
+                # 줄 bbox 높이를 글자 크기로 쓰면 안 된다 — 위첨자 하나가
+                # bbox 를 부풀린다(실측: '1Mean with its range.' 는 본문 7.5pt
+                # 인데 위첨자 때문에 bbox 높이가 9.2pt 다). 글자 수가 가장
+                # 많은 span 의 size 를 그 줄의 크기로 삼는다.
+                spans = [sp for sp in ln.get("spans", ()) if sp.get("text")]
+                size = 0.0
+                if spans:
+                    size = max(spans, key=lambda sp: len(sp.get("text") or ""))\
+                        .get("size", 0.0)
                 rec = {"text": txt, "bbox": tuple(ln["bbox"]), "dir": d,
-                       "key": _key(txt)}
+                       "size": float(size or 0.0), "key": _key(txt)}
                 bl.append(rec)
                 self.lines.append(rec)
             if bl:
@@ -379,12 +409,20 @@ def find_caption(pages: list[_Page], caption: str
                 i, j = hit
                 lines = block[i:j + 1]
                 mode = _rot_mode(lines)
+                # **회전 좌표계로 돌려서** 돌려준다. 부르는 쪽(_next_stop_y·
+                # _rule_region)은 줄·괘선을 _rot 한 좌표로 보므로 캡션만 원좌표로
+                # 남기면 세로 조판 표에서 x 비교가 통째로 어긋난다.
+                # 실측: 10.1016/j.jaad.2016.12.034 Table II 는 가로로 눕혀 조판된
+                # 표인데(PDF 3쪽 하단), 캡션 x=[325,336] 과 괘선 x=[-729,-77] 을
+                # 비교하게 돼 늘 no_rules 로 떨어졌다. 그 결과 GROBID 의 전치된
+                # 표(행 이름이 마지막 행에 있는)가 그대로 남아 있었다.
                 xs0 = min(l["bbox"][0] for l in lines)
                 ys0 = min(l["bbox"][1] for l in lines)
                 xs1 = max(l["bbox"][2] for l in lines)
                 ys1 = max(l["bbox"][3] for l in lines)
+                box = _rot((xs0, ys0, xs1, ys1), mode)
                 how = "exact" if ln == n else f"prefix{ln}/{n}"
-                return (pno, (xs0, ys0, xs1, ys1), mode, how)
+                return (pno, box, mode, how)
     return None
 
 
@@ -417,28 +455,43 @@ def _next_stop_y(pg: _Page, mode: int, cap_box, cap_lines_keys: set[str]) -> flo
 
 def _rule_region(pg: _Page, mode: int, cap_box, stop_y: float
                  ) -> tuple[list[float], tuple[float, float]] | None:
-    """캡션 아래 괘선 무리 → (괘선 y 목록, (x0, x1)). 없으면 None."""
-    cx0, _cy0, _cx1, cy1 = cap_box
+    """캡션 아래 괘선 무리 → (괘선 y 목록, (x0, x1)). 없으면 None.
+
+    후보 조건이 예전에는 `괘선 x0 ≤ 캡션 x0 + 8pt` 였다. 이건 캡션이 표보다
+    **왼쪽에서 시작한다**는 가정인데, 캡션을 표 폭 안쪽으로 들여 짜지 않고
+    바깥으로 내어 짜는 조판에서 1pt 차이로 표를 통째로 놓쳤다.
+    실측: 10.1111/bjd.15560 Table 1 은 캡션 x0=308.4, 괘선 x0=317.3 이라
+    317.3 ≤ 316.4 가 거짓이 되어 no_rules 로 떨어졌다(같은 논문 표 3개 전부).
+    그래서 '캡션 칸과 **겹치는가**'로 바꾼다 — 옆단·다른 논문의 괘선은
+    가로로 겹치지 않으므로 오염 방어력은 그대로다.
+    """
+    cx0, _cy0, cx1, cy1 = cap_box
+
+    def overlaps(r) -> bool:
+        ov = min(r[2], cx1) - max(r[1], cx0)
+        return (r[1] <= cx0 + RULE_CAP_X0_TOL) and ov >= RULE_CAP_OVERLAP
+
     rules = pg.rules(mode)
     cands = [r for r in rules
-             if cy1 + 0.5 < r[0] < stop_y - 0.5
-             and r[1] <= cx0 + 8.0 and r[2] >= cx0 + 25.0]
+             if cy1 + 0.5 < r[0] < stop_y - 0.5 and overlaps(r)]
     if not cands:
         return None
-    top = cands[0]
-    if top[0] - cy1 > CAP_TO_RULE_MAX:
-        return None
-    ys = [top[0]]
-    x0, x1 = top[1], top[2]
-    for r in cands[1:]:
-        if abs(r[1] - top[1]) > RULE_X0_TOL or abs(r[2] - top[2]) > RULE_X1_TOL:
-            continue
-        ys.append(r[0])
-        x0 = min(x0, r[1])
-        x1 = max(x1, r[2])
-    if len(ys) < 2 or ys[-1] - ys[0] < 10.0:
-        return None
-    return ys, (x0, x1)
+    # 캡션 바로 아래 괘선부터 순서대로 '표의 윗선'으로 세워 본다. 느슨해진
+    # 후보 조건 때문에 첫 후보가 표와 무관한 짧은 선일 수 있어서다.
+    for k, top in enumerate(cands):
+        if top[0] - cy1 > CAP_TO_RULE_MAX:
+            break
+        ys = [top[0]]
+        x0, x1 = top[1], top[2]
+        for r in cands[k + 1:]:
+            if abs(r[1] - top[1]) > RULE_X0_TOL or abs(r[2] - top[2]) > RULE_X1_TOL:
+                continue
+            ys.append(r[0])
+            x0 = min(x0, r[1])
+            x1 = max(x1, r[2])
+        if len(ys) >= 2 and ys[-1] - ys[0] >= 10.0:
+            return ys, (x0, x1)
+    return None
 
 
 # ── 3~4. 행·열 복원 ─────────────────────────────────────────────────
@@ -735,6 +788,143 @@ def to_markdown(header: list[str], body: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+# ── markdown 자체 검사 ──────────────────────────────────────────────
+# '표가 있다' 와 '표가 쓸 만하다' 는 다르다. 표 개수 대조는 전부 통과하는데
+# markdown 이 렌더되지 않거나 데이터가 한 줄도 없는 표가 실제로 있다.
+_SEP_CELL = re.compile(r"^:?-{2,}:?$")
+COLLAPSE_COLS = 12         # 데이터 1행에 이만큼 열이면 표가 한 줄로 뭉갠 것
+_OPEN_TAIL = re.compile(r"[(\[{]\s*$|[(\[]\s*[\d.,-]{0,4}$")
+
+
+def parse_markdown(md: str) -> tuple[list[list[str]], int]:
+    """markdown 표 → (행 목록, 구분선 index). 구분선이 없으면 -1."""
+    rows: list[list[str]] = []
+    sep = -1
+    for line in (md or "").split("\n"):
+        if not line.strip():
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if sep < 0 and cells and any(cells) \
+                and all(_SEP_CELL.match(c) for c in cells if c):
+            sep = len(rows)
+        rows.append(cells)
+    return rows, sep
+
+
+def check_markdown(md: str) -> dict:
+    """markdown 표의 **구조**만 본다(내용의 옳고 그름은 여기서 판단하지 않는다).
+
+    반환 `problems` 에 담기는 사유와 그 근거:
+      · no_separator / separator_misplaced — GFM 표는 `| --- |` 구분선이
+        **머리행 바로 다음 한 줄**이어야 렌더된다. 실측: 구분선이 데이터
+        뒤에 오는 표가 코퍼스에 있다(그 표는 어느 뷰어에서도 표로 안 보인다).
+      · no_data_rows — 머리 조각만 남고 데이터가 0행.
+      · ragged_columns — 행마다 열 수가 달라 값이 다른 머리글 밑으로 밀린다.
+      · collapsed — 데이터 1행에 열 12개 이상. 표 전체가 한 행으로 뭉갰다.
+      · truncated — 마지막 행이 다른 행보다 짧고 끝이 열린 괄호다
+        (실측: '| Black | 2 (4) | 8 (23) | 1 (4) | 4 (' 에서 끝난 표).
+      · unreadable — 글꼴 인코딩 때문에 못 읽은 글자(U+FFFD)가 남은 셀.
+    """
+    rows, sep = parse_markdown(md)
+    out: dict[str, Any] = {"problems": [], "nrows": len(rows), "sep": sep}
+    if not rows:
+        out["problems"].append("empty")
+        out["ok"] = False
+        out["ncols"] = out["ndata"] = 0
+        return out
+    data = rows[sep + 1:] if sep >= 0 else rows[1:]
+    widths = [len(r) for i, r in enumerate(rows) if i != sep]
+    ncols = max(widths) if widths else 0
+    ndata = sum(1 for r in data if any(c.strip() for c in r))
+    out.update(ncols=ncols, ndata=ndata)
+    p = out["problems"]
+    if sep < 0:
+        p.append("no_separator")
+    elif sep != 1:
+        p.append("separator_misplaced")
+    if ndata == 0:
+        p.append("no_data_rows")
+    if ncols < 2:
+        p.append("single_column")
+    if len({len(r) for i, r in enumerate(rows) if i != sep}) > 1:
+        p.append("ragged_columns")
+    if ndata <= 1 and ncols >= COLLAPSE_COLS:
+        p.append("collapsed")
+    if data:
+        last = data[-1]
+        if len(last) < ncols and last and _OPEN_TAIL.search(last[-1] or ""):
+            p.append("truncated")
+    if UNREADABLE in (md or ""):
+        p.append("unreadable")
+    out["ok"] = not p
+    return out
+
+
+# ── 표가 아닌 것을 걸러내는 관문 ────────────────────────────────────
+# 없는 표를 지우는 편이 망가진 표를 고치는 것보다 안전하고 효과가 크다.
+# 다만 **진짜 표가 추출에 실패한 것**과 **애초에 표가 아닌 것**은 다르다.
+# 캡션이 'Table N …' 이면 그 표는 PDF 에 실재하므로 절대 지우지 않는다
+# (비어 있어도 '표 N 이 있다'는 사실 자체가 정보다). 지우는 것은
+# **표 캡션이 아닌데 내용도 표가 아닌 것**뿐이다.
+_TABLE_CAPTION = re.compile(
+    r"^\s*\(?\s*(?:table|tab\.|tabla|tableau)\s*"
+    r"(?:[ivxlIVXL]{1,5}|\d{1,3}|[A-Z]\d?)\s*[.:)\-–—|]?(?:\s|$)", re.I)
+# 참고문헌 항목: '3. Zhong SY, Chen YX, Fang M et al. …' / '… 1999; 135: 790-793.'
+_REF_ITEM = re.compile(
+    r"(?:^\s*\d{1,3}[.)]\s+[A-Z][A-Za-z'’-]+\s+[A-Z]{1,3}\b)"
+    r"|(?:\b(?:19|20)\d\d\s*;\s*\d+\s*(?:\(\d+\))?\s*:\s*\d+)"
+    r"|(?:\bet\s+al\b.{0,80}\b(?:19|20)\d\d\b)")
+# 지면 장식(워터마크·저작권·다운로드 안내). 표 셀에 있으면 표가 아니다.
+_FURNITURE = re.compile(
+    r"(?:Creative\s+Commons|OA\s+articles?\s+are\s+governed|Protected\s+by\s+copyright"
+    r"|Downloaded\s+from|All\s+rights\s+reserved|Conflicts?\s+of\s+interest"
+    r"|Wiley\s+Online\s+Library|see\s+front\s+matter|©\s*(?:19|20)\d\d)", re.I)
+# 약어 상자 / 홍보 상자 — 표 자리에 실려도 표가 아니다
+_SIDEBAR = re.compile(r"(?:CAPSULE\s+SUMMARY|Abbreviations?\s+used\b)", re.I)
+FAKE_MIN_HITS = 0.34       # 데이터 행 중 이 비율 이상이 걸리면 그 신호를 인정
+
+
+def fake_table_reason(caption: str, markdown: str) -> str | None:
+    """이 표 객체가 **표가 아닌 것**이면 사유를, 표로 볼 만하면 None.
+
+    두 조건을 **모두** 넘겨야 가짜로 판정한다.
+      (1) 캡션이 'Table N' 꼴이 아니다 — 진짜 표 캡션을 달고 있으면 내용이
+          망가졌을 뿐 표는 실재한다. 지우지 않고 수리 대상으로 남긴다.
+      (2) 내용이 표 모양이 아니다 — 1열 / 참고문헌 목록 / 지면 장식 /
+          약어·홍보 상자 / 문단 흐름.
+    실측으로 정한 문턱이다. (1) 만으로 지우면 캡션 앞머리가 잘린 진짜 표
+    (예: 'Incidence of psoriasiform diseases in IBD patients…' — Table 2 의
+    'Table 2 ' 만 떨어져 나간 것)를 통째로 잃는다.
+    """
+    if _TABLE_CAPTION.match(caption or ""):
+        return None
+    rows, sep = parse_markdown(markdown or "")
+    data = [r for r in (rows[sep + 1:] if sep >= 0 else rows[1:])
+            if any(c.strip() for c in r)]
+    if not rows:
+        return None                       # 내용이 없으면 판단 근거가 없다
+    widths = [len(r) for i, r in enumerate(rows) if i != sep]
+    ncols = max(widths) if widths else 0
+    blob = (caption or "") + "\n" + (markdown or "")
+
+    def hit_frac(pat) -> float:
+        if not data:
+            return 0.0
+        return sum(1 for r in data if pat.search(" ".join(r))) / len(data)
+
+    if _SIDEBAR.search(blob):
+        return "sidebar_box"
+    if hit_frac(_REF_ITEM) >= FAKE_MIN_HITS or _REF_ITEM.search(caption or ""):
+        return "reference_list"
+    if hit_frac(_FURNITURE) >= FAKE_MIN_HITS or _FURNITURE.search(caption or ""):
+        return "page_furniture"
+    if ncols < 2:
+        return "single_column"
+    if _flows_as_prose([r for r in rows if r]):
+        return "prose_flow"
+    return None
+
+
 # ── 표 하나 복원 ────────────────────────────────────────────────────
 def _grid_from_region(pg: _Page, mode: int, ys: list[float] | None,
                       box: tuple[float, float, float, float]
@@ -807,6 +997,77 @@ def _grid_from_region(pg: _Page, mode: int, ys: list[float] | None,
     info = {"ncols": ncols, "n_head_rows": len(head_rows),
             "n_body_rows": len(body)}
     return header, body, info
+
+
+# ── 표 각주 ────────────────────────────────────────────────────────
+# 표 각주는 표의 일부다. 지금은 어디에도 담기지 않아 (a) 본문 꼬리로 새거나
+# (b) 통째로 사라진다. 총괄 실측 2건:
+#   10.1002/jso.23438  Table II 밑 '1Mean with its range. 2Mean with its
+#       standard deviation.' 두 줄이 RESULTS 본문 마지막에 붙었다.
+#   10.1002/lsm.22358  Table 1 밑 'Tm, melting temperature; VEGFa, …' 소실.
+# 담는 것이 이 모듈의 몫이고, 본문에서 걷어내는 것은 본문 담당의 몫이다.
+_FOOT_START = re.compile(
+    r"^\s*(?:"
+    r"[*†‡§¶#]"                                  # *  †  ‡ …
+    r"|\(?[a-z]\)?[.)]?\s+[A-Z0-9]"              # a) …  y …
+    r"|\d{1,2}\s*[A-Z][a-z]"                     # 1Mean …  2Mean …
+    r"|(?:Note|Notes|Abbreviations?|Source|Data|Values?|All)\b"
+    r"|[A-Za-z][A-Za-z0-9/+-]{0,11},\s+[a-z]"    # 'Tm, melting temperature;'
+    r")")
+# 약어 풀이가 두 번 이상 이어지면 각주가 확실하다('CI, confidence interval;
+# OR, odds ratio.'). 한 번만으로는 본문 문장과 갈라지지 않는다.
+_ABBR_GLOSS = re.compile(r"\b[A-Za-z][A-Za-z0-9/+-]{0,11},\s+[a-z][^;.]{2,60}[;.]")
+FOOT_MAX_GAP = 14.0        # 표 밑선에서 첫 각주 줄까지 허용 거리
+FOOT_MAX_DROP = 52.0       # 각주로 훑어 내려갈 최대 높이
+FOOT_SIZE_SLACK = 0.6      # 각주는 본문보다 작다 — 이만큼 넘게 크면 각주가 아니다
+
+
+def _footnote_below(pg: _Page, mode: int, box: tuple[float, float, float, float],
+                    stop_y: float, body_h: float) -> str:
+    """표 밑선 바로 아래에 붙은 각주 줄들을 이어 붙인다. 없으면 ''.
+
+    첫 줄이 각주 꼴이 아니면 아예 각주가 없는 것으로 본다 — 표 아래 본문
+    문단을 각주로 빨아들이지 않기 위한 가장 강한 방어다.
+    """
+    x0, _y0, x1, y1 = box
+    cands: list[tuple[float, float, float, str]] = []
+    for ln in pg.lines:
+        b = _rot(ln["bbox"], mode)
+        if not (y1 - 0.5 < b[1] < min(stop_y, y1 + FOOT_MAX_DROP)):
+            continue
+        if b[2] < x0 - 8.0 or b[0] > x1 + 8.0:
+            continue                       # 옆단 — 이 표의 각주가 아니다
+        if _CAP_START.match(ln["text"]) or _HEADING.match(ln["text"]):
+            continue
+        cands.append((b[1], b[3] - b[1], ln.get("size") or 0.0, ln["text"]))
+    cands.sort(key=lambda t: t[0])
+    if not cands:
+        return ""
+    y, h, size, txt0 = cands[0]
+    if y - y1 > FOOT_MAX_GAP:
+        return ""
+    if body_h and size and size > body_h + FOOT_SIZE_SLACK:
+        return ""                          # 본문 크기 글씨 = 각주가 아니다
+    txt0 = txt0.strip()
+    if not (_FOOT_START.match(txt0) or _ABBR_GLOSS.search(txt0)):
+        return ""
+    parts = [txt0]
+    prev_bottom = y + h
+    for y, h, size, txt in cands[1:]:
+        if y - prev_bottom > max(4.0, 0.9 * (h or 8.0)):
+            break                          # 줄 사이가 벌어졌다 → 각주 끝
+        if body_h and size and size > body_h + FOOT_SIZE_SLACK:
+            break
+        parts.append(txt.strip())
+        prev_bottom = y + h
+    out = _cell_text(" ".join(parts)).replace(r"\|", "|")
+    return out.strip()
+
+
+def _unrot(box: tuple[float, float, float, float], mode: int
+           ) -> tuple[float, float, float, float]:
+    """_rot 의 역변환 — 회전 좌표계의 상자를 원래 PDF 좌표로 되돌린다."""
+    return _rot(box, 0 if mode == 0 else (2 if mode == 1 else 1))
 
 
 def _continuation(pages: list[_Page], pno: int, num: str, mode: int
@@ -887,6 +1148,30 @@ def extract_table(pages: list[_Page], caption: str) -> tuple[str, dict]:
     info["nrows"] = len(body) + 1
     info["ncols"] = max([len(header)] + [len(r) for r in body])
     info["chars"] = len(md)
+    info["unreadable"] = md.count(UNREADABLE)
+
+    # 표가 지면에서 차지한 세로 범위. 원래 PDF 좌표로 되돌려 담는다 —
+    # 본문 담당이 '표가 문장을 어디서 끊고 어디서 다시 잇는지' 판정하는 데 쓴다.
+    # (실측 근거: 10.1002/jso.23438 DISCUSSION 첫 문단이 '…pivotal for both
+    #  accurate LNs, but a recent systematic review…' 로 비문이 됐는데, PDF 의
+    #  그 자리가 TABLE III 가 단 중간에 조판된 지점이다.)
+    ux0, uy0, ux1, uy1 = _unrot((rx0, cap_box[1], rx1, ys[-1]), mode)
+    info["span"] = {"page": pno + 1, "x0": round(ux0, 1), "y0": round(uy0, 1),
+                    "x1": round(ux1, 1), "y1": round(uy1, 1),
+                    "caption_y0": round(_unrot(cap_box, mode)[1], 1),
+                    "body_y0": round(_unrot((rx0, ys[0], rx1, ys[0]), mode)[1], 1)}
+    if info.get("continued_page"):
+        info["span"]["continued_page"] = info["continued_page"]
+
+    # 표 본문 줄들의 글자 크기(중앙값). 각주는 이보다 크지 않다.
+    sizes = sorted(ln.get("size") or 0.0 for ln in pg.lines
+                   if ys[0] < (_rot(ln["bbox"], mode)[1]) < ys[-1]
+                   and rx0 - 6 < _rot(ln["bbox"], mode)[0] < rx1 + 6)
+    sizes = [s for s in sizes if s]
+    body_h = sizes[len(sizes) // 2] if sizes else 0.0
+    note = _footnote_below(pg, mode, (rx0, ys[0], rx1, ys[-1]), stop_y, body_h)
+    if note:
+        info["footnote"] = note
     return md, info
 
 

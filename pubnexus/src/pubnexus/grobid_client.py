@@ -28,7 +28,7 @@ from . import utils
 from .schema import (Document, Meta, Section, Paragraph, Figure, Table,
                      Reference, BACK_MATTER, classify_section, classify_path,
                      normalize_title)
-from .textfix import clean_heading, clean_paragraph
+from .textfix import clean_heading, clean_paragraph, strip_running_header
 from .utils import norm_text, log
 
 XMLID = "{http://www.w3.org/XML/1998/namespace}id"
@@ -502,6 +502,200 @@ def _is_real_figure(fig, head: str, desc: str) -> bool:
                for t in (head, desc, _despaced(head), _despaced(desc)))
 
 
+# ── GROBID 가 <figure> 상자에 가둔 본문 되살리기 ─────────────────────
+#
+# GROBID 는 박스·컬럼 조판을 만나면 본문 문단을 <figure> 로 잘못 담는다.
+# 그 상자는 _is_real_figure/표 게이트에서 **통째로 버려졌다** — 캐시 130편
+# 실측 76개 상자·38,780자가 그렇게 사라졌고, 그 안에는
+#   · 10.1002/jso.23438  PubMed 검색어 (3)~(14) 12개 항목
+#   · 10.1002/jso.23618  'APPENDIX. PubMed Search Strategy' 검색식 5~25번
+#   · 10.1111/pcmr.12699 Results 4,242자(가장 큰 한 덩어리)
+# 가 들어 있다. TEI 에는 살아 있으니 GROBID 가 아니라 **우리 파서의 손실**이다.
+#
+# 되살릴지는 규칙이 아니라 **원문 PDF 의 본문 흐름에 그 글이 실제로 있는가**
+# 로 판단한다. recover.extract_pdf_text() 는 러닝헤더·저작권·소속·캡션·
+# 키워드/약어 상자를 이미 걷어낸 본문 스트림을 만든다. 거기서 유일하게
+# 찾히면 본문이고, 안 찾히면 조판 부속이라 그대로 버린다(지금 동작 유지).
+# 넣을 위치도 같은 자리에서 얻는다 — PDF 에서 그 지점 **직전에 끝나는 문단**
+# 뒤에 넣는다.
+#
+# 절대 기존 문단에 **이어붙이지 않는다**. 언제나 별도 문단으로만 넣는다.
+# 이어붙이면 문장이 엉뚱하게 연결돼 비문이 되고(recover 병합 실측 33건 중
+# 14건이 그랬다), 게다가 대문자로 시작하게 되어 탐지기에 다시 안 잡힌다 —
+# 결함이 조용히 숨는다. 별도 문단이면 최악의 경우도 '위치가 어색한 문단'
+# 이지 문장 파손이 아니다.
+
+# 상자 안에서 본문과 부속을 가르는 경계.
+#   · 자간 조판된 캡션 라벨('F I G U R E 2' · 'TA B L E 1')과 전부 대문자 라벨.
+#     본문 참조('as shown in Table 3')는 혼합 대소문자라 걸리지 않는다.
+#   · CAPSULE SUMMARY·ABBREVIATIONS USED 같은 박스 머리(번호가 없다).
+# 번호 뒤에 \b 를 쓰면 안 된다 — 캡션 본문이 번호에 붙어 나오는 일이 흔해서
+# ('F I G U R E 1Representative cases…') 경계가 성립하지 않아 통째로 놓친다.
+_BOX_CAPTION_CUT = re.compile(
+    r"(?:(?:F\s*I\s*G\s*U\s*R\s*E|T\s*A\s*B\s*L\s*E|F\s*I\s*G|S\s*C\s*H\s*E\s*M\s*E)"
+    r"\s*\.?\s*(?:\d{1,3}|[IVXLC]{1,5})(?![0-9])"
+    r"|C\s*A\s*P\s*S\s*U\s*L\s*E\s+S\s*U\s*M\s*M\s*A\s*R\s*Y"
+    r"|A\s*B\s*B\s*R\s*E\s*V\s*I\s*A\s*T\s*I\s*O\s*N\s*S?\s+U\s*S\s*E\s*D)")
+
+# 저자 명단('… Bae, MD, PhD, a Jung Eun Kim, MD, PhD, b …')은 본문이 아니다.
+# 러닝헤더가 절 제목으로 승격된 문서에서는 이 명단이 본문 스트림에까지
+# 남아 위치 확인만으로는 걸러지지 않는다(실측 10.1016/j.jaad.2020.09.088).
+# 학위 표기가 3개 이상 나오는 본문 문단은 사실상 없다.
+_DEGREE_RE = re.compile(r"\b(?:MD|PhD|MSc|MPH|MBBS|BSc|DO|RN|DrPH)\b")
+
+
+def _is_byline(seg: str) -> bool:
+    return len(_DEGREE_RE.findall(seg or "")) >= 3
+
+
+def _box_segments(text: str) -> list[str]:
+    """텍스트 상자를 캡션 라벨 경계로 토막낸다.
+
+    한 상자에 본문과 캡션이 함께 담기는 일이 잦다(예: 10.1111/jocd.12551
+    fig_0 은 Methods 문단 뒤에 'F I G U R E 1 Retinoid metabolism…' 캡션이
+    이어 붙어 있다). 토막마다 따로 PDF 본문 스트림에서 찾으므로, 본문 토막만
+    살아남고 캡션 토막은 스트림에 없어 자동으로 걸러진다.
+
+    경계를 잘못 잡아도 손해가 없다 — 두 토막이 각각 제자리에서 찾히면 둘 다
+    들어가고, 문단 경계 하나가 더 생길 뿐 글자가 사라지거나 섞이지 않는다.
+    """
+    cuts = [m.start() for m in _BOX_CAPTION_CUT.finditer(text or "")]
+    if not cuts:
+        return [text] if text else []
+    bounds = [0] + [c for c in cuts if c > 0] + [len(text)]
+    return [text[a:b].strip() for a, b in zip(bounds, bounds[1:])
+            if text[a:b].strip()]
+
+
+def _place_boxes(body_text: list[Section], boxes: list[str],
+                 pdf_file: str, pcount: list[int]) -> int:
+    """버려질 뻔한 텍스트 상자를 PDF 본문 흐름에서 확인하고 제자리에 넣는다.
+
+    돌려주는 값은 실제로 되살린 문단 수. PDF 를 못 읽거나 한 토막도 못 찾으면
+    0 이고, 그때 동작은 기존과 완전히 같다(전부 버림).
+    """
+    if not boxes or not body_text or not pdf_file:
+        return 0
+    try:
+        from .recover import (extract_pdf_text, _letters, _letters_map, _locate)
+        stream = extract_pdf_text(pdf_file)
+    except Exception as e:                    # noqa: BLE001 — 상자 복원 실패가
+        log(f"      · 텍스트 상자 복원 건너뜀(PDF 읽기 실패): "  # 파싱을 막지 않게
+            f"{type(e).__name__}: {e}")
+        return 0
+    if len(stream) < 400:
+        return 0
+    letters, _ = _letters_map(stream)
+
+    # 이미 정본에 있는 글자(중복 삽입 방지) + 기존 문단의 PDF 위치(삽입 지점)
+    doc_letters = _letters(" ".join(p.text for s in body_text
+                                    for p in s.paragraphs))
+    def _at(text: str) -> int:
+        """문단이 PDF 스트림에서 시작하는 위치. 모호하면 -1.
+
+        _locate 는 40자 미만을 거부한다(모호해서). 그런데 '(1) Advanced stomach
+        neoplasm.' 같은 **짧은 목록 문단**이 기준점이 되어야 상자를 그 뒤에
+        넣을 수 있다. 그래서 짧은 것은 유일성을 직접 확인해 받아들인다.
+        """
+        L = _letters(text)
+        at = _locate(letters, L)
+        if at >= 0 or len(L) < 18:
+            return at
+        first = letters.find(L)
+        if first < 0 or letters.find(L, first + 1) >= 0:
+            return -1                         # 없거나 여러 곳 → 기준점으로 못 쓴다
+        return first
+
+    anchors: list[tuple[int, int, int]] = []
+    for si, sec in enumerate(body_text):
+        for pi, p in enumerate(sec.paragraphs):
+            at = _at(p.text)
+            if at >= 0:
+                anchors.append((at, si, pi))
+    if not anchors:
+        return 0
+
+    # (섹션, 문단뒤) → 넣을 문단들. 인덱스가 밀리지 않게 뒤에서부터 반영한다.
+    pending: list[tuple[int, int, str]] = []
+    for raw in boxes:
+        for seg in _box_segments(raw):
+            L = _letters(seg)
+            if len(L) < 60:
+                continue                      # 너무 짧으면 위치가 모호하다
+            if _is_byline(seg):
+                continue                      # 저자 명단 — 본문이 아니다
+            if L[:100] in doc_letters:
+                continue                      # 이미 본문에 있다
+            at = _locate(letters, L)
+            if at < 0:
+                continue                      # PDF 본문 흐름에 없다 → 조판 부속
+            prev = [a for a in anchors if a[0] < at]
+            if not prev:
+                continue                      # 앞에 기준 문단이 없다 → 넣지 않는다
+            _, si, pi = max(prev, key=lambda a: a[0])
+            pending.append((si, pi, seg))
+            doc_letters += L
+
+    for si, pi, seg in sorted(pending, key=lambda x: (x[0], x[1]), reverse=True):
+        pcount[0] += 1
+        para = Paragraph(id=f"p{pcount[0]}", text=clean_paragraph(norm_text(seg)))
+        body_text[si].paragraphs.insert(pi + 1, para)
+    return len(pending)
+
+
+# ── GROBID 가 지워 버린 '진짜 하이픈' 되살리기 ───────────────────────
+#
+# GROBID 는 줄 끝에서 끊긴 하이픈을 **무조건 지우고** 붙인다. 조판 하이픈
+# ('popu-\nlation' → 'population')은 그게 맞지만, 원래 하이픈이 있는 합성어까지
+# 붙여 버린다 — 10.1002/jso.23438 PDF 의 'overall survival (OS) or disease-\nfree
+# survival (DFS).' 이 TEI·정본에서 'diseasefree survival' 이 됐다. 같은 PDF
+# 초록에는 줄바꿈 없이 'disease-free' 가 인쇄돼 있다.
+#
+# 그래서 규칙이 아니라 **그 PDF 자신의 조판**을 증거로 쓴다.
+#   · real   — 줄바꿈이 아닌 자리에 'a-b' 로 인쇄된 쌍. 진짜 하이픈이다.
+#   · solid  — 하이픈 없이 통짜로 인쇄된 낱말.
+# 붙어 있는 낱말 w 가 solid 에 있으면 손대지 않는다. 없을 때만 쪼개서
+# (left,right) 가 real 에 있으면 하이픈을 되살린다.
+# solid 검사가 오탐 방지의 핵심이다 — 'consensus' 는 통짜로 인쇄돼 있으므로
+# 'con-sensus' 로 되돌아가지 않는다. 조판 하이픈을 살려 'popu-lation' 을
+# 본문에 남기는 것이 원래 결함보다 나쁘다.
+_PDF_HYPHEN = "[-‐‑]"
+_HYPH_PAIR_RE = re.compile(rf"([A-Za-z]{{2,}}){_PDF_HYPHEN}([A-Za-z]{{2,}})")
+_SOLID_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+_JOINED_RE = re.compile(r"[A-Za-z]{6,}")
+
+
+def _hyphen_evidence(pdf_file: str) -> tuple[set[tuple[str, str]], set[str]]:
+    """PDF 원문에서 (진짜 하이픈 쌍, 통짜 낱말) 을 모은다."""
+    import fitz
+    real: set[tuple[str, str]] = set()
+    solid: set[str] = set()
+    with fitz.open(pdf_file) as doc:
+        for page in doc:
+            for line in page.get_text("text").splitlines():
+                # 줄 안에서만 본다 — 줄 끝 하이픈은 조판 분철이라 증거가 아니다.
+                for m in _HYPH_PAIR_RE.finditer(line):
+                    real.add((m.group(1).lower(), m.group(2).lower()))
+                for w in _SOLID_WORD_RE.findall(_HYPH_PAIR_RE.sub(" ", line)):
+                    solid.add(w.lower())
+    return real, solid
+
+
+def _restore_hyphens(text: str, real: set[tuple[str, str]],
+                     solid: set[str]) -> str:
+    """붙어 버린 합성어에 하이픈을 되살린다(증거가 있을 때만)."""
+    def repl(m: re.Match) -> str:
+        w = m.group(0)
+        lw = w.lower()
+        if lw in solid:
+            return w                          # 통짜로 인쇄된 낱말 — 손대지 않는다
+        for k in range(2, len(w) - 1):
+            if (lw[:k], lw[k:]) in real:
+                return w[:k] + "-" + w[k:]
+        return w
+    return _JOINED_RE.sub(repl, text)
+
+
 def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     root = etree.fromstring(tei_bytes)
     refs, rid_to_ref = _build_refs(root)
@@ -509,15 +703,24 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     figures: list[Figure] = []
     tables: list[Table] = []
     body_text: list[Section] = []
+    orphan_boxes: list[str] = []      # GROBID 가 <figure> 로 잘못 담은 본문 후보
     pcount = [0]
 
     body = root.find(".//{*}text/{*}body")
     if body is not None:
         # 1) div 를 재귀 순회해 제목/번호를 모으고, 2) 그로부터 경로를 매긴다.
         divs = list(_iter_divs(body))
+        journal = (meta.get("journal") or "").strip()
         entries = []
         for div, native_depth in divs:
             title, n = _div_head(div)
+            # 러닝헤더가 절 제목으로 승격되는 일이 있다(실측 10.1002/jso.23438 의
+            # ['DISCUSSION','Journal of Surgical Oncology']). 저널명과 같은 제목은
+            # 절 제목이 아니라 페이지 머리말이므로 제목 없는 div 로 되돌린다 —
+            # 그러면 앞 섹션의 연속으로 이어붙어 본문 흐름이 복구된다.
+            if journal and len(journal) >= 12 and \
+                    normalize_title(title).lower() == normalize_title(journal).lower():
+                title = ""
             entries.append({"title": title, "n": n, "native_depth": native_depth})
         paths = _assign_paths(entries)
         lead = _lead_title(entries)
@@ -552,6 +755,10 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
                 # 표 격자도 없고 라벨도 없으면 표가 아니라 GROBID 가 상자로 잡은
                 # 본문 덩어리다(실측 231개 중 4개, 넷 다 본문에서 참조되지 않음).
                 if not markdown and not (label or _label_of(head) or _label_of(desc)):
+                    # 캡션이 아니라 본문 후보다 — _join_caption 의 '. ' 이음쇠를
+                    # 쓰면 'Female 1' + 'adults who…' 가 'Female 1. adults who…'
+                    # 처럼 없던 마침표를 만든다. 원문 그대로 공백으로만 잇는다.
+                    orphan_boxes.append(f"{head} {desc}".strip())
                     continue
                 # head/label 을 버리면 'Table 3' 이라는 식별번호가 통째로 사라진다.
                 cap = _trim_caption(_join_caption(head, desc))
@@ -562,10 +769,51 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
                     caption=clean_paragraph(cap), markdown=markdown))
             else:
                 if not _is_real_figure(fig, head, desc):
-                    continue           # 본문 덩어리를 그림으로 잡은 것 — 버린다
+                    # 본문 덩어리를 그림으로 잡은 것. 버리지 말고 PDF 본문
+                    # 흐름에서 확인해 제자리에 되살린다(_place_boxes).
+                    # 캡션이 아니라 본문 후보다 — _join_caption 의 '. ' 이음쇠를
+                    # 쓰면 'Female 1' + 'adults who…' 가 'Female 1. adults who…'
+                    # 처럼 없던 마침표를 만든다. 원문 그대로 공백으로만 잇는다.
+                    orphan_boxes.append(f"{head} {desc}".strip())
+                    continue
                 cap = _trim_caption(_join_caption(head, desc))
                 figures.append(Figure(id=fid or f"fig{label or len(figures)+1}",
                                       caption=clean_paragraph(cap)))
+
+        # 그림/표가 아닌 텍스트 상자는 PDF 본문 흐름에 있는 것만 되살린다.
+        if orphan_boxes:
+            n = _place_boxes(body_text, orphan_boxes, source_file, pcount)
+            if n:
+                log(f"      · 텍스트 상자에서 본문 {n}문단 되살림")
+
+        # 문장 한복판에 박힌 러닝헤더(저널명)를 걷어낸다.
+        if journal:
+            nr = 0
+            for sec in body_text:
+                for p in sec.paragraphs:
+                    fixed = strip_running_header(p.text, journal)
+                    if fixed != p.text:
+                        nr += 1
+                        p.text = fixed
+            if nr:
+                log(f"      · 러닝헤더 제거: {nr}문단")
+
+        # GROBID 가 지운 진짜 하이픈을 그 PDF 자신의 조판을 증거로 되살린다.
+        if source_file and Path(source_file).exists():
+            try:
+                real, solid = _hyphen_evidence(source_file)
+            except Exception as e:            # noqa: BLE001 — 하이픈 복원 실패가
+                log(f"      · 하이픈 복원 건너뜀: {type(e).__name__}: {e}")  # 파싱을 막지 않게
+            else:
+                nh = 0
+                for sec in body_text:
+                    for p in sec.paragraphs:
+                        fixed = _restore_hyphens(p.text, real, solid)
+                        if fixed != p.text:
+                            nh += 1
+                            p.text = fixed
+                if nh:
+                    log(f"      · 하이픈 복원: {nh}문단")
 
         # 버려진 <figure>/<table> 을 가리키는 문단 참조는 함께 지운다.
         # 남겨 두면 정본 안에 '존재하지 않는 그림 id' 를 가리키는 링크가 생겨
@@ -581,7 +829,7 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     # 돌려주고 <text><body> 를 비워 보내는 일이 있는데(실측 134편 중 4편),
     # 그대로 통과시키면 본문 0자짜리 문서가 조용히 정본이 된다.
     # 예외를 던져 상위(run → pdf_fallback)가 다른 경로로 처리하게 한다.
-    if not any(p.text for s in sections for p in s.paragraphs):
+    if not any(p.text for s in body_text for p in s.paragraphs):
         raise ValueError(
             "TEI 본문이 비어 있음(GROBID 가 <text><body> 를 채우지 못함) — "
             "정본 생성 중단, PDF 폴백 필요")
@@ -614,7 +862,7 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
         paper_id=meta.get("doi") or meta.get("pmid") or "unknown",
         source="grobid", source_file=source_file, meta=m,
         abstract=abstract, abstract_source=abstract_source,
-        body_text=sections, figures=figures, tables=tables,
+        body_text=body_text, figures=figures, tables=tables,
         references=list(refs.values()),
     )
 
