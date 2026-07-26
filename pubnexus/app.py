@@ -547,6 +547,7 @@ class App:
         self.renderer = PageRenderer()
         self.cancel = threading.Event()
         self.worker: threading.Thread | None = None
+        self.queue = None            # 배치 처리 순서(WorkQueue) — 클릭하면 당긴다
         self.grobid = Grobid(
             (self.cfg.get("grobid") or {}).get("url", ""),
             notify=lambda st, sec: self.push("grobid", {"state": st, "sec": sec}))
@@ -660,7 +661,24 @@ class App:
             res["pdf_error"] = f"{type(e).__name__}: {e}"
             res["pages"] = []
         res["doc"] = self.doc_view(pdf)
+        if not res["doc"].get("extracted"):
+            res["doc"]["queued"] = self.bump(pdf)
         return res
+
+    def bump(self, pdf: Path) -> str | None:
+        """지금 보는 논문을 배치 맨 앞으로.
+
+        이미 일꾼이 잡고 있으면 당기지 않는다('running') — 같은 논문을 두 번
+        처리하면 같은 파일에 동시에 쓰게 되어 반쪽 산출물이 나온다.
+        """
+        q = self.queue
+        if q is None:
+            return None
+        try:
+            st = q.bump(pdf)
+        except Exception:  # noqa: BLE001
+            return None
+        return st if st in ("queued", "running") else None
 
     def doc_view(self, pdf: Path) -> dict:
         from pubnexus import store
@@ -723,9 +741,17 @@ class App:
                 self.prog(1, total, targets[0].name, "논문 분석기 준비 중", 0.0)
                 self.grobid.wait(GROBID_WARMUP_SEC)
             cfg = utils.load_config()
-            for i, p in enumerate(targets, 1):
-                if self.cancel.is_set():
+            # 처리 순서를 통에 담아 둔다. 원장이 목록 뒤쪽 논문을 클릭하면
+            # paper() 가 그 논문을 맨 앞으로 당긴다(WorkQueue.bump).
+            q = single.WorkQueue()
+            q.reset(targets)
+            self.queue = q
+            while not self.cancel.is_set():
+                item = q.take()
+                if item is None:
                     break
+                p = item[1]
+                i += 1
                 t0 = time.time()
                 self.prog(i, total, p.name, "준비", 0.0, times)
 
@@ -749,11 +775,14 @@ class App:
                 except Exception as e:  # noqa: BLE001 — 파일별 격리
                     fails.append((p.name, f"{type(e).__name__}: {e}"))
                     utils.log(f"[app] 실패 {p.name}: {type(e).__name__}: {e}")
+                finally:
+                    q.finish(p)
                 times.append(time.time() - t0)
         except Exception as e:  # noqa: BLE001
             fails.append(("(전체)", f"{type(e).__name__}: {e}"))
             utils.log(traceback.format_exc())
         finally:
+            self.queue = None
             stopped = self.cancel.is_set()
             self.scan_store()
             self.push("run", {
@@ -1214,7 +1243,7 @@ const $=s=>document.querySelector(s), DPR=Math.min(window.devicePixelRatio||1,2)
 const S={files:[],view:[],sel:-1,key:null,pages:[],zoom:1,fitW:0,bucket:1200,
          els:[],io:null,busy:false,ready:false,
          hist:[],hidx:-1,mem:{},    /* 이동 이력 · 논문별로 읽던 자리 */
-         cursor:-1,last:null};      /* 목록 커서 · 지난번에 보던 논문 */
+         cursor:-1,last:null,waiting:null};  /* 목록 커서 · 지난번 논문 · 기다리는 논문 */
 
 /* ── 도우미 ─────────────────────────────────────────────── */
 let tmr=null;
@@ -1233,13 +1262,27 @@ const api=()=>window.pywebview&&window.pywebview.api;
    실제 경로와 순서가 뒤집혀 읽는 사람이 한 번 더 생각해야 했다. 좁으면 앞이 잘리도록
    direction:rtl 대신 그냥 ellipsis 를 쓰고, 전체 경로는 툴팁에 남긴다. */
 function setPath(p){
-  const el=$("#path");el.textContent="";el.title=p||"";
+  const el=$("#path");el.title=p||"";el.dataset.full=p||"";
   if(!p){el.textContent="폴더를 고르세요";return;}
-  const clean=p.replace(/[\\/]+$/,"");
-  const cut=Math.max(clean.lastIndexOf("\\"),clean.lastIndexOf("/"));
-  const s=document.createElement("span");s.textContent=cut>=0?clean.slice(0,cut+1):"";
-  const b=document.createElement("b");b.textContent=cut>=0?clean.slice(cut+1):clean;
-  el.appendChild(s);el.appendChild(b);}
+  renderPath();}
+/* 경로는 읽는 순서 그대로. 넘치면 **앞쪽**을 …로 줄인다 —
+   뒤를 자르면 정작 어느 폴더인지가 사라진다. */
+function renderPath(){
+  const el=$("#path"),full=el.dataset.full||"";
+  if(!full)return;
+  const parts=full.replace(/[\\/]+$/,"").split(/[\\/]/);
+  const name=parts.pop()||full;
+  let segs=parts,cut=false;
+  const draw=()=>{
+    el.textContent="";
+    const head=(cut?"…\\":"")+(segs.length?segs.join("\\")+"\\":"");
+    if(head){const s=document.createElement("span");s.textContent=head;
+      el.appendChild(s);}
+    const b=document.createElement("b");b.textContent=name;el.appendChild(b);};
+  draw();
+  let guard=0;
+  while(el.scrollWidth>el.clientWidth+1&&segs.length&&guard++<40){
+    segs=segs.slice(1);cut=true;draw();}}
 
 /* ── 목록 ───────────────────────────────────────────────── */
 function setFiles(files){S.files=files||[];draw();}
@@ -1398,9 +1441,16 @@ async function openPaper(i,opt){
 function renderDoc(d){
   const box=$("#doc");
   if(!d.extracted){
-    box.innerHTML='<div class="empty">추출 안 됨<br><span style="font-size:11.5px;color:#b3b9c2">'
-      +'위쪽 <b>이 논문만</b> 을 누르면 이 한 편을 처리합니다</span></div>';
+    S.waiting=d.queued?($("#dtitle").textContent||""):null;
+    const msg=d.queued==="running"
+      ?["추출 중…","끝나면 바로 보여 드립니다"]
+      :d.queued==="queued"
+      ?["곧 추출됩니다","이 논문을 맨 앞으로 당겼습니다"]
+      :["추출 안 됨","위쪽 <b>이 논문만</b> 을 누르면 이 한 편을 처리합니다"];
+    box.innerHTML='<div class="empty">'+msg[0]
+      +'<br><span style="font-size:11.5px;color:#b3b9c2">'+msg[1]+'</span></div>';
     $("#foot").textContent=d.error||"";return;}
+  S.waiting=null;
   box.innerHTML='<article id="art"></article>';
   const art=$("#art");
   art.innerHTML=d.html||"";
@@ -1493,7 +1543,8 @@ $("#scroll").addEventListener("scroll",()=>{
     for(let i=0;i<S.els.length;i++){if(S.els[i].offsetTop<=y)n=i+1;else break;}
     $("#pgno").textContent=n+" / "+S.pages.length;});});
 let rt=null;
-window.addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(()=>layout(true),120);});
+window.addEventListener("resize",()=>{clearTimeout(rt);
+  rt=setTimeout(()=>{layout(true);renderPath();},120);});
 
 /* ── 분할선 ───────────────────────────────────────────────
    폭을 px 로 굳히지 않고 **비율(fr)** 로 유지한다 — 창 크기를 바꿔도
@@ -1572,7 +1623,11 @@ window.pnx={on(m){
     if(f&&!f.done){f.done=true;
       const r=$("#list").querySelector('.row[data-i="'+S.files.indexOf(f)+'"]');
       if(r)r.classList.add("done");
-      updateCount();}
+      updateCount();
+      /* 기다리던 논문이 끝났으면 말없이 다시 열어 결과를 보여준다 */
+      if(S.waiting&&S.waiting===m.name&&S.sel>=0&&S.files[S.sel]&&
+         S.files[S.sel].name===m.name){S.waiting=null;
+        openPaper(S.sel,{noHist:true,top:0});}}
   }else if(m.kind==="grobid"){
     /* 원장은 GROBID 가 뭔지 알 필요가 없다. 준비 상태만 조용히 보이면 된다. */
     const g=$("#gro");g.className=m.state==="ok"?"ok":m.state==="starting"?"starting":

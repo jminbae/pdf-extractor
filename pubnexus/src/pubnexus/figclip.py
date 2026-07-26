@@ -619,10 +619,15 @@ def _region(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption]
     cbox = _caption_block(pg, cap)
     cy0, cy1 = cap.bbox[1], cap.bbox[3]
 
-    def try_side(y0: float, y1: float, above: bool):
+    def try_side(y0: float, y1: float, above: bool,
+                 wx0: float | None = None, wx1: float | None = None):
         if y1 - y0 < MIN_FIG_H:
             return None
-        lo, hi = _side_limits(pg, cap, others, bx0, bx1, sx0, sx1, y0, y1)
+        a0 = bx0 if wx0 is None else wx0
+        a1 = bx1 if wx1 is None else wx1
+        lo, hi = _side_limits(pg, cap, others, a0, a1,
+                              sx0 if wx0 is None else wx0,
+                              sx1 if wx1 is None else wx1, y0, y1)
         zone = (lo, y0, hi, y1)
         cands = [p for p in pg.pieces
                  if _xshare(p.rect, lo, hi) >= PIECE_IN_BAND
@@ -664,6 +669,33 @@ def _region(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption]
         why = (f"{cap.page + 1}쪽 캡션 {'아래' if above else '위'}"
                f" 조각 {len(cands)}개 · 구간 y[{y0:.0f},{y1:.0f}]")
         return box, kind, why
+
+    # 캡션을 그림 **옆**에 세워 싣는 조판이 있다(Springer: 좁은 캡션 칸 + 넓은
+    # 그림 칸). 실측 10.1007/s11695-012-0674-4 2쪽의 PRISMA 흐름도는 캡션이
+    # 왼쪽에 세로로 서 있어 '캡션 위/아래'로만 찾으면 위쪽 절반이 잘려 나간다.
+    # 캡션 덩어리와 **같은 높이에** 조각이 옆으로 놓여 있으면 그쪽을 먼저 본다.
+    ch = max(1.0, cbox[3] - cbox[1])
+    cw = max(1.0, cbox[2] - cbox[0])
+    # 옆에 세워 실은 캡션은 **좁고 길다**. 이 조건이 없으면, 아래쪽 옆 단
+    # 그림이 마침 캡션과 같은 높이까지 내려온 것만으로 옆 단 그림을 가져온다
+    # (실측 10.1111/dsu.12239 2쪽: Fig 1 이 Figure 2 의 원그래프를 물었다).
+    for lo2, hi2 in (((cbox[2] + CAP_GAP, sx1), (sx0, cbox[0] - CAP_GAP))
+                     if ch >= 0.5 * cw else ()):
+        if hi2 - lo2 < MIN_FIG_W:
+            continue
+        beside = [p for p in pg.pieces
+                  if p.rect[0] >= lo2 - 1 and p.rect[2] <= hi2 + 1
+                  and p.rect[1] >= top - 1 and p.rect[3] <= bottom + 1
+                  and (min(p.rect[3], cbox[3]) - max(p.rect[1], cbox[1])) > 0.6 * ch]
+        if sum(_area(p.rect) for p in beside) < MIN_FIG_AREA:
+            continue
+        # 세로 한계도 **그 칸 기준**으로 다시 잰다. 캡션 칸 기준으로 재면 옆
+        # 칸의 다른 캡션·본문이 장벽으로 안 잡혀 아래 그림까지 삼킨다(실측
+        # 10.1111/dsu.12239 2쪽: Fig 1 이 Figure 2 캡션을 물었다).
+        t2, b2 = _limits(pg, cap, others, lo2, hi2)
+        got = try_side(t2, b2, True, lo2, hi2)
+        if got is not None:
+            return got
 
     # 그림은 캡션 **위**가 원칙(figure). 위에서 못 찾으면 아래를 본다.
     got = try_side(top, cy0 - CAP_GAP, True)
