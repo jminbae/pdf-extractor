@@ -227,6 +227,55 @@ def chips_html(meta: dict) -> str:
     return "".join(out)
 
 
+def _img_size(fp: Path) -> tuple[int, int] | None:
+    """이미지의 픽셀 크기를 헤더만 읽어 알아낸다(PNG·JPEG). 모르면 None.
+
+    왜 필요한가 — 크기 없는 <img> 는 불러오기 전까지 높이가 0 이다. 그래서
+    본문 [15] 를 눌러 자리를 잡아 놓아도, 그 뒤에 그림이 도착하면서 문서가
+    밀려 **엉뚱한 곳에 서 있게** 된다. width/height 를 주면 브라우저가 비율을
+    알고 처음부터 자리를 비워 둔다.
+    """
+    try:
+        with open(utils.long_path(fp), "rb") as f:
+            head = f.read(32)
+            if head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR":
+                return (int.from_bytes(head[16:20], "big"),
+                        int.from_bytes(head[20:24], "big"))
+            if head[:2] != b"\xff\xd8":          # JPEG 아님
+                return None
+            f.seek(2)
+            while True:
+                b = f.read(1)
+                if not b:
+                    return None
+                if b != b"\xff":
+                    continue
+                while b == b"\xff":              # 채움 바이트(0xFF) 건너뛰기
+                    b = f.read(1)
+                    if not b:
+                        return None
+                marker = b[0]
+                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                    continue                     # 길이 없는 표지
+                size = f.read(2)
+                if len(size) < 2:
+                    return None
+                seg = int.from_bytes(size, "big") - 2
+                # SOF0~SOF15 에 크기가 있다. DHT(C4)·JPG(C8)·DAC(CC) 는 제외.
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    body = f.read(5)
+                    if len(body) < 5:
+                        return None
+                    w = int.from_bytes(body[3:5], "big")
+                    h = int.from_bytes(body[1:3], "big")
+                    # 깨진 파일에서 우연히 SOF 처럼 보이는 바이트열을 만나면 말도
+                    # 안 되는 크기가 나온다. 그대로 믿으면 빈 자리만 거대해진다.
+                    return (w, h) if 1 <= w <= 20000 and 1 <= h <= 20000 else None
+                f.seek(seg, 1)
+    except OSError:
+        return None
+
+
 def figures_html(doc: dict, sha1: str) -> str:
     """그림을 실제 이미지로. 파일이 아직 없으면 **빈 자리를 만들지 않는다.**
 
@@ -238,26 +287,30 @@ def figures_html(doc: dict, sha1: str) -> str:
         return ""
     from pubnexus import store
     base = store.figs_dir(sha1)
-    items: list[tuple[str, str]] = []
+    items: list[tuple[str, str, tuple[int, int] | None]] = []
     for f in figs:
         cap = str((f or {}).get("caption") or "").strip()
         img = str((f or {}).get("image") or "").strip()
         url = ""
+        wh: tuple[int, int] | None = None
         if img:
             p = Path(img)
             fp = p if p.is_absolute() else (base / img)
             if utils.path_exists(fp):
                 url = ("/fig?s=" + urllib.parse.quote(sha1) +
                        "&amp;f=" + urllib.parse.quote(img))
+                wh = _img_size(fp)
         if url or cap:
-            items.append((url, cap))
-    if not any(u for u, _ in items):
+            items.append((url, cap, wh))
+    if not any(u for u, _, _ in items):
         return ""                       # 아직 그림 파일이 없다 → 자리를 만들지 않는다
     out = ["<h2>Figures</h2>"]
-    for url, cap in items:
+    for url, cap, wh in items:
         out.append('<figure class="fig">')
         if url:
-            out.append(f'<img src="{url}" loading="lazy" alt="">')
+            # 크기를 함께 보낸다 — 자리를 미리 잡아야 링크 착지점이 밀리지 않는다.
+            dim = f' width="{wh[0]}" height="{wh[1]}"' if wh else ""
+            out.append(f'<img src="{url}"{dim} loading="lazy" alt="">')
         if cap:
             out.append(f"<figcaption>{_inline(cap)}</figcaption>")
         out.append("</figure>")
@@ -1158,8 +1211,19 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
   letter-spacing:-.02em;margin:0 .5px}
 #art a.cite{text-decoration:none;cursor:pointer}
 #art a.cite:hover{color:var(--accent)}
+#art a.cite.on{color:var(--accent);background:#eef3fb;border-radius:3px}
 #art .hit{background:#fff6d8;border-radius:3px;
   transition:background .5s ease}                /* 눌러서 찾아간 항목 잠깐 표시 */
+/* 참고문헌 미리보기 — 읽던 자리를 잃지 않게 그 자리에 띄운다 */
+#refpop{position:fixed;z-index:60;max-width:460px;
+  background:#fff;border:1px solid var(--line);border-radius:8px;
+  box-shadow:0 8px 28px rgba(20,26,34,.18);padding:11px 13px 9px;
+  font-family:var(--serif);font-size:13.4px;line-height:1.6;color:#2b323a}
+#refpop .num{font-family:var(--ui);font-size:11px;font-weight:700;
+  color:var(--mut);letter-spacing:.02em;display:block;margin-bottom:3px}
+#refpop .go{font-family:var(--ui);font-size:11px;color:var(--mut);
+  background:none;border:0;padding:4px 0 0;cursor:pointer;display:block}
+#refpop .go:hover{color:var(--accent);text-decoration:underline}
 #art .fig{margin:0 0 18px;padding:0}
 #art .fig img{max-width:100%;height:auto;display:block;border:1px solid var(--line);
   border-radius:6px;background:#fff}
@@ -1591,18 +1655,63 @@ const DEF_COLS="minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,3fr)";
 
 /* ── 본문 안 링크: [15] → 아래 참고문헌 15번으로 부드럽게 ──────────
    참고문헌 절 규격이 확정되기 전이라도, 앵커(#ref-15)가 오면 바로 동작한다. */
-$("#doc").addEventListener("click",e=>{
-  const a=e.target.closest('a[href^="#"]');
-  if(!a)return;
-  e.preventDefault();
-  const t=document.getElementById(a.getAttribute("href").slice(1));
-  if(!t)return;
+function jumpTo(t){
   /* 뛰기 전에 지금 자리를 이력에 남긴다 — 뒤로 눌러 돌아올 수 있게 */
   histPush({p:S.sel,top:Math.max(0,t.offsetTop-dbox().clientHeight/2)});
   t.scrollIntoView({behavior:"smooth",block:"center"});
   /* 착지점이 빈 앵커면 감싼 문단을 물들인다 — 빈 태그는 강조해도 안 보인다 */
   const box=(t.textContent||"").trim()?t:(t.parentElement||t);
   box.classList.add("hit");setTimeout(()=>box.classList.remove("hit"),1400);
+}
+
+/* ── 참고문헌 미리보기 ────────────────────────────────────────────
+   [15] 를 누르면 아래로 뛰지 않고 그 자리에 띄운다. 읽던 자리를 잃지 않는
+   것이 목적이다. 목록으로 가고 싶으면 팝업 안에서 한 번 더 누르면 된다. */
+let popFor=null;
+function popClose(){
+  const p=$("#refpop"); if(p)p.remove();
+  if(popFor){popFor.classList.remove("on");popFor=null;}
+}
+function refPop(a,t){
+  if(popFor===a){popClose();return;}          /* 같은 것을 또 누르면 닫는다 */
+  popClose();
+  const p=document.createElement("div");
+  p.id="refpop";
+  const num=(a.textContent||"").replace(/[\[\]\s]/g,"");
+  p.innerHTML=(num?'<span class="num">참고문헌 '+num+'</span>':"")+
+              '<div class="body"></div>'+
+              '<button class="go" type="button">목록에서 보기 →</button>';
+  /* 항목 글만 넣는다. 원본을 그대로 옮기면 id 가 겹쳐 다음 클릭이 팝업을
+     가리키게 된다 — textContent 로 담아 그런 일을 막는다. */
+  p.querySelector(".body").textContent=(t.textContent||"").trim();
+  p.querySelector(".go").onclick=()=>{popClose();jumpTo(t);};
+  document.body.appendChild(p);
+
+  /* 자리: 링크 아래에 붙이되 화면 밖으로 나가지 않게 접는다 */
+  const r=a.getBoundingClientRect(),b=p.getBoundingClientRect(),M=10;
+  let left=Math.min(Math.max(M,r.left-12),innerWidth-b.width-M);
+  let top=r.bottom+8;
+  if(top+b.height>innerHeight-M)top=Math.max(M,r.top-b.height-8);
+  p.style.left=left+"px";p.style.top=top+"px";
+  a.classList.add("on");popFor=a;
+}
+window.addEventListener("keydown",e=>{if(e.key==="Escape")popClose();},true);
+window.addEventListener("mousedown",e=>{
+  if($("#refpop")&&!e.target.closest("#refpop")&&!e.target.closest("a.cite"))popClose();},true);
+/* 자리를 fixed 로 잡으므로, 스크롤·창 크기 변화로 링크가 움직이면 닫는다 —
+   안 그러면 카드만 허공에 남는다. 다른 칸(PDF 쪽) 스크롤도 마찬가지다. */
+window.addEventListener("scroll",popClose,true);
+window.addEventListener("resize",popClose);
+
+$("#doc").addEventListener("click",e=>{
+  const a=e.target.closest('a[href^="#"]');
+  if(!a)return;
+  e.preventDefault();
+  const id=a.getAttribute("href").slice(1);
+  const t=document.getElementById(id);
+  if(!t)return;
+  if(id.indexOf("ref-")===0){refPop(a,t);return;}
+  jumpTo(t);
 });
 
 /* ── 추출 ───────────────────────────────────────────────── */
