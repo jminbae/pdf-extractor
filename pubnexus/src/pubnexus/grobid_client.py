@@ -878,6 +878,17 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
                 doc.qc["boundary"] = rep
         except Exception as e:  # noqa: BLE001 — 안전망이 파이프라인을 막지 않게
             log(f"      ! 경계 판정 생략({doc.paper_id}): {type(e).__name__}: {e}")
+        # 캡션 수리 — 빈 캡션 채우기·본문 삼킴 잘라내기·본문 누수 제거.
+        # boundary **다음에** 부른다. 경계가 확정된 뒤라야 이웃 편 캡션을 안 물어온다
+        # (A/B 실측: 경계 없이 하면 이웃 캡션이 1건 새로 들어온다).
+        try:
+            from . import captions
+            crep = captions.apply_to_parsed(doc, source_file)
+            if any(crep.get(k) for k in ("filled", "added", "trimmed", "deduped",
+                                         "body_stripped")) or crep.get("rejected_neighbour"):
+                doc.qc["captions"] = crep
+        except Exception as e:  # noqa: BLE001
+            log(f"      ! 캡션 수리 생략({doc.paper_id}): {type(e).__name__}: {e}")
     return doc
 
 
