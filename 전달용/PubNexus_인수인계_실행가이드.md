@@ -270,21 +270,45 @@ $env:HF_HOME = "D:\hf_cache"
 
 ### 3.8 GROBID (2단계b — PMC에 없는 논문 처리용)
 
-PDF에서 학술 구조(섹션·인용·참고문헌)를 뽑는 전용 서버다. Docker로 띄운다.
+PDF에서 학술 구조(섹션·인용·참고문헌)를 뽑는 전용 서버다.
 
-1. **Docker Desktop 설치**: https://www.docker.com/products/docker-desktop/
-   - Windows에서는 설치 중 **WSL2** 활성화를 요구한다. 안내에 따라 진행하고 재부팅한다.
-2. GROBID 컨테이너 실행 (**최초 1회 이미지 다운로드가 수 GB로 오래 걸린다**):
+> **2026-07-26 변경 — Docker 가 필요 없어졌다.** 윈도우 네이티브로 돈다.
+> 아래 Docker 절차는 리눅스 서버에 두고 싶을 때만 쓴다.
+
+### 데스크탑 앱(PDF Extractor)을 쓰는 경우 — 할 일이 없다
+
+앱이 알아서 한다. 엔진이 없으면 **처음 켤 때 자동으로 내려받아 설치**한다
+(약 435MB, 1~2분). 관리자 권한도, 자바도 따로 필요 없다.
+화면 오른쪽 위에 "논문 분석기 설치 중… n%" → "준비됨" 으로 바뀐다.
+
+이미 깔린 엔진이 있으면 그것을 찾아 쓴다. 찾는 순서는
+`GROBID_ROOT` 환경변수 → 앱 저장소 → `C:\grobid` → 다른 드라이브 → exe 옆.
+`GROBID_ROOT` 를 지정하면 **그 자리만** 본다(어느 엔진이 도는지 확실히 하려면 이것을 쓴다).
+
+### 파이프라인(run_pilot.py)을 직접 돌리는 경우
+
+엔진을 한 번 만들어 두면 된다. 스크립트가 JDK 21 내려받기부터 빌드까지 다 한다.
 
 ```powershell
-docker run --rm -p 8070:8070 lfoppiano/grobid:latest-full
+powershell -ExecutionPolicy Bypass -File tools\build_grobid_windows.ps1
 ```
 
-3. 이 창은 **켜 둔 채로** 둔다. 다른 PowerShell 창에서 파이프라인을 실행한다.
-4. 동작 확인: 브라우저에서 http://localhost:8070 을 열어 GROBID 화면이 나오면 성공.
+동작 확인: 브라우저에서 http://localhost:8070 (앱이 띄운 뒤) 또는
+`curl http://localhost:8070/api/isalive` → `true`.
+`config.yaml` 의 `grobid.url` 은 이미 `http://localhost:8070` 이라 고칠 것이 없다.
 
-`config.yaml` 의 `grobid.url` 이 이미 `http://localhost:8070` 으로 돼 있으므로
-따로 고칠 것이 없다.
+### 리눅스 서버에 두고 싶다면 (선택)
+
+윈도우 GROBID 는 **표 검출이 리눅스보다 약하다**(같은 134편: TEI 표 231 → 93).
+표가 특히 중요하면 한 대에만 Docker 로 띄우고 `grobid.url` 로 가리킨다.
+
+```powershell
+docker run -d -p 8070:8070 --restart unless-stopped `
+  -e JAVA_TOOL_OPTIONS="-XX:-UseContainerSupport" `
+  --name grobid lfoppiano/grobid:0.8.1
+```
+
+`JAVA_TOOL_OPTIONS` 가 없으면 WSL2 cgroup v2 에서 크래시한다(실측).
 
 > GROBID를 띄우지 않아도 파이프라인은 죽지 않는다. 서버 응답이 없으면 안내 메시지를
 > 남기고 2단계b를 건너뛴 뒤, PyMuPDF 폴백으로 저품질 추출만 남긴다.

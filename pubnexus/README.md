@@ -27,6 +27,10 @@ PDF → [0]인벤토리 → [1]메타데이터 API → 분기 ┬ PMCID有 → [
 | 4 | `qc.py` | 초록/참조수/깨짐 검사 → 품질점수 | ✗ | 무료 |
 | 뷰 | `render.py` | 정본 JSON → Markdown | ✗ | 무료 |
 | 4.5 | `textfix.py` | 자간 아티팩트·러닝헤더·캡션누수 수리, 섹션 타입 재분류 | ✗ | 무료 |
+| 4.6 | `recover.py` · `symfont.py` | 버려진 문단 앞부분 복원, 기호 글꼴 글자 복원 | ✗ | 무료 |
+| 4.7 | `captions.py` · `tablefill.py` | 캡션을 좌표·글꼴로 확정, 표를 PDF 괘선으로 재구성 | ✗ | 무료 |
+| 4.8 | `figclip.py` | **그림을 실제 이미지로** — 내장 이미지는 원본 그대로, 벡터는 렌더 | ✗ | 무료 |
+| 참조 | `refmatch.py` | 번호·순서는 지면에서, 내용은 iCite 에서 → 짝짓기 | ✗ | 무료 |
 | 5 | `chunk.py` | 섹션 경계 지키며 분할 + 컨텍스트 헤더 부착 | ✗ | 무료 |
 | 6 | `embed.py` + `index.py` | 임베딩 → 벡터 인덱스 + BM25 인덱스 | ✅ Qwen3-Embedding-0.6B(로컬) | 무료 |
 | 7 | `search.py` | BM25+dense RRF 병합 → 리랭커 → top-k | ✅ Qwen3-Reranker-0.6B(로컬) | 무료 |
@@ -91,8 +95,55 @@ vectors.npz           #   〃              (vectordb.backend: flat, numpy 브루
 bm25_index.json.gz    # 6단계 BM25 인덱스 (순수 파이썬, gzip+json)
 ```
 
-## GROBID 런타임 결정
+## GROBID 런타임 (2026-07-26 확정)
 
-범용 배포 기준 **Docker 권장**(모든 사용자 PC에서 동일 버전·동작 재현). `grobid.url`
-설정으로 로컬 Docker / Java 서비스 / 원격 서버를 자유롭게 지정. 파일럿 개발 환경에서는
-포터블 JDK 17 + 소스 빌드(`./gradlew run`)로 구동.
+**윈도우 네이티브로 돈다. Docker 는 필요 없다.** 다만 공식 배포본 그대로는 안 되고
+소스를 세 군데 고쳐 빌드해야 한다.
+
+윈도우에 번들된 `pdfalto` 는 0.1 이라(리눅스·맥은 0.5/0.6, kermitt2 가 윈도우
+바이너리를 갱신하지 않는다) GROBID 가 넘기는 `-noLineNumbers`·`-onlyGraphsCoord`
+를 모른다. 그래서 변환이 시작도 못 하고 죽어 늘 이렇게 끝났다:
+
+```
+[NO_BLOCKS] PDF parsing resulted in empty content
+```
+
+`-blocks` 로 바꾸면 된다. 재현은 스크립트 하나로 끝난다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\build_grobid_windows.ps1   # 빌드
+powershell -ExecutionPolicy Bypass -File tools\package_grobid_runtime.ps1 # 배포용 묶기
+```
+
+> ⚠ "GROBID 파서가 `<BLOCK>`/`<TOKEN>` 커스텀 포맷을 기대하므로 윈도우는 불가능"
+> 이라는 옛 기록은 **틀렸다**. 0.9.0 의 `PDFALTOSaxHandler` 는 표준 ALTO
+> (`Page`·`TextBlock`·`TextLine`·`String`)를 읽는다 — pdfalto 0.1 이 내는 그 형식이다.
+> 문제는 포맷이 아니라 인자였다. 같은 결론으로 돌아가지 말 것.
+
+**앱은 엔진을 스스로 찾고, 없으면 설치한다.** `grobid_service.py` 가
+`GROBID_ROOT` 환경변수 → 앱 저장소 → `C:\grobid` → 다른 드라이브 → exe 옆 순으로
+찾고, 어디에도 없으면 GitHub Releases 에서 내려받아 `%LOCALAPPDATA%` 에 푼다
+(관리자 권한 불필요, 최초 1회 약 435MB·82초). `GROBID_ROOT` 를 지정하면 **그 자리만**
+본다. `config.yaml` 의 `grobid.url` 로 원격 서버를 가리킬 수도 있다.
+
+실측: 영어 논문 6/6 성공. 다만 **윈도우는 리눅스보다 표 검출이 약하다**
+(같은 134편: TEI 표 231 → 93). 표가 특히 중요하면 GROBID 를 리눅스에 두고
+`grobid.url` 로 가리키는 선택지가 남아 있다.
+
+## 데스크탑 앱 (PDF Extractor)
+
+`app.py` — pywebview + WebView2 3분할 검수 화면(1:2:2). 왼쪽 파일목록 / 가운데
+PDF 원본 / 오른쪽 추출 결과.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build_exe.ps1
+```
+
+`--onedir` 로 묶은 뒤 Inno Setup 설치프로그램(`tools\installer.iss`)으로 만든다.
+`--onefile` 은 실행할 때 자기 안을 임시폴더에 풀어 돌리는데, 그 동작 때문에
+Defender 가 `Trojan:Win32/Wacatac.H!ml` 로 잡아 **파일을 지운다**(오탐).
+
+배포: https://github.com/jminbae/pdf-extractor/releases
+
+화면 쪽 규약(인용·그림 팝업, 이미지 크기 지정이 왜 필수인지 등)은
+`전달용/ResearchMap_이식_가이드.md` 4-B장에 정리돼 있다.

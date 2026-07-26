@@ -26,12 +26,13 @@ fulltext:
   europepmc_base: "https://www.ebi.ac.uk/europepmc/webservices/rest"
 
 grobid:
-  # 프로덕션 권장: 로컬 Docker
-  #   docker run --rm -p 8070:8070 lfoppiano/grobid:latest-full
-  #   url: "http://localhost:8070"
-  # 파일럿/설치 전 임시: 공개 서버 (rate-limit 있음, 대량 금지)
-  #   url: "https://kermitt2-grobid.hf.space"
-  # 현재: 로컬 구동 GROBID (포터블 JDK17 + 소스빌드)
+  # 앱(PDF Extractor)은 엔진을 알아서 찾고, 없으면 내려받아 설치한다.
+  # 그러니 보통은 이 값을 건드릴 일이 없다(grobid_service.py 참고).
+  #   · 직접 빌드:  tools\build_grobid_windows.ps1   (윈도우 네이티브, Docker 불필요)
+  #   · 리눅스 서버에 두고 싶으면 그 주소를 적는다 — 표 검출이 윈도우보다 낫다
+  #       docker run -d -p 8070:8070 --restart unless-stopped \
+  #         -e JAVA_TOOL_OPTIONS="-XX:-UseContainerSupport" \
+  #         --name grobid lfoppiano/grobid:0.8.1
   url: "http://localhost:8070"
   consolidate_header: 1           # 헤더 서지정보 정합 (제목/저자/DOI)
   include_raw_citations: 1        # 참고문헌 원문 보존
