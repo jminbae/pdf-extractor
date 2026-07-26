@@ -20,13 +20,24 @@ $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 # 사용자 폴더 이름에 한글이 들어 있다. 스크립트 안에 한글 경로를 그대로 적으면
 # PowerShell 5.1 이 파일 인코딩을 ANSI 로 읽어 경로가 깨진다 → 환경변수로 조립한다.
 $py   = Join-Path $env:USERPROFILE "pnxvenv\Scripts\python.exe"
-$work = "C:\pnxb"
+# 빌드 폴더는 **리포와 같은 드라이브**의 Dropbox 밖에 둔다.
+# 드라이브가 다르면 PyInstaller 가 spec 폴더 기준 상대경로를 만들지 못해 죽는다
+#   ValueError: path is on mount 'D:', start on mount 'C:'
+# (리포가 C: 인 PC 에서는 예전처럼 C:\pnxb 가 된다)
+$work = (Split-Path -Qualifier $repo) + "\pnxb"
 
 if (-not (Test-Path $py)) { throw "파이썬을 찾지 못했다: $py" }
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
 $entry = Join-Path $repo "pubnexus\app.py"
 if (-not (Test-Path $entry)) { throw "화면 파일이 없다: $entry" }
+
+# exe 안에 동봉할 설정. PyInstaller 는 --add-data 를 spec 폴더 기준 상대경로로 바꾸는데,
+# spec 은 C:\pnxb 이고 리포는 D: 라 드라이브가 달라 상대경로 계산이 실패한다
+# (ValueError: path is on mount 'D:', start on mount 'C:'). 빌드 폴더로 복사해서 넘긴다.
+$cfgSrc = Join-Path $repo "pubnexus\config.yaml"
+$cfgTmp = Join-Path $work "config.yaml"
+Copy-Item $cfgSrc $cfgTmp -Force
 
 Push-Location (Join-Path $repo "pubnexus")
 try {
@@ -38,7 +49,7 @@ try {
         "--paths", "src",
         # 설정을 exe 안에 동봉한다 — exe 를 아무 폴더에 혼자 놔도 실행되게.
         # (utils.load_config 가 exe 옆 → 프로젝트 루트 → 동봉본 순으로 찾는다)
-        "--add-data", "config.yaml;.",
+        "--add-data", "$cfgTmp;.",
         "--collect-submodules", "pubnexus",
         "--collect-all", "webview",
         "--hidden-import", "clr_loader",
