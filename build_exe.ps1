@@ -36,6 +36,9 @@ try {
         "--name", "PDF Extractor",
         "--distpath", "$work\dist", "--workpath", "$work\work", "--specpath", $work,
         "--paths", "src",
+        # 설정을 exe 안에 동봉한다 — exe 를 아무 폴더에 혼자 놔도 실행되게.
+        # (utils.load_config 가 exe 옆 → 프로젝트 루트 → 동봉본 순으로 찾는다)
+        "--add-data", "config.yaml;.",
         "--collect-submodules", "pubnexus",
         "--collect-all", "webview",
         "--hidden-import", "clr_loader",

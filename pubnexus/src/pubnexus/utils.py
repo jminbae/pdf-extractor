@@ -38,10 +38,29 @@ DOI_RE = re.compile(r'10\.\d{4,9}/[-._;()/:\w]+', re.I)
 _DOI_TRAILERS = ").,;:]"
 
 
+def _config_candidates(path: str | Path | None) -> list[Path]:
+    """설정을 찾을 자리를 우선순위대로. 지정 경로가 있으면 그것만 본다."""
+    if path:
+        return [Path(path)]
+    cands = [ROOT / "pubnexus" / "config.yaml", ROOT / "config.yaml"]
+    # exe 로 묶인 경우: 배포본 안에 동봉한 설정이 마지막 보루다.
+    # exe 를 아무 폴더에 혼자 놔둬도 실행되게 하는 장치.
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        cands.append(Path(bundled) / "config.yaml")
+    return cands
+
+
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
-    cfg_path = Path(path) if path else ROOT / "pubnexus" / "config.yaml"
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    tried = _config_candidates(path)
+    for cfg_path in tried:
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            continue
+    raise FileNotFoundError(
+        "config.yaml 을 찾지 못했다: " + ", ".join(str(p) for p in tried))
 
 
 def resolve(path_str: str) -> Path:
@@ -371,7 +390,24 @@ def read_json(path: Path) -> Any:
 
 
 def log(msg: str):
-    print(msg, file=sys.stderr, flush=True)
+    """로그 한 줄 때문에 프로그램이 죽는 일은 없어야 한다.
+
+    한글 윈도우의 콘솔 인코딩(cp949)에는 '—'(U+2014) 가 없다. 그대로 두면
+    로그를 찍다가 UnicodeEncodeError 가 나고, 그것이 except 블록이나 워커
+    스레드 안이면 뒤따르는 상태 전환이 통째로 사라진다(화면이 '준비 중' 에
+    멈춘 사고가 실제로 있었다). exe(windowed) 에서는 stderr 자체가 없다.
+    """
+    try:
+        print(msg, file=sys.stderr, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stderr, "encoding", None) or "ascii"
+        try:
+            print(msg.encode(enc, "replace").decode(enc, "replace"),
+                  file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001 — stderr 가 닫혔거나 없는 경우
+        pass
 
 
 # ── 실패 원장: 한 편이 죽어도 나머지가 계속 돌게 하는 기록 장치 ─────────
