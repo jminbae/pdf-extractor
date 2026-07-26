@@ -148,11 +148,14 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
             out += ["", f"**{t.get('caption') or t['id']}**", ""]
             out.append(t.get("markdown") or "*(표 본문 추출 실패 — MinerU 보강 대상)*")
 
-    # 그림 (캡션만)
+    # 그림 (캡션만). 내부 id(fig_1)는 화면에 내보내지 않는다 — 캡션에 이미
+    # 'Fig 1.' 이 인쇄돼 있어 'fig_1: Fig 1.' 처럼 두 번 나온다.
     if doc.get("figures"):
-        out += ["", "## Figures"]
-        for f in doc["figures"]:
-            out.append(f"- **{f['id']}**: {f.get('caption') or '(캡션 없음)'}")
+        caps = [(f.get("caption") or "").strip() for f in doc["figures"]]
+        caps = [c for c in caps if c]
+        if caps:
+            out += ["", "## Figures"]
+            out += [f"- {c}" for c in caps]
 
     return "\n".join(out).strip() + "\n"
 

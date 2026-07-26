@@ -60,8 +60,10 @@ COL_MAX_SPAN = 0.60
 # 줄 전체가 DOI 인 것만 인정한다. 참고문헌 항목 끝의 'doi: 10.x' 는 앞에 서지가
 # 붙어 있으므로 걸리지 않는다.
 DOI_LINE_RE = re.compile(
-    r'^\s*(?:https?://)?(?:dx\.)?(?:doi\.org/|doi\s*:\s*)\s*(10\.\d{4,9}/\S+?)\s*[.,;]?\s*$',
-    re.I)
+    r'^\s*(?:article\s+)?(?:https?://)?(?:dx\.)?(?:doi\.org/|doi\s*:\s*)\s*'
+    r'(10\.\d{4,9}/\S+?)\s*[.,;]?'
+    # IJDVL 은 같은 줄에 PMID 를 붙여 찍는다: 'DOI: 10.25259/IJDVL_1369_20  PMID: 35962514'
+    r'(?:\s*PMID\s*:?\s*\d+)?\s*$', re.I)
 
 OPENER_RE = re.compile(
     r'^\s*(?:to\s+the\s+editors?|dear\s+editors?|editor|sir|madam)\s*[,:.]?\s*$'
@@ -78,6 +80,10 @@ NOT_TITLE_RE = re.compile(
     r'linked\s+(?:article|comment)|editor\'?s?\s+note|table\s+\d|fig(?:ure)?\.?\s*\d|'
     r'appendix|erratum|correction|short\s+report|brief\s+report|original\s+article|'
     r'review\s+article|images?\s+in|journal\s+of\b|clinical\s+letter|'
+    r'available\s+online|additional\s+information|supplement(?:al|ary)\s+information|'
+    r'materials?\s+and\s+methods|patients?\s+and\s+methods|statistical\s+analys|'
+    r'study\s+design|data\s+(?:collection|availability|sharing)|randomi[sz]ation|'
+    r'funding|disclosures?|declaration|received:|accepted:|revised:|'
     # 절 제목 — 이것들이 제목 런으로 승격되면 논문 한가운데가 경계가 된다
     r'(?:introduction|background|methods?|materials?|results?|discussion|conclusions?|'
     r'limitations?|patients?\s+and\s+methods|case\s+report|statistical\s+analysis|'
@@ -94,6 +100,37 @@ AUTHORLINE_RE = re.compile(
 _FUNC_WORDS = {"the", "of", "and", "in", "with", "for", "a", "an", "to", "on",
                "after", "by", "from", "is", "are", "as", "at", "using", "during",
                "into", "versus", "vs", "case", "report"}
+
+
+_DATE_RE = re.compile(
+    r'\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|'
+    r'aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2},?\s*\d{4}',
+    re.I)
+
+
+def _same_journal(a: str, b: str) -> bool:
+    """두 DOI 가 같은 저널의 것인가(등록기관 접두 + 저널 토큰).
+
+    paper_id 오배정을 보고할 때 이 조건을 요구한다 — 실제 실패 양상은 '옆에 실린
+    형제 논문의 DOI 로 파일링' 이므로 반드시 같은 저널이다. 이 조건이 없으면
+    참고문헌·자료저장소 DOI 가 '올바른 DOI' 로 둔갑한다(실측
+    10.1001/jamadermatol.2026.0294 → 10.1111/1346-8138.12099 같은 오보).
+    """
+    def key(d: str):
+        d = (d or "").strip().lower()
+        if "/" not in d:
+            return None
+        pre, suf = d.split("/", 1)
+        toks = re.split(r'[./_\-]', suf)
+        toks = [t for t in toks if t]
+        if not toks:
+            return None
+        tok = toks[0]
+        if tok == "j" and len(toks) > 1:      # Elsevier 'j.jaad.…'
+            tok = toks[1]
+        return pre, tok
+    ka, kb = key(a), key(b)
+    return bool(ka and kb and ka == kb)
 
 
 def _looks_author(text: str) -> bool:
@@ -291,18 +328,24 @@ def _doi_markers(lines: list[dict]) -> dict[int, str]:
         g = sorted(g, key=lambda d: d["y0"])
         for k, ln in enumerate(g):
             h = max(4.0, ln["y1"] - ln["y0"])
-            gap_up = ln["y0"] - g[k - 1]["y1"] if k else 99.0
-            gap_dn = g[k + 1]["y0"] - ln["y1"] if k + 1 < len(g) else 99.0
-            if gap_up >= h * 0.9 and gap_dn >= h * 0.9:
+            gap_dn = g[k + 1]["y0"] - ln["y1"] if k + 1 < len(g) else 1e9
+            if gap_dn >= h * 0.85:
                 iso.add(ln["i"])
     out = {}
     for ln in lines:
         d = _is_doi_line(ln)
-        # PLOS 는 표·그림마다 하위 DOI 를 따로 찍는다(…0179088.t002). 이건 논문의
-        # 신원이 아니다.
-        if d and re.search(r'\.(?:[tgs]\d{3}|s\d{3})$', d, re.I):
+        if not d:
             continue
-        if d and ln["i"] in iso:
+        # PLOS 는 표·그림마다 하위 DOI 를 따로 찍는다(…0179088.t002). 이건 논문의
+        # 신원이 아니다. 데이터 저장소 DOI(Mendeley·Zenodo·figshare·Dataverse)도
+        # 논문 DOI 가 아니다 — 실측 10.1016/j.jaad.2022.11.005 는 자료 DOI
+        # 10.17632/ctb8brksnm.1 을 논문 이름표로 달았다.
+        if re.search(r'\.(?:[tgs]\d{3})$', d, re.I):
+            continue
+        if d.split("/", 1)[0] in {"10.17632", "10.5281", "10.6084", "10.7910",
+                                  "10.5061", "10.24433"}:
+            continue
+        if ln["i"] in iso:
             out[ln["i"]] = d
     return out
 
@@ -375,22 +418,27 @@ class BoundaryMap:
     _lines: list[dict] = field(default_factory=list)
 
     # 소속 판정 ------------------------------------------------------
-    def locate(self, text: str, probes: int = 12) -> list[int]:
-        """텍스트를 PDF 에서 찾아 각 조각이 놓인 구간 번호들을 돌려준다."""
+    def locate_stats(self, text: str, probes: int = 12) -> tuple[list[int], int]:
+        """텍스트를 PDF 에서 찾아 (조각이 놓인 구간 번호들, 시도 횟수)."""
         q = _norm(text)
         if len(q) < 24 or not self._stream:
-            return []
+            return ([], 0)
         step = max(24, len(q) // max(1, probes))
         hits: list[int] = []
+        tried = 0
         i = 0
-        while i + 24 <= len(q) and len(hits) < probes * 2:
+        while i + 24 <= len(q) and tried < probes * 2:
             probe = q[i:i + 40]
             if len(probe) >= 24:
+                tried += 1
                 p = self._stream.find(probe)
                 if p >= 0:
                     hits.append(self._line_seg[self._pos2line[p]])
             i += step
-        return hits
+        return (hits, tried)
+
+    def locate(self, text: str, probes: int = 12) -> list[int]:
+        return self.locate_stats(text, probes)[0]
 
     def owner(self, text: str) -> tuple[str, int, int]:
         """('own'|'other'|'unknown', 내 구간 표 수, 이웃 구간 표 수)
@@ -398,11 +446,21 @@ class BoundaryMap:
         **이웃 것이라고 말하려면 내 구간에서 단 한 조각도 나오지 않아야 한다.**
         비율로 판정하면 GROBID 가 경계를 넘겨 이어붙인 문단(내 문장 + 이웃 문장)
         에서 내 문장까지 함께 사라진다. 오염 한 문장을 남기는 편이 낫다.
+
+        그리고 **조각의 절반 이상을 PDF 에서 실제로 찾았을 때만** 판정한다.
+        2단 판정이 실패한 페이지에서는 좌·우 단이 교차해 문장이 이어지지 않으므로
+        내 문장이 스트림에 없는 것처럼 보인다 — 그 상태에서 '내 구간 0회' 를
+        근거로 삼으면 내 결론 문단이 이웃 것으로 지워진다(실측
+        10.1016/j.jid.2018.09.024 p7: 내 결론 + 옆 letter 서두가 한 문단으로
+        붙은 것인데 12조각 중 3조각만 찾혀 통째로 버려졌다).
         """
         if not self.confident or self.own is None:
             return ("unknown", 0, 0)
-        hits = [h for h in self.locate(text) if h >= 0]     # -1 = 별지, 판정 보류
+        raw, tried = self.locate_stats(text)
+        hits = [h for h in raw if h >= 0]                   # -1 = 별지, 판정 보류
         if not hits:
+            return ("unknown", 0, 0)
+        if tried >= 3 and len(raw) < tried * 0.5:
             return ("unknown", 0, 0)
         mine = sum(1 for h in hits if h == self.own)
         others = len(hits) - mine
@@ -511,6 +569,8 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
         # 짧은 줄은 제목으로 인정하지 않는다 — 'Young-Min Park' 같은 저자 한 줄이
         # 제목으로 승격되면 논문 한가운데가 경계가 된다(실측 10.5021/ad.2018.30.5.630).
         if len(title) < 20 or len(title) > 300 or len(title.split()) < 3:
+            continue
+        if _DATE_RE.search(title):         # 'Available online August 28, 2013.'
             continue
         after = _next_live(tr[-1]["i"], 10)
         head_doi_at = next((k for k, ln in enumerate(after[:2])
@@ -750,7 +810,7 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
     #     단, 구간 자체는 옳게 지목했으므로 걸러내기는 그대로 진행한다.
     if meta_pick is not None and want_doi:
         mseg = segments[meta_pick]
-        if mseg.doi and not mseg.has_doi(want_doi):
+        if mseg.doi and not mseg.has_doi(want_doi) and _same_journal(mseg.doi, want_doi):
             bm.identity_conflict = dict(
                 paper_id=want_doi, correct_doi=mseg.doi,
                 own_segment=meta_pick, own_title=mseg.title,
@@ -760,7 +820,7 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
     if len(segments) < 2:
         s0 = segments[0]
         if (not bm.identity_conflict and want_doi and s0.doi
-                and not s0.has_doi(want_doi)):
+                and not s0.has_doi(want_doi) and _same_journal(s0.doi, want_doi)):
             bm.identity_conflict = dict(
                 paper_id=want_doi, correct_doi=s0.doi, own_segment=0,
                 own_title=s0.title, how="단일 논문 PDF", evidence=list(s0.evidence),
@@ -774,7 +834,7 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
         # PDF 안 어느 구간의 DOI 도 paper_id 와 같지 않고 제목도 안 맞는다면
         # 기본키가 이 PDF 의 어느 논문도 가리키지 않는다는 뜻이다(보고만 한다).
         known = [s.doi for s in segments if s.doi]
-        if known and not bm.identity_conflict and want_doi:
+        if len(known) >= 2 and not bm.identity_conflict and want_doi:
             bm.identity_conflict = dict(
                 paper_id=want_doi, correct_doi=None, candidates=known,
                 body_segment=body_pick, meta_segment=None,
@@ -783,8 +843,14 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
                 note="paper_id 가 PDF 안 어느 논문의 DOI 와도 일치하지 않고 제목도 안 맞음")
         bm.reason = "이 논문의 구간을 DOI·제목 어느 쪽으로도 지목하지 못함 → 자르지 않음"
         return bm
+    # 메타가 가리킨 구간이 **제목도 없는 잔재**(앞 편의 꼬리)인데 정본 본문은
+    # 제목이 뚜렷한 다른 구간에 놓여 있다면, paper_id 가 이웃 편 것이다.
+    # 메타 구간에 제목이 있으면 지목이 맞은 것이므로 오염이 심한 경우로 본다.
     if (body_pick is not None and body_pick != meta_pick
-            and how != "제목+DOI 일치" and len(by_title) != 1):
+            and how != "제목+DOI 일치" and len(by_title) != 1
+            and not segments[meta_pick].title
+            and segments[body_pick].title
+            and _same_journal(segments[body_pick].doi or "", want_doi)):
         # 메타는 A 구간을, 정본 본문은 B 구간을 가리킨다 → 지목 자체가 불확실하다.
         # 여기서 자르면 본문 전체가 날아갈 수 있으므로 아무것도 하지 않는다.
         bm.identity_conflict = dict(
@@ -797,6 +863,33 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
                      "→ paper_id 오배정 의심, 자르지 않음")
         return bm
 
+    # 6c) 지목한 구간이 **제목 없는 잔재**면 그건 논문이 아니라 앞 편의 꼬리다.
+    #     여기를 '이 논문' 으로 삼고 자르면 진짜 본문이 통째로 사라진다
+    #     (실측 10.1684/ejd.2018.3344: paper_id 가 앞 레터의 DOI 라서 잔재 구간이
+    #      지목됐다. 실제 논문은 다음 구간 'Contact vitiligo…', DOI ...3350).
+    if not segments[meta_pick].title:
+        nxt = next((s for s in segments[meta_pick + 1:] if s.title), None)
+        if (nxt is not None and not bm.identity_conflict
+                and _same_journal(nxt.doi or "", want_doi)):
+            bm.identity_conflict = dict(
+                paper_id=want_doi, correct_doi=nxt.doi,
+                body_segment=nxt.index, body_title=nxt.title,
+                meta_segment=meta_pick, meta_title="",
+                evidence=list(nxt.evidence),
+                note="paper_id 가 가리킨 구간이 제목 없는 잔재(앞 편의 꼬리)다")
+        bm.reason = ("paper_id 가 가리킨 구간이 제목 없는 잔재라 이 논문으로 볼 수 없음 "
+                     "→ 자르지 않음")
+        return bm
+
+    # 6d) 정본 본문이 이 구간에 실제로 놓여 있는지 확인한다. 본문이 여러 구간에
+    #     흩어져 다수가 없거나 다른 구간을 가리키면, 지목이 맞다는 보장이 없으므로
+    #     자르지 않는다. 단 제목과 DOI 가 함께 맞으면 지목은 확실하고 본문 쪽이
+    #     오염된 것이므로 진행한다(10.1111/bjd.21054).
+    if body_probe and how != "제목+DOI 일치" and body_pick != meta_pick:
+        bm.reason = ("정본 본문의 다수가 이 구간에 있지 않음 "
+                     f"(본문 구간={body_pick}) → 자르지 않음")
+        return bm
+
     bm.own = meta_pick
     bm.confident = True
     bm.reason = f"{how} (구간 {len(segments)}개 중 {meta_pick}번)"
@@ -804,11 +897,16 @@ def analyze(pdf_path: str | Path, meta: dict | None = None,
 
 
 # ── 정본 걸러내기 ────────────────────────────────────────────────────
-def filter_document(doc: dict, bmap: BoundaryMap, *, apply: bool = True) -> dict:
+def filter_document(doc: dict, bmap: BoundaryMap, *, apply: bool = True,
+                    references: bool = False) -> dict:
     """정본 dict 에서 이웃 논문 소속 항목을 제거하고 보고서를 돌려준다.
 
     doc 은 제자리에서 수정된다(apply=True 일 때). 확신이 없으면 아무것도 건드리지
     않는다. 판정이 'unknown' 인 항목도 남긴다 — 소실이 오염보다 나쁘다.
+
+    references: 참고문헌 목록까지 걸러낼지. **기본값 False** — 참고문헌은 이제
+        iCite(NIH) 에서 받아오므로 PDF 파싱 결과를 손댈 이유가 없다. 판정 자체는
+        해서 보고서(`detail`)에는 남긴다(iCite 도입 전 데이터 점검용).
     """
     rep = {"pdf": str(bmap.path), "confident": bmap.confident,
            "reason": bmap.reason, "segments": len(bmap.segments),
@@ -891,7 +989,7 @@ def filter_document(doc: dict, bmap: BoundaryMap, *, apply: bool = True) -> dict
             dropped_keys.add(r.get("key"))
         else:
             keep_r.append(r)
-    if apply:
+    if apply and references:
         doc["references"] = keep_r
         if dropped_keys:
             _prune_citations(doc, dropped_keys)
@@ -912,6 +1010,65 @@ def _prune_citations(doc: dict, dropped_keys: set) -> None:
             p["cited_keys"] = [k for i, k in enumerate(keys) if i not in set(idx)]
             if len(refs) == len(keys):
                 p["cited_refs"] = [r for i, r in enumerate(refs) if i not in set(idx)]
+
+
+def apply_to_parsed(document, pdf_path: str | Path, meta: dict | None = None,
+                    *, references: bool = False) -> dict:
+    """schema.Document(데이터클래스)에 그대로 적용한다 — pdf_fallback 연결용."""
+    meta = dict(meta or {})
+    meta.setdefault("doi", getattr(document, "paper_id", None))
+    if not meta.get("title"):
+        meta["title"] = getattr(getattr(document, "meta", None), "title", "") or ""
+    probe = " ".join(p.text or "" for s in (document.body_text or [])
+                     for p in (s.paragraphs or []))
+    bm = analyze(pdf_path, meta, body_probe=probe)
+    rep = {"pdf": str(bm.path), "confident": bm.confident, "reason": bm.reason,
+           "segments": len(bm.segments), "identity_conflict": bm.identity_conflict,
+           "dropped": {"abstract": 0, "paragraphs": 0, "sections": 0,
+                       "tables": 0, "figures": 0, "references": 0}}
+    if not bm.confident:
+        return rep
+
+    if document.abstract and bm.owner(document.abstract)[0] == "other":
+        rep["dropped"]["abstract"] = 1
+        document.abstract = ""
+        document.abstract_source = "none"
+
+    keep_secs = []
+    for sec in document.body_text or []:
+        keep_p = [p for p in (sec.paragraphs or [])
+                  if bm.owner(p.text or "")[0] != "other"]
+        rep["dropped"]["paragraphs"] += len(sec.paragraphs or []) - len(keep_p)
+        if not keep_p and sec.paragraphs:
+            rep["dropped"]["sections"] += 1
+            continue
+        sec.paragraphs = keep_p
+        keep_secs.append(sec)
+    document.body_text = keep_secs
+
+    for attr, key in (("tables", "tables"), ("figures", "figures")):
+        items = getattr(document, attr, None) or []
+        keep = []
+        for it in items:
+            cap = getattr(it, "caption", "") or ""
+            if SUPP_CAP_RE.match(cap):       # 별지 캡션은 판정 보류
+                keep.append(it)
+                continue
+            probe_t = cap + " " + (getattr(it, "markdown", "") or "")
+            if bm.owner(probe_t)[0] == "other":
+                rep["dropped"][key] += 1
+            else:
+                keep.append(it)
+        setattr(document, attr, keep)
+
+    if references:
+        refs = getattr(document, "references", None) or []
+        keep_r = [r for r in refs
+                  if bm.owner(getattr(r, "raw", "") or getattr(r, "title", "") or "")[0]
+                  != "other"]
+        rep["dropped"]["references"] = len(refs) - len(keep_r)
+        document.references = keep_r
+    return rep
 
 
 def apply_to_document(doc: dict, pdf_path: str | Path | None = None) -> dict:

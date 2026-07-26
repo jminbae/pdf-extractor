@@ -37,25 +37,21 @@ figtab.py 가 이것을 못 막아 파이프라인에 연결되지 못했다(실
 10.1016/j.jaad.2016.05.022 에 이웃 레터 10.1016/j.jaad.2016.05.014 의
 'Table II. Final diagnoses made by the consulting …' 이 들어왔다).
 
-두 겹의 문지기를 둔다.
+**논문 경계 판정은 boundary.py 가 한다. 여기서 다시 하지 않는다.**
+boundary 는 제목 런·단독 DOI 줄·'To the Editor' 서두로 지면을 구간으로 나누고
+이 논문의 구간을 지목한다(grobid_client·pdf_fallback 과 같은 판정기).
+캡션은 본문 문단과 달리 **한 덩어리로 조판된 물리적 블록**이라 걸친 곳이 곧 그
+논문이다. 그래서 boundary.owner()(문단용 — 내 구간에서 한 조각도 안 나와야
+'other')보다 엄격하게, **찾힌 조각이 전부 내 구간 밖이면 other** 로 본다
+(caption_owner). boundary 가 구간을 확신하지 못하면 자르지 않는다.
 
-  (1) **DOI 도장** — Elsevier 레터는 각 편 끝에 'http://dx.doi.org/<그 편의 DOI>'
-      한 줄을 찍는다. 실측 10.1016/j.jaad.2016.05.022 PDF:
-        1쪽 우단 y540  'http://dx.doi.org/10.1016/j.jaad.2016.05.014'  ← 이웃 편 끝
-        1쪽 우단 y602  'To the Editor: Vasculitis is histologically defined by 2'  ← 이 편 시작
-        3쪽 우단 y331  'http://dx.doi.org/10.1016/j.jaad.2016.05.022'  ← 이 편 끝
-      이 도장으로 읽기순서 스트림을 토막 내면 이웃 편의 Table I·II(1쪽 좌단
-      y76·y373)는 이 편 구간 **밖**이 되어 후보에서 아예 빠진다.
-  (2) **본문 정박** — 정본 body_text 의 6-gram 이 실제로 찍힌 줄만 '이 논문 줄'로
-      본다. 그 줄들의 최소~최대 읽기순서가 정박 구간이다. 도장이 없는 조판은
-      이것만으로 판정한다.
-
-둘 다 실패하면(정박 줄이 5줄 미만) **아무것도 뽑지 않는다**. 그림 몇 개보다
-오염이 해롭다는 것이 이 모듈의 기본 방침이다.
+boundary.analyze 가 실패하면 **캡션을 하나도 쓰지 않는다**. 소유를 모르는 채로
+보충하면 이웃 논문 글이 정본에 들어간다 — 그림 몇 개보다 오염이 해롭다.
 
 ── 이 모듈이 하는 일 ───────────────────────────────────────────────────
   extract_captions(pdf)          좌표·글꼴 근거 캡션 목록(경계 확정)
-  owned_captions(pdf, doc)       위 목록에서 이 논문 것만
+  caption_owner(bmap, text)      boundary 구간으로 캡션 한 개의 소속 판정
+  owned_captions(pdf, doc)       위 둘을 묶어 이 논문 캡션만
   normalize_label / dedupe_label 라벨 표기 통일·중복 접두 제거
   strip_captions_from_body(doc)  본문에 새어 든 캡션 제거(끊긴 문장 재봉합)
   repair_document(doc, pdf)      위를 묶어 정본 한 편을 고친다
@@ -75,10 +71,8 @@ MAX_CAPTION_CHARS = 2000  # 안전 상한(실측 정상 캡션 최장 1,531자)
 LINE_GAP_FACTOR = 1.9     # 같은 단 안 이어짐 허용 줄간(줄높이 배수)
 BAND_OVERLAP = 0.60       # 옆 단 이어짐: 두 토막의 y 띠가 이만큼 겹쳐야 한다
 COL_GAP = 36              # 단 구분 최소 가로 간격(pt)
-ANCHOR_NGRAM = 6          # 본문 정박에 쓰는 낱말 n-gram 크기
-ANCHOR_MIN_WORDS = 8      # 정박 판정 대상 줄의 최소 낱말 수
-ANCHOR_MIN_LINES = 5      # 이보다 정박 줄이 적으면 소유 판정 포기
 STRIP_MIN_CHARS = 60      # 본문에서 캡션을 지울 최소 일치 길이(정규화 기준)
+DESC_ONLY_MIN_CHARS = 110  # 라벨 없이 설명만으로 지울 때의 최소 일치 길이
 
 _FIGW = r"(?:FIGURES?|FIGS?|Figures?|Figs?|Fig|FIG)"
 _TABW = r"(?:TABLES?|Tables?|TABLE|Table|Tbl)"
@@ -114,11 +108,6 @@ _SPACED_RE = re.compile(
 _WS_RE = re.compile(r"[ \t     ]+")
 
 # 논문 경계 도장. 줄 대부분이 그 URL 이어야 한다(참고문헌 꼬리 DOI 는 탈락).
-_STAMP_RE = re.compile(
-    r"(?:https?://)?(?:dx\.)?doi\.org/(10\.\d{4,9}/[^\s\"'<>)\],;]+)", re.I)
-_STAMP_ALT_RE = re.compile(
-    r"^\s*(?:DOI|doi)\s*[:：]?\s*(10\.\d{4,9}/[^\s\"'<>)\],;]+)\s*$")
-
 _ROMAN = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7,
           "VIII": 8, "IX": 9, "X": 10, "XI": 11, "XII": 12, "XIII": 13,
           "XIV": 14, "XV": 15}
@@ -127,6 +116,10 @@ _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f​-‏⁠﻿]")
 _CTRL_DIGITS_RE = re.compile(r"(?<=\d)[\x00-\x08\x0b\x0c\x0e-\x1f](?=\d)")
 _SOFT_HYPHEN_RE = re.compile(r"­")
 _ALNUM_RE = re.compile(r"[a-z0-9]")
+# 캡션을 지운 자리가 기능어에서 끊기면 그건 본문 문장이었다(되돌리기 신호)
+_DANGLING_RE = re.compile(
+    r"\b(?:the|a|an|of|and|in|on|to|for|with|that|is|are|was|were|by|from|"
+    r"between|among|shows?|summar\w*|lists?|presents?)\s*[.,;:)\]]*\s*$", re.I)
 
 
 def _bold_name(font: str) -> bool:
@@ -153,6 +146,7 @@ class Line:
     lead_font: str
     bold: bool            # 첫 span 이 굵은 글꼴인가
     lead_distinct: bool = False   # 라벨 글꼴이 그 줄의 나머지와 다른가
+    frags: int = 1                # 같은 밑줄에서 합친 조각 수(표 행이면 크다)
     bbox_block: tuple[float, float, float, float] = (0, 0, 0, 0)
     first_of_block: bool = False
     page_width: float = 595.0
@@ -303,9 +297,11 @@ def parse_caption(text: str, *, min_desc: int = MIN_DESC_CHARS) -> dict | None:
         desc = desc[pm.start(2):]
     if len(desc) < min_desc:
         return None
-    first = desc.split()[0]
-    if _STOPWORD_RE.match(first) and not first[:1].isupper():
-        return None
+    words = desc.split()
+    if words:                      # min_desc=0 이면 설명이 빈 줄('Fig. 1')도 온다
+        first = words[0]
+        if _STOPWORD_RE.match(first) and not first[:1].isupper():
+            return None
     raw = m.group("num")
     supp = bool(m.group("sup")) or (raw is not None and caption_number(raw) is None)
     label = m.group("kind")
@@ -363,6 +359,7 @@ def _merge_fragments(frags: list[Line]) -> list[Line]:
                 lead_size=head.lead_size, lead_font=head.lead_font, bold=head.bold,
                 lead_distinct=(head.lead_distinct
                                or any(f.lead_font != head.lead_font for f in grp[1:])),
+                frags=len(grp),
                 bbox_block=head.bbox_block, first_of_block=head.first_of_block,
                 page_width=head.page_width))
         i = j
@@ -482,9 +479,15 @@ def _band_overlap(a: Line, b: Line) -> float:
     return (hi - lo) / max(1.0, min(a.y1 - a.y0, b.y1 - b.y0))
 
 
-def _is_seed(line: Line, body: float) -> dict | None:
-    """이 줄이 캡션의 시작인가. 아니면 None."""
-    got = parse_caption(line.text)
+def _is_seed(line: Line, body: float, *, min_desc: int = 0) -> dict | None:
+    """이 줄이 캡션의 시작인가. 아니면 None.
+
+    기본 min_desc=0 이다 — 캡션 첫 **줄**은 짧을 수 있다(실측
+    10.1007/s00256-009-0872-x 3쪽 'Fig. 2 a Axial T1-weighted' 는 설명이 17자뿐이라
+    20자 문턱에 걸려 캡션으로 안 잡혔고, 그래서 Fig. 2 가 통째로 누락됐다).
+    길이 검사는 이어붙이기가 끝난 **전체 캡션**에 대해 extract_captions 가 한다.
+    """
+    got = parse_caption(line.text, min_desc=min_desc)
     if not got:
         return None
     # 캡션은 본문과 **조판이 다르다**. 넷 중 하나라도 있으면 캡션으로 본다.
@@ -527,13 +530,31 @@ def _extend(lines: list[Line], i: int, body: float,
     jumped: set[int] = {seed.block}
     while True:
         nxt_idx = None
-        # (a) 같은 단 바로 아래
+        # (a) 같은 단 바로 아래.
+        # 먼저 **같은 블록의 다음 줄**을 본다. 그림 위 패널문자('a','b' 12.0pt)가
+        # 읽기순서상 캡션 줄 사이에 끼어들면 바로 다음 줄만 보고는 캡션이 한 줄에서
+        # 끊긴다(실측 10.1007/s00256-009-0872-x 3쪽 'Fig. 2 a Axial T1-weighted'
+        # 한 줄만 잡히고 Fig. 2 가 통째로 누락됐다).
         j = taken[-1] + 1
+        for k in range(taken[-1] + 1, page_hi):
+            if lines[k].block == cur.block:
+                j = k
+                break
+            if lines[k].block in jumped:
+                continue
         if j < page_hi:
             n = lines[j]
             # 줄상자는 서로 조금 겹치기도 한다(촘촘한 행간) → 아래쪽이기만 하면 된다
             below = n.y0 > cur.y0 + 0.3 * cur.height
             near = (n.y0 - cur.y1) <= LINE_GAP_FACTOR * cur.height
+            # 한 밑줄에서 조각이 셋 이상 합쳐졌으면 그건 산문이 아니라 **표 행**이다.
+            # (실측 10.1111/bjd.21054 2쪽 Table 1 은 캐션과 셀이 둘 다 8.0pt 라
+            #  크기로는 갈리지 않고, 캐션이 'Levodopa use Vitiligo group Control
+            #  group OR (95% CI) P-value Ever use 185 (0·33%) …' 까지 삼켰다)
+            if n.frags >= 3:
+                reason = f"표 행(한 밑줄 조각 {n.frags}개)"
+                nxt_idx = None
+                break
             cross_ok = (n.block == cur.block
                         or ((n.bbox_block[2] - n.bbox_block[0])
                             >= 0.25 * n.page_width
@@ -621,7 +642,10 @@ def extract_captions(pdf_path: str | Path, *, lines: list[Line] | None = None,
         used.update(taken)
         parts = [lines[k].text for k in taken]
         raw_text = _flatten(" ".join(parts))
-        parsed = parse_caption(raw_text) or got
+        parsed = parse_caption(raw_text)
+        if parsed is None:
+            # 이어붙여도 설명이 20자에 못 미치면 캡션이 아니다(축 라벨·패널문자 등)
+            continue
         desc = clean_text(parsed["desc"], typeset=typeset).strip()
         if len(desc) > MAX_CAPTION_CHARS:
             cut = desc.rfind(". ", 0, MAX_CAPTION_CHARS)
@@ -644,168 +668,73 @@ def extract_captions(pdf_path: str | Path, *, lines: list[Line] | None = None,
     return out
 
 
-# ── 소유 판정 ────────────────────────────────────────────────────────
-def _doc_ngrams(doc: dict, n: int = ANCHOR_NGRAM) -> set[str]:
-    words: list[str] = []
-    for sec in (doc.get("body_text") or []):
-        for p in (sec.get("paragraphs") or []):
-            words.extend(re.findall(r"[a-z0-9]+", (p.get("text") or "").lower()))
-    for key in ("abstract",):
-        words.extend(re.findall(r"[a-z0-9]+", (doc.get(key) or "").lower()))
-    return {" ".join(words[i:i + n]) for i in range(max(0, len(words) - n + 1))}
+# ── 소유 판정 ── boundary.py 에 전적으로 의존한다 ───────────
+# 합본 지면의 논문 경계는 boundary.analyze() 가 이미 판정한다(제목 런 · 단독 DOI 줄 ·
+# 'To the Editor' 서두). 같은 일을 여기서 다시 하면 두 판정이 엇갈려 어느 쪽도 믿을 수
+# 없게 된다. 이 모듈은 **캐션을 뽑고 경계를 잡는 일**만 하고, '이 캡션이 누구 것이냐'는
+# boundary 에게 묻는다.
+#
+# 캐션은 본문 문단과 다르다 — **한 덩어리로 조판된 물리적 블록**이라 걸친 곳이
+# 곷 그 논문이다. 그래서 boundary.owner() (문단용 — 내 구간에서 한 조각도 안 나와야
+# 'other') 보다 엄격하게, **찾힌 조각이 전부 내 구간 밖이면 other** 로 본다.
+CAPTION_PROBES = 8         # boundary.locate 에 넘길 조각 수
 
 
-def _anchored(lines: list[Line], grams: set[str], n: int = ANCHOR_NGRAM) -> list[int]:
-    hits = []
-    for i, l in enumerate(lines):
-        w = re.findall(r"[a-z0-9]+", l.text.lower())
-        if len(w) < ANCHOR_MIN_WORDS:
-            continue
-        if any(" ".join(w[k:k + n]) in grams for k in range(len(w) - n + 1)):
-            hits.append(i)
-    return hits
+def caption_owner(bmap, text: str) -> str:
+    """boundary 구간으로 캐션 한 개의 소속을 읽는다 — 'own' | 'other' | 'unknown'.
 
-
-def _stamps(lines: list[Line], skip: set[str] | None = None) -> list[tuple[int, str]]:
-    """논문 경계 도장 — (읽기순서 인덱스, DOI).
-
-    도장은 **홀로 놓인 짧은 줄**이다. Wiley 참고문헌은 마지막 줄에 doi URL 을 두는데
-    (실측 10.1111/jdv.19451 에서 40줄) 그것을 도장으로 세면 지면이 40토막 난다.
-    그래서 (1) 이 논문 참고문헌의 DOI 는 제외하고 (2) 줄이 셋 이상인 블록은
-    참고문헌 덩어리로 보아 제외한다.
+    boundary 가 구간을 확신하지 못하면(confident=False) 나누지 않는다 — 그 경우
+    한 편짜리 지면이면 전부 내 것이고, 여러 편이면 모른다고 답한다.
+    위치를 못 찾은 캐션은 unknown 이고, unknown 은 **남긴다**(boundary 의 원칙과 같다 —
+    실측 10.1016/j.jaad.2018.10.010 의 'Table I. Interventions and clinical outcomes
+    described in all included studies' 는 세로 조판 쪽이라 boundary 스트림에 없지만
+    이 논문 것이다).
     """
-    skip = skip or set()
-    nlines: dict[tuple[int, int], int] = {}
-    for l in lines:
-        nlines[(l.page, l.block)] = nlines.get((l.page, l.block), 0) + 1
-    out = []
-    for i, l in enumerate(lines):
-        t = l.text.strip()
-        if len(t) > 130 or nlines.get((l.page, l.block), 1) > 3:
-            continue
-        m = _STAMP_RE.search(t)
-        if m and len(m.group(0)) >= 0.5 * len(t):
-            d = m.group(1).rstrip(".").lower()
-            if d not in skip:
-                out.append((i, d))
-            continue
-        m = _STAMP_ALT_RE.match(t)
-        if m:
-            d = m.group(1).rstrip(".").lower()
-            if d not in skip:
-                out.append((i, d))
-    return out
+    if bmap is None or not getattr(bmap, "segments", None):
+        return "unknown"
+    if not bmap.confident or bmap.own is None:
+        return "own" if len(bmap.segments) <= 1 else "unknown"
+    hits = [h for h in bmap.locate(text, probes=CAPTION_PROBES) if h >= 0]
+    if not hits:
+        return "unknown"
+    return "own" if bmap.own in hits else "other"
 
 
-_REFHEAD_RE = re.compile(r"^\W{0,3}(?:REFERENCES?|References|참고문헌)\W{0,3}$")
-_EDITOR_RE = re.compile(r"^\W{0,3}(?:To the Editors?|Dear Editors?)\b", re.I)
+def boundary_map(pdf_path: str | Path, doc: dict):
+    """이 PDF 의 boundary.BoundaryMap. 실패하면 None."""
+    from . import boundary
 
-
-def _count_article_marks(lines: list[Line]) -> int:
-    """이 PDF 에 논문이 몇 편 실려 있나 — 편마다 한 번씩 찍히는 표지를 센다.
-
-    합본 지면 판정에 쓴다. DOI 도장이 없는 조판(실측 10.1016/j.jaad.2016.04.036 은
-    이웃 편 도장이 텍스트로 안 잡힌다)에서도 '레터 3편'을 알아내야 하기 때문이다.
-    표지는 (a) 홀로 놓인 'REFERENCES' 줄, (b) 'To the Editor:' 로 시작하는 줄.
-    """
-    refs = sum(1 for l in lines if _REFHEAD_RE.match(l.text.strip()))
-    eds = sum(1 for l in lines if _EDITOR_RE.match(l.text.strip()))
-    return max(refs, eds)
-
-
-def article_span(lines: list[Line], doc: dict) -> tuple[int, int, str]:
-    """이 논문이 차지하는 읽기순서 구간 [lo, hi] 와 그 근거.
-
-    판정 불가면 (-1, -1, 사유) 를 돌려준다 — 그 경우 캡션을 하나도 쓰지 않는다.
-    """
-    lo, hi, _, _, why = _spans(lines, doc)
-    return lo, hi, why
-
-
-def _segments(lines: list[Line], cuts: list[int]) -> list[tuple[int, int]]:
-    segs: list[tuple[int, int]] = []
-    a = 0
-    for c in sorted(set(cuts)):
-        if a <= c < len(lines):
-            segs.append((a, c))
-            a = c + 1
-    segs.append((a, len(lines) - 1))
-    return [(x, y) for x, y in segs if x <= y]
-
-
-def _spans(lines: list[Line], doc: dict) -> tuple[int, int, int, int, str]:
-    """(본문 구간 lo,hi · 보조자료까지 포함한 느슨한 구간 lo,hi · 근거).
-
-    본문 캡션은 좁은 구간으로, 보조자료 캡션(FIG E1 · Table S2)은 느슨한 구간으로
-    판정한다. 보조자료는 본문 뒤 'Online Repository' 쪽에 따로 실려 본문 표지
-    ('To the Editor') 경계 밖에 있기 때문이다(실측 10.1016/j.jaci.2014.02.038 은
-    5~10쪽이 FIG E1~E3 · TABLE E1~E3 이고 모두 이 논문 것이다).
-    """
-    grams = _doc_ngrams(doc)
-    hits = _anchored(lines, grams)
-    n = len(lines)
-    if len(hits) < ANCHOR_MIN_LINES:
-        return (-1, -1, -1, -1,
-                f"본문 정박 줄 {len(hits)}개 < {ANCHOR_MIN_LINES} — 소유 판정 포기")
-
-    stamps = _stamps(lines)
-    distinct = {d for _, d in stamps}
-    marks = _count_article_marks(lines)
-    n_art = max(len(distinct), marks)
-    if n_art < 2:
-        # 한 편짜리 지면 → 지면 전체가 이 논문 것이다.
-        # (실측 10.1001/jamapediatrics.2017.5203 은 1쪽 본문·2쪽 그림+참고문헌 구성이라
-        #  정박 구간만 쓰면 2쪽 'Figure 2. After treatment with oral, low-dose
-        #  isotretinoin …' 을 놓친다)
-        return 0, n - 1, 0, n - 1, f"단일 편(편 표지 {n_art}개) — 지면 전체"
-
-    own = (doc.get("paper_id") or "").strip().lower()
-
-    def _is_own(d: str) -> bool:
-        return bool(own) and (d == own or d.startswith(own) or own.startswith(d))
-
-    # 경계 후보 둘. 이웃 편 DOI 도장은 **그 편의 끝**, 'To the Editor' 표지는
-    # **다음 편의 시작**이다. 내 DOI 도장은 한 편 안에 여러 번 찍힐 수 있어 경계로
-    # 삼지 않는다.
-    stamp_cuts = [i for i, d in stamps if not _is_own(d)]
-    mine_cuts = [i for i, d in stamps if _is_own(d)]
-    ed_cuts = [i - 1 for i, l in enumerate(lines)
-               if i and _EDITOR_RE.match(l.text.strip())]
-
-    def _pick(cuts: list[int], label: str) -> tuple[int, int, int, str]:
-        segs = _segments(lines, cuts)
-        cnt = [sum(1 for h in hits if x <= h <= y) for x, y in segs]
-        # 정박 줄이 가장 많은 토막. 같으면 내 DOI 도장이 든 쪽.
-        k = max(range(len(segs)),
-                key=lambda t: (cnt[t],
-                               sum(1 for c in mine_cuts if segs[t][0] <= c <= segs[t][1])))
-        return segs[k][0], segs[k][1], cnt[k], f"{label} {len(segs)}토막 중 {k}번"
-
-    lo2, hi2, c2, w2 = _pick(stamp_cuts + ed_cuts, "이웃 도장+표지")
-    lo1, hi1, _, _ = _pick(stamp_cuts, "이웃 도장")
-    # 느슨한 구간은 좁은 구간을 반드시 포함한다
-    lo1, hi1 = min(lo1, lo2), max(hi1, hi2)
-    why = (f"합본 {n_art}편(이웃 도장 {len(set(stamp_cuts))} · 표지 {marks}) — "
-           f"{w2}, 정박 {c2}/{len(hits)}줄 · 본문 {lo2}~{hi2} · 보조자료 {lo1}~{hi1}")
-    return lo2, hi2, lo1, hi1, why
+    meta = doc.get("meta") or {}
+    probe = " ".join(p.get("text") or ""
+                     for s in (doc.get("body_text") or [])
+                     for p in (s.get("paragraphs") or []))[:4000]
+    return boundary.analyze(pdf_path,
+                            {"doi": doc.get("paper_id") or meta.get("doi"),
+                             "title": meta.get("title") or ""},
+                            body_probe=probe)
 
 
 def owned_captions(pdf_path: str | Path, doc: dict, *,
                    lines: list[Line] | None = None,
-                   typeset: bool = False) -> tuple[list[Caption], list[Caption], str]:
-    """(이 논문 캡션, 이웃 논문으로 판정해 버린 캡션, 근거)."""
+                   typeset: bool = False,
+                   bmap=None) -> tuple[list[Caption], list[Caption], str]:
+    """(이 논문 캡션, 이웃 논문으로 판정해 버린 캡션, 근거).
+
+    boundary.analyze 가 터지면 **아무것도 돌려주지 않는다**. 소유를 모르는 채로
+    캡션을 보충하면 이웃 논문 글이 정본에 들어간다 — 그림 몇 개보다 오염이 해롭다.
+    """
     lines = lines if lines is not None else document_lines(pdf_path)
     caps = extract_captions(pdf_path, lines=lines, typeset=typeset)
-    lo, hi, llo, lhi, why = _spans(lines, doc)
-    if lo < 0:
-        return [], caps, why
-
-    def _own(c: Caption) -> bool:
-        a, b = (llo, lhi) if c.supp else (lo, hi)
-        return a <= c.start <= b
-
-    mine = [c for c in caps if _own(c)]
-    other = [c for c in caps if not _own(c)]
+    if bmap is None:
+        try:
+            bmap = boundary_map(pdf_path, doc)
+        except Exception as e:                       # noqa: BLE001
+            return [], caps, f"boundary.analyze 실패({type(e).__name__}: {e}) — 전량 보류"
+    mine, other = [], []
+    for c in caps:
+        (other if caption_owner(bmap, c.text) == "other" else mine).append(c)
+    why = (f"boundary: 구간 {len(bmap.segments)}개 · 내 구간 {bmap.own} · "
+           f"확신 {bmap.confident} · {bmap.reason[:70]}")
     return mine, other, why
 
 
@@ -881,6 +810,8 @@ def strip_captions_from_body(doc: dict, caps: Iterable[Caption], *,
     """
     reports: list[dict] = []
     targets = [(c, _norm_key(c.text), _norm_key(c.desc)) for c in caps]
+    cut_head: set[int] = set()      # 머리에서 캡션을 뗀 문단
+    cut_tail: set[int] = set()      # 꼬리에서 캡션을 뗀 문단
     for sec in (doc.get("body_text") or []):
         for p in (sec.get("paragraphs") or []):
             text = p.get("text") or ""
@@ -892,10 +823,16 @@ def strip_captions_from_body(doc: dict, caps: Iterable[Caption], *,
                     break
                 for cap, nfull, ndesc in targets:
                     for needle in (nfull, ndesc):
-                        if len(needle) < min_chars:
+                        # 라벨 없는 설명만으로 지우는 것은 더 길게 일치할 때만 허용한다.
+                        # 'Table 1 summarizes the demographics and baseline clinical
+                        #  characteristics of the study population.' 같은 **본문 문장**이
+                        # 캡션 설명과 같은 말이라서 통째로 지워지는 사고를 막는다
+                        # (실측 10.1016/j.jcjo.2018.04.020 p8).
+                        floor = min_chars if needle is nfull else DESC_ONLY_MIN_CHARS
+                        if len(needle) < floor:
                             continue
-                        pos, ln = _longest_prefix_at(hay, needle, min_chars)
-                        if pos < 0 or ln < min_chars:
+                        pos, ln = _longest_prefix_at(hay, needle, floor)
+                        if pos < 0 or ln < floor:
                             continue
                         # 문단 전체가 캡션이면 문단째로 비운다
                         a, b = idx[pos], idx[pos + ln - 1] + 1
@@ -911,20 +848,55 @@ def strip_captions_from_body(doc: dict, caps: Iterable[Caption], *,
                             new = lend + joiner + rstart
                         else:
                             new = (left + right).strip()
+                        # 지운 결과가 기능어에서 끊기면 그것은 캡션 누수가 아니라
+                        # 본문 문장이었다는 뜻이다 → 되돌린다.
+                        if _DANGLING_RE.search(new):
+                            continue
+                        # 남은 쪽이 구두점뿐이면 사실상 머리/꼬리에서 뗀 것이다
+                        lsig = left.strip(" .,;:)]·\t\n")
+                        rsig = right.strip(" .,;:([·\t\n")
+                        where = ("가운데" if lsig and rsig
+                                 else ("앞" if not lsig else "뒤"))
                         reports.append({
                             "paragraph": p.get("id"), "caption": cap.key(),
-                            "removed": len(text) - len(new),
-                            "where": ("가운데" if left.strip() and right.strip()
-                                      else ("앞" if not left.strip() else "뒤")),
+                            "removed": len(text) - len(new), "where": where,
                             "sample": text[max(0, a - 40):a]
                                       + " ⟦" + text[a:a + 60] + "…⟧ "
                                       + text[b:b + 40]})
+                        cut_head.add(id(p)) if where == "앞" else None
+                        cut_tail.add(id(p)) if where == "뒤" else None
                         text = new
                         changed = True
                         break
                     if changed:
                         break
             p["text"] = text
+
+    # 문단 경계에서 잘린 문장 재봉합 — 앞 문단 꼬리에서 캡션을 떼고 뒤 문단 머리에서도
+    # 떼었다면 원래 **한 문장**이 캡션 때문에 두 문단으로 갈린 것이다.
+    # (실측 10.1016/j.jid.2023.07.007: p12 '…whereas we found a lower' + Figure 3 캡션,
+    #  p13 Figure 4 캡션 + 'risk of cardiovascular mortality in Korean patients…')
+    for sec in (doc.get("body_text") or []):
+        ps = sec.get("paragraphs") or []
+        merged: list[dict] = []
+        for p in ps:
+            if (merged and id(merged[-1]) in cut_tail and id(p) in cut_head):
+                lend = re.sub(r"[\s.]+$", "", merged[-1].get("text") or "")
+                rstart = re.sub(r"^[\s.]+", "", p.get("text") or "")
+                # 뒤쪽이 소문자로 시작할 때만 잇는다 — 그것이 '한 문장이 갈렸다'는
+                # 증거다. 대문자로 시작하면 원래 다른 문단이었을 수 있다.
+                if lend and rstart and rstart[:1].islower():
+                    merged[-1]["text"] = f"{lend} {rstart}"
+                    for k in ("cited_refs", "cited_keys", "refs_figure", "refs_table"):
+                        merged[-1][k] = list(dict.fromkeys(
+                            (merged[-1].get(k) or []) + (p.get(k) or [])))
+                    reports.append({"paragraph": merged[-1].get("id"),
+                                    "caption": "-", "removed": 0, "where": "문단 병합",
+                                    "sample": f"{lend[-50:]} ⟦+⟧ {rstart[:50]}"})
+                    continue
+            merged.append(p)
+        sec["paragraphs"] = merged
+
     # 빈 문단·빈 절 정리
     for sec in (doc.get("body_text") or []):
         sec["paragraphs"] = [p for p in (sec.get("paragraphs") or [])
@@ -971,9 +943,18 @@ def repair_document(doc: dict, pdf_path: str | Path, *,
              "tab": ambiguous_numbers(mine, "tab")}
     by_kind = {"fig": caption_map(mine, "fig"), "tab": caption_map(mine, "tab")}
 
+    desc_by_kind = {"fig": {}, "tab": {}}
+    for c in mine:
+        if c.supp or c.num is None:
+            continue
+        k = str(c.num)
+        if k not in desc_by_kind[c.kind] or len(c.desc) > len(desc_by_kind[c.kind][k]):
+            desc_by_kind[c.kind][k] = c.desc
+
     for kind, field_name, prefix in (("fig", "figures", "fig"), ("tab", "tables", "tab")):
         items = doc.get(field_name) or []
         pdfcaps = by_kind[kind]
+        descs = desc_by_kind[kind]
         used: set[str] = set()
         # 1) 번호를 가진 정본 항목 ↔ PDF 번호
         for it in items:
@@ -988,12 +969,26 @@ def repair_document(doc: dict, pdf_path: str | Path, *,
                     if n:
                         rep["deduped"].append({"id": it.get("id"), "n": n})
                         cur, it["caption"] = fixed, fixed
-                    # 본문 삼킴: 정본이 PDF 캡션보다 30% 이상 길고 머리가 같다
+                    # 본문 삼킴·앞머리 오염: PDF 캡션이 정본 캡션 **안에 들어 있고**
+                    # 정본 쪽이 더 길면 PDF 것으로 바꾼다. 앞머리가 오염된 경우
+                    # (실측 10.1007/s00256-009-0872-x fig_1 = 'Fig. 2 aFig. 3 a.
+                    #  Fig. 2 a Axial T1-weighted image shows …' — 앞에 다른 그림의
+                    #  라벨이 붙어 startswith 로는 안 걸린다)도 여기서 잡힌다.
+                    # 비교는 **설명 본문**으로 한다 — 라벨·패널문자 표기가 파서마다
+                    # 달라('Fig. 2 a Axial …' vs 'Fig. 2. Axial …') 머리로 맞추면
+                    # 어긋난다.
                     a, b = _norm_key(cur), _norm_key(ref)
-                    if len(a) > len(b) * 1.3 and a.startswith(b[:max(40, len(b) // 2)]):
+                    dsc = _norm_key(descs.get(key, ""))
+                    head = dsc[:max(40, min(60, len(dsc)))]
+                    # 바꾸는 조건 둘: (1) 정본이 15% 이상 길다(본문 삼킴)
+                    #                 (2) 설명이 시작되는 위치가 PDF 보다 뒤다
+                    #                     (앞머리에 다른 그림 라벨이 붙었다)
+                    swallowed = len(a) > len(b) * 1.15
+                    polluted = head and a.find(head) > b.find(head) + 3
+                    if len(b) >= 40 and head and head in a and (swallowed or polluted):
                         rep["trimmed"].append({
                             "id": it.get("id"), "was": len(cur), "now": len(ref),
-                            "cut": cur[len(ref):][:120]})
+                            "cut": cur[:120]})
                         it["caption"] = ref
         # 2) 빈 캡션 채우기 — 남은 번호가 정확히 하나면 그것
         empties = [it for it in items if _empty(it)]
@@ -1042,10 +1037,82 @@ def repair_document(doc: dict, pdf_path: str | Path, *,
     return rep
 
 
+def apply_to_parsed(document, pdf_path: str | Path, *,
+                    fill_missing: bool = True, strip_body: bool = True) -> dict:
+    """schema.Document(데이터클래스)에 그대로 적용한다 — grobid_client·pdf_fallback 연결용.
+
+    boundary.apply_to_parsed 와 같은 모양으로 둔다(같은 자리에서 나란히 부른다).
+    기존 Figure/Table 객체는 **caption 만 제자리에서 고치고**, 새로 보충되는 것만
+    객체로 만들어 덧붙인다. ImageTable 같은 하위형의 추가 필드를 잃지 않기 위함이다.
+    """
+    from .schema import Figure, Table
+
+    figs = list(getattr(document, "figures", None) or [])
+    tabs = list(getattr(document, "tables", None) or [])
+    view: dict[str, Any] = {
+        "paper_id": getattr(document, "paper_id", ""),
+        "abstract": getattr(document, "abstract", "") or "",
+        "meta": {"title": getattr(getattr(document, "meta", None), "title", "") or ""},
+        "figures": [{"id": f.id, "caption": f.caption or "", "image": f.image}
+                    for f in figs],
+        "tables": [{"id": t.id, "caption": t.caption or "",
+                    "markdown": t.markdown or ""} for t in tabs],
+        "body_text": [{"path": list(s.path), "section_type": s.section_type,
+                       "paragraphs": [{"id": p.id, "text": p.text,
+                                       "cited_refs": list(p.cited_refs),
+                                       "cited_keys": list(p.cited_keys),
+                                       "refs_figure": list(p.refs_figure),
+                                       "refs_table": list(p.refs_table)}
+                                      for p in s.paragraphs]}
+                      for s in (getattr(document, "body_text", None) or [])],
+    }
+    rep = repair_document(view, pdf_path, fill_missing=fill_missing,
+                          strip_body=strip_body)
+
+    # 캡션 반영 — 기존 객체는 제자리 수정, 신규만 추가
+    for src, objs, cls in (("figures", figs, Figure), ("tables", tabs, Table)):
+        by_id = {o.id: o for o in objs}
+        out = []
+        for row in view[src]:
+            o = by_id.get(row["id"])
+            if o is not None:
+                o.caption = row["caption"]
+                out.append(o)
+            else:
+                out.append(cls(id=row["id"], caption=row["caption"])
+                           if cls is Figure else
+                           cls(id=row["id"], caption=row["caption"],
+                               markdown=row.get("markdown") or ""))
+        setattr(document, src, out)
+
+    # 본문 반영 — 문단 텍스트·병합 결과를 되돌려 쓴다
+    if strip_body:
+        secs = getattr(document, "body_text", None) or []
+        keep = []
+        for sec, row in zip(secs, view["body_text"]):
+            wanted = {p["id"]: p for p in row["paragraphs"]}
+            ps = []
+            for p in sec.paragraphs:
+                w = wanted.get(p.id)
+                if w is None:
+                    continue                     # 지워졌거나 앞 문단에 합쳐졌다
+                p.text = w["text"]
+                p.refs_figure = list(w.get("refs_figure") or [])
+                p.refs_table = list(w.get("refs_table") or [])
+                ps.append(p)
+            if ps:
+                sec.paragraphs = ps
+                keep.append(sec)
+        if len(view["body_text"]) == len(secs):
+            document.body_text = keep
+    return rep
+
+
 __all__ = [
     "Line", "Caption", "SIZE_TOL", "MAX_CAPTION_CHARS",
     "prep", "parse_caption", "normalize_label", "dedupe_label", "clean_text",
-    "document_lines", "body_size", "extract_captions", "article_span",
+    "document_lines", "body_size", "extract_captions", "boundary_map",
+    "caption_owner",
     "owned_captions", "caption_map", "ambiguous_numbers",
-    "strip_captions_from_body", "repair_document",
+    "strip_captions_from_body", "repair_document", "apply_to_parsed",
 ]

@@ -54,13 +54,28 @@
   잔여 불일치는 거의 전부 GROBID 과잉 추출(본문 조각이 그림/표로 잡힘)이고,
   여기서는 손대지 않고 리포트에만 남긴다.
 
-알려진 한계(리포트로만 남긴다)
-  · 레터 합본 지면에서 이웃 논문 캡션이 그 번호를 혼자 주장하면 걸러지지 않는다.
-    실측 1건(10.1016/j.jaad.2016.05.022 의 'Table II. Final diagnoses …' 은 같은
-    쪽에 실린 다른 레터의 표다). 그 문서는 GROBID 단계에서 이미 이웃 논문 본문과
-    표를 함께 물고 왔다 — 근본 수리는 상류에서 해야 한다.
-  · 보충한 캡션과 **같은 글이 본문 문단에도 남아 있는** 문서가 25편 있다(GROBID
-    캡션 누수). 본문은 이 모듈의 담당이 아니라 손대지 않는다.
+2026-07-26 수정 — 캡션 출처를 captions.py 로 바꿨다(geometry=True 가 기본)
+  위 '알려진 한계' 첫 항목(합본 지면 이웃 논문 캡션 유입)이 이 모듈을 파이프라인에
+  연결하지 못한 이유였다. 이제 캡션 목록을 geometry_caption_index() → captions.py 에서
+  받는다. captions 는 PDF 를 읽기순서 스트림으로 펴고 이웃 편 DOI 도장·'To the Editor'
+  표지로 이 논문 구간을 끊어, 구간 밖 캡션을 후보에서 뺀다.
+  167편 전수 A/B 실측(같은 코드·같은 PDF, geometry 만 바꿈):
+      geometry=False  보충 118건 · **새로 들어간 이웃 논문 캡션 2건**
+                      (10.1016/j.jaad.2016.05.022 → 이웃 레터 …2016.05.014 의
+                       'Table II. Final diagnoses made by the consulting inpatient
+                       dermatology team' / 10.1111/bjd.21054 → tab_pdf1)
+      geometry=True   보충 111건 · **새로 들어간 이웃 논문 캡션 0건**
+  캡션 종료 경계도 글자 크기 등급으로 잡으므로 '캡션이 본문을 삼킴'이 함께 줄어든다.
+
+남은 한계(리포트로만 남긴다)
+  · 정본에 **이미 들어 있는** 이웃 논문 캡션은 지우지 않는다(과잉 삭제 안 함 원칙).
+    167편에 14건 남아 있으며 근본 수리는 상류(GROBID 분할)에서 해야 한다.
+  · captions 의 구간 판정이 이 논문 캡션을 이웃 것으로 잘못 버리는 일이 있다
+    (실측 24건 중 7건 — 정본 본문 자체가 이웃 글로 오염돼 정박이 엉뚱한 토막을
+    가리키는 문서들. 예: 10.1111/bjd.21054 의 'Table 1. Prior use of levodopa …').
+    오염 0 을 지키려고 재현율을 내준 결과다.
+  · 보충한 캡션과 **같은 글이 본문 문단에도 남아 있는** 문서가 있었다(GROBID 캡션
+    누수). 이제 captions.strip_captions_from_body 가 그 본문 쪽을 지운다(실측 18편 → 0).
 """
 from __future__ import annotations
 
@@ -345,6 +360,34 @@ def pdf_table_captions(pdf_text: str) -> dict[str, str]:
     return _collect(pdf_caption_index(pdf_text), "tab", supplementary=False)
 
 
+def geometry_caption_index(pdf_path: str | Path, doc: dict | None = None, *,
+                           typeset: bool = False,
+                           lines: list | None = None) -> list[dict[str, Any]]:
+    """captions.py 로 **좌표·글꼴 근거** 캡션 목록을 만들어 이 모듈 규약으로 낸다.
+
+    pdf_caption_index() 를 대체한다. 셋이 다르다.
+      · 캡션 **종료 경계**를 글자 크기 등급으로 잡는다 → 뒤따르는 본문을 안 삼킨다
+      · 단 경계를 넘어가는 캡션을 이어 붙인다
+      · doc 을 주면 **이웃 논문 캡션을 걸러낸다**(합본 지면 오염 차단)
+
+    doc 을 주지 않으면 소유 판정 없이 지면 전체를 낸다 — 합본 지면에서는
+    이웃 논문 캡션이 섞이므로 **수리에는 반드시 doc 을 넘겨라**.
+    """
+    from . import captions as _cap
+
+    ls = lines if lines is not None else _cap.document_lines(pdf_path)
+    if doc is not None:
+        caps, _other, _why = _cap.owned_captions(pdf_path, doc, lines=ls,
+                                                 typeset=typeset)
+    else:
+        caps = _cap.extract_captions(pdf_path, lines=ls, typeset=typeset)
+    return [{"kind": c.kind, "label": c.label, "raw": c.raw, "num": c.num,
+             "supp": c.supp, "unnumbered": c.raw is None, "panel": None,
+             "head": c.head, "desc": c.desc, "caption": c.text,
+             "page": c.page, "bbox": c.bbox, "evidence": c.evidence}
+            for c in caps]
+
+
 def pdf_supplementary_captions(pdf_text: str) -> dict[str, dict[str, str]]:
     """보조자료 캡션(Supplementary Figure S1 / FIG E1 / eTable 1)만 따로 모은다."""
     idx = pdf_caption_index(pdf_text)
@@ -593,11 +636,23 @@ def find_pdf(doc: dict, pdf_dir: str | Path) -> Path | None:
 
 # ── 문서 단위 감사 ───────────────────────────────────────────────────
 def audit_document(doc: dict, pdf_path: str | Path,
-                   pdf_text: str | None = None) -> dict[str, Any]:
-    """PDF 대비 그림·표의 누락/과잉/캡션 중복을 진단한다(문서를 바꾸지 않는다)."""
+                   pdf_text: str | None = None, *,
+                   geometry: bool = True) -> dict[str, Any]:
+    """PDF 대비 그림·표의 누락/과잉/캡션 중복을 진단한다(문서를 바꾸지 않는다).
+
+    geometry=True(기본)면 캡션 목록을 captions.py 의 좌표·글꼴 근거 추출로 만든다.
+    이때 **이 논문 구간 밖(이웃 논문)의 캡션은 후보에서 빠진다**.
+    """
     text = pdf_text if pdf_text is not None else pdf_blocks_text(pdf_path)
-    index = pdf_caption_index(text)
     ts = _typeset_flag(doc)
+    if geometry:
+        try:
+            index = geometry_caption_index(pdf_path, doc, typeset=ts)
+        except Exception as e:                      # noqa: BLE001
+            log(f"  captions.py 실패 → 블록 텍스트로 되돌림: {type(e).__name__}: {e}")
+            index = pdf_caption_index(text)
+    else:
+        index = pdf_caption_index(text)
     caps = {"figures": _collect(index, "fig", supplementary=False, typeset=ts),
             "tables": _collect(index, "tab", supplementary=False, typeset=ts)}
     supp = {"figures": _collect(index, "fig", supplementary=True, typeset=ts),
@@ -689,7 +744,8 @@ def _merge_continued(items: list[dict]) -> tuple[list[dict], int]:
 
 
 def repair_document(doc: dict, pdf_path: str | Path,
-                    pdf_text: str | None = None) -> tuple[dict, dict]:
+                    pdf_text: str | None = None, *,
+                    geometry: bool = True) -> tuple[dict, dict]:
     """캡션 접두 중복 제거 + PDF 에만 있는 그림/표 보충. (새 문서, 통계) 를 낸다.
 
     수리 순서
@@ -699,13 +755,26 @@ def repair_document(doc: dict, pdf_path: str | Path,
       4. 남은 누락 번호를 채운다. 캡션이 없는 그림 껍데기(figN)가 있으면 **그 자리에**
          채우고(정보 손실 0), 모자라면 새 항목(fig_pdfN/tab_pdfN)을 덧붙인다.
     과잉(정본에만 있는 항목)은 지우지 않는다 — 보고만 한다.
+
+    geometry=True(기본)면 캡션 목록을 captions.py 에서 받는다. 이 모듈이 파이프라인에
+    연결되지 못했던 이유(합본 지면에서 **이웃 논문 표를 가져다 붙임** — 실증
+    10.1016/j.jaad.2016.05.022 에 이웃 레터 …2016.05.014 의 'Table II. Final diagnoses
+    made by the consulting inpatient dermatology team')가 여기서 막힌다.
+    captions.owned_captions 가 그 캡션을 이 논문 구간 밖으로 판정해 후보에서 뺀다.
     """
     import copy
 
     out = copy.deepcopy(doc)
     text = pdf_text if pdf_text is not None else pdf_blocks_text(pdf_path)
-    index = pdf_caption_index(text)
     ts = _typeset_flag(doc)
+    if geometry:
+        try:
+            index = geometry_caption_index(pdf_path, doc, typeset=ts)
+        except Exception as e:                      # noqa: BLE001
+            log(f"  captions.py 실패 → 블록 텍스트로 되돌림: {type(e).__name__}: {e}")
+            index = pdf_caption_index(text)
+    else:
+        index = pdf_caption_index(text)
     caps = {"figures": _collect(index, "fig", supplementary=False, typeset=ts),
             "tables": _collect(index, "tab", supplementary=False, typeset=ts)}
     ambig = {"figures": ambiguous_numbers(index, "fig"),

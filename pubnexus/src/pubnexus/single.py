@@ -250,6 +250,29 @@ def _extract(pdf: Path, cfg: dict, ctx: "_Ctx", *, out_json, on_progress,
         except Exception as e:  # noqa: BLE001 — 수리 실패 시 원본을 그대로 쓴다
             notes.append(f"textfix 생략: {type(e).__name__}: {e}")
 
+    # 잘려 나간 문단 앞부분을 PDF 에서 되살린다.
+    try:
+        from . import recover
+        d, _st = recover.recover_document(d, pdf)
+        if _st.get("recovered"):
+            notes.append(f"문단 복원 {_st['recovered']}건")
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"문단 복원 생략: {type(e).__name__}: {e}")
+
+    # 빈 표를 PDF 괘선 좌표로 재구성한다. **이 단계가 빠져 있어 앱으로 뽑으면
+    # 표가 캡션만 남고 비어 있었다**(실측 표 161개 중 49개). 일괄 처리 경로에는
+    # 있었는데 한 편 처리 경로에는 없어서 산출물이 갈렸다.
+    try:
+        from . import tablefill
+        d, _st = tablefill.fill_document(d, pdf)
+        n = int(_st.get("filled", 0) or 0) + int(_st.get("repaired", 0) or 0)
+        if n:
+            notes.append(f"표 복원 {n}개")
+        if _st.get("dropped"):
+            notes.append(f"표 아닌 것 제거 {_st['dropped']}개")
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"표 복원 생략: {type(e).__name__}: {e}")
+
     try:
         from . import qc
         report = qc.score_doc(d, rec, meta)
@@ -350,17 +373,46 @@ class _Ctx:
             timeout=int(md.get("timeout_sec", 20) or 20),
         )
         self._grobid: bool | None = None
+        # 배치 중 GROBID 가 죽었을 때 되살릴 횟수. 무한정 시도하면 설치가 없는
+        # PC 에서 논문마다 40초씩 멎는다.
+        self._revive_budget: int = 3
 
     def grobid_ready(self) -> bool:
-        """GROBID 서버 생존 여부(폴더 전체에서 1회만 확인, 짧은 타임아웃)."""
-        if self._grobid is None:
-            from . import grobid_client
-            g = self.cfg.get("grobid") or {}
-            url = (g.get("url") or "").strip()
-            probe = float(g.get("probe_timeout_sec", 2) or 2)
-            self._grobid = bool(url) and grobid_client.is_alive(url, timeout=probe)
-            log(f"[single] GROBID {'사용' if self._grobid else '미가동 → PyMuPDF 폴백'}"
-                f" ({url or '주소 없음'})")
+        """GROBID 가 쓸 수 있는 상태인가. 꺼져 있으면 **창 없이 띄우고 기다린다.**
+
+        긴 배치 중 서비스가 죽는 일이 있다(실측 175편에 2회). 한 번 죽고 나면
+        남은 논문이 전부 폴백으로 떨어져 산출물의 질이 중간에 갈린다. 그래서
+        생존 확인을 한 번만 하지 않고, 죽은 것이 확인되면 되살린다.
+        되살리기는 `_revive_budget` 만큼만 시도한다 — 설치가 아예 없거나 계속
+        죽는 상황에서 매 논문마다 40초씩 기다리는 것을 막는다.
+        """
+        from . import grobid_service as gs
+        g = self.cfg.get("grobid") or {}
+        url = (g.get("url") or "").strip()
+        if not url:
+            if self._grobid is None:
+                self._grobid = False
+                log("[single] GROBID 주소 없음 → PyMuPDF 폴백")
+            return False
+
+        probe = float(g.get("probe_timeout_sec", 2) or 2)
+        if gs.is_alive(url, timeout=probe):
+            if self._grobid is not True:
+                log(f"[single] GROBID 사용 ({url})")
+            self._grobid = True
+            return True
+
+        # 여기부터는 '지금 안 떠 있다'. 되살릴 여지가 있으면 되살린다.
+        if self._revive_budget <= 0:
+            if self._grobid is not False:
+                log("[single] GROBID 되살리기 한도 소진 → PyMuPDF 폴백")
+            self._grobid = False
+            return False
+        self._revive_budget -= 1
+        log("[single] GROBID 가 응답하지 않는다 → 창 없이 되살리는 중(최대 120초)")
+        ok = gs.ensure(url, timeout=120.0)
+        self._grobid = bool(ok)
+        log(f"[single] GROBID {'되살아남' if ok else '되살리기 실패 → PyMuPDF 폴백'}")
         return self._grobid
 
     # TEI 캐시: PDF 내용(sha1) 기준 — overwrite 재실행 때 GROBID 재호출을 아낀다

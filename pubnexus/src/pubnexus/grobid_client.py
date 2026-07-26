@@ -868,6 +868,16 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     )
     if _abs_info:
         doc.qc["abstract"] = _abs_info
+    # 옆 논문 글 걷어내기 — research letter 는 한 지면에 여러 편이 이어 실린다.
+    # 경계를 확신할 수 없으면 boundary 가 **아무것도 건드리지 않는다**(오탐 0 실측).
+    if source_file and Path(source_file).exists():
+        try:
+            from . import boundary
+            rep = boundary.apply_to_parsed(doc, source_file, meta)
+            if rep.get("confident") or rep.get("identity_conflict"):
+                doc.qc["boundary"] = rep
+        except Exception as e:  # noqa: BLE001 — 안전망이 파이프라인을 막지 않게
+            log(f"      ! 경계 판정 생략({doc.paper_id}): {type(e).__name__}: {e}")
     return doc
 
 

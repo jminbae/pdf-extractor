@@ -30,6 +30,45 @@ class ImageTable(Table):
     graphic: str = ""              # <graphic xlink:href> 이미지 파일명
 
 
+def float_caption(elem) -> str:
+    """<fig>/<table-wrap> 의 캡션을 만든다 — 라벨·제목·설명 사이 경계를 살린다.
+
+    jats.caption_text 는 요소 전체를 itertext 로 이어 붙이므로 <title> 과 <p> 가
+    맞붙어 문장이 뭉개진다(실측 10.1001/jamadermatol.2024.4534 doi240051f1:
+    'Figure 1. Estimates of T-VASI Percentage Score Change From Baseline to Week
+    24Abbreviations: …' — '24' 와 'Abbreviations' 사이 경계가 없다).
+    여기서는 <label> · <caption>/<title> · <caption>/<p> 를 각각 뽑아 문장부호로 잇고,
+    captions.dedupe_label 로 라벨이 두 번 찍힌 것을 지운다.
+    """
+    from . import captions as _cap
+
+    def _txt(el) -> str:
+        return norm_text("".join(el.itertext())) if el is not None else ""
+
+    label = _txt(elem.find("{*}label"))
+    cap = elem.find("{*}caption")
+    bits: list[str] = []
+    if cap is not None:
+        title = cap.find("{*}title")
+        if title is not None:
+            bits.append(_txt(title))
+        for p in cap.findall("{*}p"):
+            t = _txt(p)
+            if t:
+                bits.append(t)
+        if not bits:
+            bits.append(_txt(cap))
+    parts = [b for b in bits if b]
+    out = label
+    for b in parts:
+        if not out:
+            out = b
+        else:
+            out = out + ("" if out.endswith((".", ":", "?", "!")) else ".") + " " + b
+    text, _n = _cap.dedupe_label(jats.clean_paragraph(out))
+    return text
+
+
 def fetch_xml(http: HttpClient, base: str, pmcid: str, cache_dir: Path) -> bytes | None:
     cache = cache_dir / f"{pmcid}.xml"
     if cache.exists():
@@ -218,7 +257,7 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     # id 없는 것도 생성 id 부여(누락 방지). sub-article(동료심사 등)은 제외.
     for tw in _collect_floats(root, body, "{*}table-wrap"):
         tid = tw.get("id") or f"tab{len(tables)+1}"
-        cap = jats.caption_text(tw)
+        cap = float_caption(tw)
         md = jats.table_to_markdown(tw)
         href = jats.graphic_href(tw) if not md.strip() else ""
         if href:
@@ -228,7 +267,7 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
             tables.append(Table(id=tid, caption=cap, markdown=md))
     for fg in _collect_floats(root, body, "{*}fig"):
         figures.append(Figure(id=fg.get("id") or f"fig{len(figures)+1}",
-                              caption=jats.caption_text(fg)))
+                              caption=float_caption(fg)))
 
     # 초록은 '문서 자체'에서 추출(QC 초록대조를 실제 검증신호로 만들기 위함)
     extracted_abstract = ""

@@ -1,4 +1,34 @@
-"""4.7단계 — 본문이 빈 표를 원본 PDF 텍스트층에서 좌표로 재구성해 채운다.
+"""4.7단계 — 정본의 **표**를 원본 PDF 텍스트층에서 좌표로 바로잡는다.
+
+이 모듈이 하는 일은 네 가지다(자세한 것은 `fill_document` 참고).
+  1. **관문** `fake_table_reason` — 표가 아닌 것을 `tables[]` 에서 뺀다.
+     참고문헌 목록·CAPSULE SUMMARY/약어 상자·워터마크·1열 산문·그림.
+     캡션이 'Table N' 이거나 PDF 안의 진짜 표 캡션에 그 문구가 들어 있으면
+     **절대 지우지 않는다** — 망가진 진짜 표를 지우는 것이 최악이다.
+  2. **채움** — markdown 이 빈 표를 복원한다(원래 이 모듈의 유일한 일이었다).
+  3. **수리** `better_reason` — 이미 markdown 이 있는 표도 전부 재추출해 보고,
+     **기존 값을 하나도 잃지 않을 때만** 갈아 끼운다. 구조만 봐서는 멀쩡해
+     보이는 결함(열 밀림·셀 병합·전치)이 있어 '구조 검사 실패'를 조건으로
+     삼을 수 없기 때문이다. 대신 받아들이는 조건을 좁게 잡았다.
+  4. **발굴** `discover_tables` — GROBID 가 **아예 못 찾은** 표를 PDF 에서
+     새로 만든다. 윈도우 GROBID 는 번들 pdfalto 가 0.1 이라 표 검출이
+     리눅스보다 60% 나쁘다(같은 134편에서 TEI 표 231 → 93). 실측 최악은
+     10.1002/jso.23438 — PDF 에 TABLE I·II·III 가 있는데 GROBID 표 0개다.
+     후보는 두 곳에서 모은다: 이 모듈의 캡션 훑기와 `pdf_fallback` 의 표 찾기.
+     **소속을 확인할 수 없으면 하나도 만들지 않는다**(아래 오염 항목).
+
+표마다 `footnote`(표 각주)와 `pdf_span`(지면 좌표)도 담는다. 각주는 지금까지
+어디에도 담기지 않아 본문 꼬리로 새거나 통째로 사라졌다.
+
+**이웃 논문 오염**이 이 모듈의 가장 큰 위험이다. 레터·단신은 한 지면에 여러
+편이 실려 옆 논문 표를 가져오기 쉽다(실증: figtab.py 가
+10.1016/j.jaad.2016.05.022 에 이웃 레터의 Table II 를 붙였고 그래서 연결되지
+못했다). 발굴 경로는 `boundary.py` 로 구간을 받아
+  · PDF 에 논문이 하나뿐이거나(가져올 이웃이 없다)
+  · boundary 가 내 구간을 확정했을 때만 열고, 캡션마다 `owner()` 로 거른다.
+판정기를 못 얻으면 발굴을 **켜지 않는다**(reason="no_boundary").
+
+── 아래는 채움 경로(2)의 원래 설명이다 ──────────────────────────────
 
 증상: 정본에 캡션만 있고 markdown 이 빈 표가 있다. 실측 167편 · 표 299개 중
 37개(10편)가 여기 해당한다. 대부분(34개) source="graphic" 인 pmc_xml 문서로,
@@ -482,16 +512,41 @@ def _rule_region(pg: _Page, mode: int, cap_box, stop_y: float
         if top[0] - cy1 > CAP_TO_RULE_MAX:
             break
         ys = [top[0]]
-        x0, x1 = top[1], top[2]
+        xs = [(top[1], top[2])]
         for r in cands[k + 1:]:
             if abs(r[1] - top[1]) > RULE_X0_TOL or abs(r[2] - top[2]) > RULE_X1_TOL:
                 continue
             ys.append(r[0])
-            x0 = min(x0, r[1])
-            x1 = max(x1, r[2])
+            xs.append((r[1], r[2]))
+        ys, xs = _cut_at_gap(ys, xs)
         if len(ys) >= 2 and ys[-1] - ys[0] >= 10.0:
-            return ys, (x0, x1)
+            return ys, (min(a for a, _ in xs), max(b for _, b in xs))
     return None
+
+
+RULE_GAP_FACTOR = 3.5      # 이웃 괘선 간격이 중앙값의 이 배를 넘으면 남의 선이다
+RULE_GAP_FLOOR = 60.0      # 다만 이만큼은 무조건 봐준다(윗선~머리선 간격)
+
+
+def _cut_at_gap(ys: list[float], xs: list[tuple[float, float]]
+                ) -> tuple[list[float], list[tuple[float, float]]]:
+    """괘선 줄기를 **간격이 갑자기 벌어지는 곳**에서 끊는다.
+
+    x 정렬만으로 괘선을 모으면 같은 폭으로 그어진 **페이지 아래 장식선**까지
+    표에 딸려 들어온다. 실측: 10.1371/journal.pone.0179088 4쪽 Table 1 은
+    괘선이 y=88.4…286.0 인데 페이지 바닥선 y=744.2 도 x=[36,576] 으로 같아
+    영역이 페이지 끝까지 늘어났고, 그 사이 Discussion 문단 15개가 통째로
+    표의 셀이 됐다(수리 후 검증에서 잡았다).
+    """
+    if len(ys) < 3:
+        return ys, xs
+    gaps = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+    med = sorted(gaps)[len(gaps) // 2]
+    limit = max(RULE_GAP_FACTOR * med, RULE_GAP_FLOOR)
+    for i, g in enumerate(gaps):
+        if g > limit:
+            return ys[:i + 1], xs[:i + 1]
+    return ys, xs
 
 
 # ── 3~4. 행·열 복원 ─────────────────────────────────────────────────
@@ -712,6 +767,46 @@ def _merge_wrapped(rows: list[list[str]], pitches: list[float]) -> list[list[str
     return out
 
 
+_URL_ONLY = re.compile(r"^(?:https?://|doi:|www\.)\S+$", re.I)
+
+
+def _split_trailing_note(body: list[list[str]]) -> tuple[list[list[str]], str]:
+    """표 **마지막 행들**이 각주면 떼어 낸다 → (본문 행, 각주 문자열).
+
+    아래 괘선을 각주 밑에 긋는 조판이 있어(실측: PLOS ONE 은 각주와 DOI 줄
+    아래에 선을 긋는다) 각주가 표의 마지막 행으로 들어온다. 각주는 표의
+    일부지만 **셀이 아니다** — 떼어서 footnote 로 담는다.
+    """
+    notes: list[str] = []
+    while body:
+        nz = [c for c in body[-1] if c.strip()]
+        if len(nz) != 1:
+            break
+        txt = nz[0].strip()
+        if _URL_ONLY.match(txt) or _FOOT_MARK.match(txt) or _ABBR_TOKEN.search(txt):
+            notes.insert(0, txt)
+            body = body[:-1]
+            continue
+        break
+    return body, " ".join(notes).strip()
+
+
+# 표 **안에서** 행을 떼어낼 때는 각주 판정을 더 좁게 한다. 표 아래 각주는
+# 기하(밑선 바로 아래·같거나 작은 글씨)가 이미 걸러 주지만, 여기서는 그 근거가
+# 없어 진짜 셀을 떼어낼 위험이 있다. 실측: 10.5021/ad.2015.27.5.578 표 12 의
+# 'However, the cost-effectiveness should be seriously considered.' 는 앞 칸
+# 권고문이 줄바꿈된 것인데 느슨한 규칙이 각주로 떼어 갔다.
+_FOOT_MARK = re.compile(r"^\s*[*†‡§¶#]|^\s*(?:Note|Notes|Abbreviations?|Source)\b")
+# 약어 풀이의 머리 토큰은 '약어처럼' 생겨야 한다 — 대문자 2개 이상이거나
+# 3자 이하이거나 숫자를 품는다(CI, OR, Tm, SD, VEGFa, GAPDH, NB-UVB, ICD-10).
+# 'However,' · 'Values,' 같은 평범한 낱말은 걸리지 않는다.
+_ABBR_TOKEN = re.compile(
+    r"(?:^|[;.]\s|\s)(?=[A-Za-z0-9/+-]{1,8}[,:]\s)"
+    r"(?:[A-Za-z0-9/+-]*[A-Z][A-Za-z0-9/+-]*[A-Z][A-Za-z0-9/+-]*"
+    r"|[A-Za-z][A-Za-z0-9/+-]{0,2}"
+    r"|[A-Za-z][A-Za-z0-9/+-]*\d[A-Za-z0-9/+-]*)[,:]\s+[A-Za-z]")
+
+
 # ── 5. 판정 & markdown ──────────────────────────────────────────────
 # 셀이 '끝난 것처럼' 보이는 마침 문자. 줄 끝 하이픈은 여기 넣으면 안 된다 —
 # 그것이야말로 다음 줄로 이어진다는 가장 강한 증거다.
@@ -745,10 +840,28 @@ def _flows_as_prose(grid: list[list[str]]) -> bool:
     return False
 
 
+PARA_CELL_MIN = 120        # 이보다 긴 셀이 그 행의 유일한 값이면 '문단 행'
+PARA_ROWS_MAX = 1          # 문단 행이 이보다 많으면 표가 아니라 본문을 삼킨 것
+
+
+def _para_rows(grid: list[list[str]]) -> int:
+    """한 칸만 채워져 있고 그 값이 문장 길이인 행의 수."""
+    n = 0
+    for r in grid:
+        nz = [c for c in r if c.strip()]
+        if len(nz) == 1 and len(nz[0]) > PARA_CELL_MIN:
+            n += 1
+    return n
+
+
 def _validate(header: list[str] | None, body: list[list[str]]) -> str | None:
     grid = ([header] if header else []) + body
     if not grid:
         return "no_rows"
+    # 본문 문단을 셀로 삼킨 표를 막는 마지막 그물. _flows_as_prose 는 문단이
+    # 마침표로 끝나면(즉 셀 하나가 문단 하나를 통째로 담으면) 걸리지 않는다.
+    if _para_rows(grid) > PARA_ROWS_MAX:
+        return "swallowed_prose"
     ncols = max(len(r) for r in grid)
     if ncols < 2:
         return "cols_lt_2"
@@ -1081,8 +1194,11 @@ def _grid_from_region(pg: _Page, mode: int, ys: list[float] | None,
         prev_c = c
         body.append(_assign(r, bounds, x0, x1))
     body = _merge_wrapped(body, pitches)
+    body, tail_note = _split_trailing_note(body)
     info = {"ncols": ncols, "n_head_rows": len(head_rows),
             "n_body_rows": len(body)}
+    if tail_note:
+        info["tail_note"] = tail_note
     return header, body, info
 
 
@@ -1099,11 +1215,14 @@ _FOOT_START = re.compile(
     r"|\(?[a-z]\)?[.)]?\s+[A-Z0-9]"              # a) …  y …
     r"|\d{1,2}\s*[A-Z][a-z]"                     # 1Mean …  2Mean …
     r"|(?:Note|Notes|Abbreviations?|Source|Data|Values?|All)\b"
-    r"|[A-Za-z][A-Za-z0-9/+-]{0,11},\s+[a-z]"    # 'Tm, melting temperature;'
+    # 약어 풀이 — 쉼표꼴('Tm, melting temperature;')과 콜론꼴('CD: Crohn's
+    # disease, CI: Confidence interval') 둘 다 쓰인다(실측: 후자는
+    # 10.4103/ijdvl.ijdvl_875_17 Table 3 각주).
+    r"|[A-Za-z][A-Za-z0-9/+-]{0,11}[,:]\s+[A-Za-z]"
     r")")
 # 약어 풀이가 두 번 이상 이어지면 각주가 확실하다('CI, confidence interval;
 # OR, odds ratio.'). 한 번만으로는 본문 문장과 갈라지지 않는다.
-_ABBR_GLOSS = re.compile(r"\b[A-Za-z][A-Za-z0-9/+-]{0,11},\s+[a-z][^;.]{2,60}[;.]")
+_ABBR_GLOSS = re.compile(r"\b[A-Za-z][A-Za-z0-9/+-]{0,11}[,:]\s+[A-Za-z][^;.]{2,60}[;.,]")
 FOOT_MAX_GAP = 14.0        # 표 밑선에서 첫 각주 줄까지 허용 거리
 FOOT_MAX_DROP = 52.0       # 각주로 훑어 내려갈 최대 높이
 FOOT_SIZE_SLACK = 0.6      # 각주는 본문보다 작다 — 이만큼 넘게 크면 각주가 아니다
@@ -1247,6 +1366,10 @@ def extract_table(pages: list[_Page], caption: str) -> tuple[str, dict]:
                     "x1": round(ux1, 1), "y1": round(uy1, 1),
                     "caption_y0": round(_unrot(cap_box, mode)[1], 1),
                     "body_y0": round(_unrot((rx0, ys[0], rx1, ys[0]), mode)[1], 1)}
+    if mode:
+        # 눕혀 조판된 표. x0..y1 은 PDF 좌표로 맞지만 caption_y0/body_y0 은
+        # '위→아래' 순서를 뜻하지 않는다(캡션이 왼쪽에서 세로로 선다).
+        info["span"]["rotated"] = True
     if info.get("continued_page"):
         info["span"]["continued_page"] = info["continued_page"]
 
@@ -1260,9 +1383,271 @@ def extract_table(pages: list[_Page], caption: str) -> tuple[str, dict]:
     sizes = [s for s in sizes if s]
     body_h = max(sizes) if sizes else 0.0
     note = _footnote_below(pg, mode, (rx0, ys[0], rx1, ys[-1]), stop_y, body_h)
+    note = " ".join(x for x in (info.pop("tail_note", ""), note) if x).strip()
     if note:
         info["footnote"] = note
     return md, info
+
+
+# ── PDF 에서 표를 **처음부터** 찾아낸다 ──────────────────────────────
+# 배경: 윈도우 GROBID 에 딸린 pdfalto 0.1 은 표 검출이 리눅스보다 60% 나쁘다
+# (같은 134편에서 TEI 표 231 → 93). 실측으로 확인한 최악의 경우는
+# 10.1002/jso.23438 — PDF 에 TABLE I·II·III 가 있는데 GROBID 는 표 0개를
+# 내놨다. `tables[]` 가 비어 있으면 '빈 표 채우기'는 채울 대상이 없다.
+# 그래서 캡션을 PDF 에서 직접 찾아 표를 새로 만든다.
+#
+# **오염이 이 경로의 유일한 위험이다.** 레터·단신은 한 지면에 여러 편이 실려
+# 옆 논문 표를 가져오기 쉽다(실증: figtab.py 가 10.1016/j.jaad.2016.05.022 에
+# 이웃 레터의 Table II 를 붙였고 그래서 파이프라인에 연결되지 못했다).
+# 이제 boundary.py 가 구간을 알려 주므로 **소속이 확인된 캡션만** 받는다.
+# 판정기를 못 얻으면 discovery 를 아예 켜지 않는다(reason="no_boundary").
+_CAP_HEAD_KEY = re.compile(
+    r"^(?:supplement(?:al|ary)?|appendix|online|web|extended|additional|e)?"
+    r"tab(?:le)?(?:[ivxl]{1,5}|\d{1,3})(?!\d)")
+# 'Table 2 shows the ocular factors of the two groups…' 처럼 **본문 문장**이
+# 표 번호로 시작하는 일이 있다(실측: 10.1016/j.jcjo.2018.04.020 3쪽 — 이 문장이
+# 캡션으로 잡혀 없는 표가 하나 생겼다). 진짜 캡션은 번호 뒤가 대문자로 시작한다
+# ('Table 2 Incidence of…', 'TABLE II. The Characteristics…', 'Table. Demographic…').
+# 소문자로 이어지면 문장이다.
+_CAP_AFTER_NUM = re.compile(
+    r"^\s*(?:supplement(?:al|ary)?|appendix|online|web|extended|additional)?\s*"
+    # 'TA B L E 1' — Wiley 계열은 표 머리글의 자간을 벌린다. 글자 사이
+    # 공백을 허용하지 않으면 이 저널의 표를 통째로 놓친다.
+    r"t\s*a\s*b(?:\s*l\s*e)?\.?\s*(?:[IVXL]{1,5}|\d{1,3}|[A-Z]\d{1,2})?"
+    r"[.:)|\s  \-–—]*(.)", re.I)
+
+
+def _caption_shaped(caption: str) -> bool:
+    m = _CAP_AFTER_NUM.match(caption or "")
+    if not m:
+        return False
+    c = m.group(1)
+    return c.isupper() or c.isdigit() or not c.isalpha()
+CAP_MAX_LINES = 4          # 캡션으로 이어 붙일 최대 줄 수
+CAP_MAX_CHARS = 260        # 캡션으로 이어 붙일 최대 길이
+
+
+def find_table_captions(pages: list[_Page]) -> list[dict]:
+    """PDF 안의 표 캡션 블록. → [{page, caption, number}] (읽기순서)."""
+    out: list[dict] = []
+    for pno, pg in enumerate(pages):
+        for block in pg.blocks:
+            if not block or not _CAP_HEAD_KEY.match(_key(block[0]["text"])):
+                continue
+            parts: list[str] = []
+            for ln in block[:CAP_MAX_LINES]:
+                parts.append(ln["text"].strip())
+                joined = " ".join(parts)
+                if len(joined) >= CAP_MAX_CHARS or joined.rstrip().endswith("."):
+                    break
+            caption = utils.norm_text(" ".join(parts))
+            if len(_key(caption)) < CAP_MIN_KEY or not _caption_shaped(caption):
+                continue
+            out.append({"page": pno + 1, "caption": caption,
+                        "number": table_number(caption)})
+    return out
+
+
+def _body_sections(doc: dict) -> list[dict]:
+    """정본 본문 절 목록. 스키마 이름이 sections → body_text 로 바뀌어 둘 다 본다."""
+    return doc.get("body_text") or doc.get("sections") or []
+
+
+def _body_text(doc: dict) -> str:
+    return " ".join((p.get("text") or "")
+                    for s in _body_sections(doc)
+                    for p in (s.get("paragraphs") or []))
+
+
+def fallback_tables(pdf_path) -> list[dict]:
+    """pdf_fallback 의 표 찾기를 빌려 후보를 얻는다. → [{caption, markdown}].
+
+    윈도우 GROBID 는 번들 pdfalto 가 0.1 이라 표를 잘 놓친다(실측:
+    10.1002/jso.23438 은 PDF 에 TABLE I·II·III 가 있는데 GROBID 표 0개).
+    같은 PDF 를 pdf_fallback 의 캡션·영역 탐색으로 훑으면 3개가 나온다.
+    그래서 GROBID 경로에서도 이 탐색을 **후보로만** 돌려 합친다.
+    (pdf_fallback 은 다른 담당 모듈이라 읽기만 한다 — 공개 진입점
+     pdf_figures_tables() 만 부른다.)
+    """
+    try:
+        from . import pdf_fallback
+        _figs, tabs = pdf_fallback.pdf_figures_tables(pdf_path)
+    except Exception:                     # noqa: BLE001 — 후보가 없어도 본 경로는 돈다
+        return []
+    out: list[dict] = []
+    for t in tabs:
+        cap = (getattr(t, "caption", "") or "").strip()
+        if cap:
+            out.append({"caption": cap,
+                        "markdown": getattr(t, "markdown", "") or "",
+                        "src_id": getattr(t, "id", "")})
+    return out
+
+
+def _cap_core(caption: str) -> str:
+    """캡션에서 'Table N' 머리를 떼어낸 대조 키.
+
+    같은 표를 두 번 만들지 않으려면 이 키로 비교해야 한다. GROBID 는 머리를
+    잃은 캡션('Strength of Recommendation Taxonomy (SORT)3')을 내놓는데,
+    PDF 에서 찾은 캡션은 머리가 붙어 있다('TABLE 2. Strength of Recommendation
+    Taxonomy (SORT)'). 머리를 붙인 채 비교하면 서로 다른 표로 보인다
+    (실측: 10.1111/phpp.12598 에서 SORT 표가 두 벌 생겼다).
+    """
+    m = _CAP_AFTER_NUM.match(caption or "")
+    core = caption[m.start(1):] if m else (caption or "")
+    return _key(core)[:60]
+
+
+def _mentioned_numbers(doc: dict) -> set[str]:
+    """본문이 언급한 'Table N' 번호 집합(교차검증용)."""
+    txt = [_body_text(doc)]
+    nums: set[str] = set()
+    for m in re.finditer(r"\bTables?\s+([IVXL]{1,5}|\d{1,3})\b",
+                         "\n".join(txt), re.I):
+        n = table_number("Table " + m.group(1))
+        if n:
+            nums.add(n)
+    return nums
+
+
+def discover_tables(doc: dict, pages: list[_Page], bmap: Any,
+                    src_doc: dict | None = None, pdf_path=None
+                    ) -> tuple[list[dict], dict]:
+    """PDF 에서 아직 정본에 없는 표를 찾아낸다. → (새 표 목록, 통계).
+
+    소속 판정기(bmap)가 없거나 자신 없으면 **아무것도 만들지 않는다.**
+    이웃 논문 표를 붙이느니 표가 없는 편이 낫다.
+    """
+    st: dict[str, Any] = {"candidates": 0, "added": 0, "skipped": {},
+                          "items": [], "mentioned": sorted(_mentioned_numbers(doc))}
+    if bmap is None:
+        st["reason"] = "no_boundary"
+        return [], st
+    # 오염을 막을 수 있는 두 경우에만 연다.
+    #   (a) 한 PDF 에 논문이 하나뿐 — 가져올 이웃이 없다.
+    #       (boundary 는 이때 confident=False, reason='구간 1개 — 합본 지면이
+    #        아님' 을 돌려준다. '자신 없음'이 아니라 '나눌 것이 없음'이다.)
+    #   (b) 합본 지면이지만 boundary 가 내 구간을 확정했다 — owner() 로 거른다.
+    single = len(getattr(bmap, "segments", []) or []) <= 1
+    sure = bool(getattr(bmap, "confident", False)) and getattr(bmap, "own", None) is not None
+    if not (single or sure):
+        st["reason"] = "boundary_unsure"
+        return [], st
+    st["gate"] = "single_article" if single else "boundary_confident"
+
+    def skip(k: str) -> None:
+        st["skipped"][k] = st["skipped"].get(k, 0) + 1
+
+    have = {table_number(t.get("caption") or "")
+            for t in (doc.get("tables") or [])}
+    have.discard(None)
+    seen: set[str] = set()
+    seen_caps: set[str] = set()
+    new: list[dict] = []
+    # 인코딩 게이트는 **새로 뽑은 문자열**로 판정해야 열린다(정본은 이미
+    # textfix 를 거쳐 서명이 지워져 있다). 그래서 먼저 전부 뽑아 둔다.
+    cands = list(find_table_captions(pages))
+    # 두 번째 후보원 — pdf_fallback 의 표 찾기. 캡션을 못 찾는 조판에서
+    # 이쪽이 잡아 주는 표가 있다. 번호/캡션으로 합치므로 겹쳐도 안전하다.
+    known = {_cap_core(c["caption"]) for c in cands}
+    fb = {_cap_core(x["caption"]): x for x in fallback_tables(pdf_path)} if pdf_path else {}
+    st["fallback_candidates"] = len(fb)
+    for k, x in fb.items():
+        if k in known or not _caption_shaped(x["caption"]):
+            continue
+        cands.append({"page": None, "caption": x["caption"],
+                      "number": table_number(x["caption"]),
+                      "fallback_md": x["markdown"]})
+    raws: dict[int, tuple[str, dict]] = {}
+    for i, c in enumerate(cands):
+        try:
+            raws[i] = extract_table(pages, c["caption"])
+        except Exception as e:                # noqa: BLE001
+            raws[i] = ("", {"reason": f"error:{type(e).__name__}"})
+    enc, _ts = _encoder(src_doc or doc, [m for m, _ in raws.values() if m])
+    for ci, cand in enumerate(cands):
+        st["candidates"] += 1
+        cap, num = cand["caption"], cand["number"]
+        ckey = _cap_core(cap)
+        if num and (num in have or num in seen):
+            skip("already_have")
+            continue
+        if ckey in seen_caps:
+            # 번호가 없는 표('Table. Demographic …')가 다음 쪽으로 이어지면
+            # 같은 캡션이 두 번 잡힌다. 캡션 키로도 중복을 막는다.
+            skip("duplicate_caption")
+            continue
+        if any(ckey and (ckey in _cap_core(t.get("caption") or "")
+                         or _cap_core(t.get("caption") or "").startswith(ckey[:40]))
+               for t in (doc.get("tables") or [])):
+            skip("already_have")
+            continue
+        if re.search(r"\bcontin", cap[:80], re.I):
+            skip("continuation")          # 이어짐 머리글은 _continuation 이 붙인다
+            continue
+        who = "own" if single else bmap.owner(cap)[0]
+        if who == "other":
+            skip("neighbour_article")     # 이웃 논문 표 — 여기서 막는다
+            continue
+        md, info = raws[ci]
+        if not md and (cand.get("fallback_md") or "").strip():
+            # 괘선이 없어 우리 경로가 못 잡은 표는 pdf_fallback 의 본문을 쓴다.
+            # 구조 검사를 통과할 때만 받는다(값을 지어내지 않는 경로다).
+            fmd = cand["fallback_md"]
+            if check_markdown(fmd)["ok"]:
+                md, info = fmd, {"reason": None, "region": "pdf_fallback",
+                                 "nrows": check_markdown(fmd)["ndata"] + 1,
+                                 "ncols": check_markdown(fmd)["ncols"]}
+        if not md:
+            skip(info.get("reason") or "unknown")
+            st["items"].append({"caption": cap[:110], "page": cand["page"],
+                                "number": num, "status": "failed",
+                                "reason": info.get("reason"), "owner": who})
+            continue
+        md = enc(md)
+        if info.get("footnote"):
+            info["footnote"] = enc(info["footnote"])
+        t: dict[str, Any] = {
+            "id": f"tab_pdf{len(new)}",
+            "caption": cap,
+            "markdown": md,
+            "markdown_source": ("pdf_fallback_discover"
+                                if info.get("region") == "pdf_fallback"
+                                else "pdf_tablefill_discover"),
+            "pdf_span": info.get("span"),
+        }
+        if info.get("footnote"):
+            t["footnote"] = info["footnote"]
+            t["footnote_source"] = "pdf_tablefill"
+        new.append(t)
+        seen_caps.add(ckey)
+        if num:
+            seen.add(num)
+        st["added"] += 1
+        st["items"].append({"caption": cap[:110], "page": cand["page"],
+                            "number": num, "status": "added", "owner": who,
+                            "nrows": info.get("nrows"), "ncols": info.get("ncols")})
+    st["found_numbers"] = sorted(n for n in seen if n)
+    st["missing_vs_body"] = sorted(
+        n for n in st["mentioned"] if n not in have and n not in seen)
+    return new, st
+
+
+def _boundary_map(doc: dict, pdf_path):
+    """boundary.BoundaryMap 을 얻는다. 실패하면 None(=discovery 를 끈다)."""
+    try:
+        from . import boundary
+    except Exception:                     # noqa: BLE001
+        return None
+    meta = doc.get("meta") or {}
+    probe = _body_text(doc)
+    try:
+        return boundary.analyze(pdf_path,
+                                {"doi": doc.get("paper_id"),
+                                 "title": meta.get("title") or ""},
+                                body_probe=probe)
+    except Exception:                     # noqa: BLE001 — 판정기가 없으면 discovery 를 안 켠다
+        return None
 
 
 # ── 수리 판정: 새 추출이 기존 markdown 을 **확실히** 이길 때만 바꾼다 ──
@@ -1301,24 +1686,49 @@ def better_reason(old_md: str, new_md: str, info: dict) -> str | None:
     chk_old = check_markdown(old_md)
     if chk_new["ndata"] < chk_old["ndata"]:
         return "fewer_rows"
+    # 전치 방어. 눕혀 조판된 표(landscape)에서 영역을 잘못 잡으면 행과 열이
+    # 뒤바뀐 표가 나온다 — 값은 다 있으니 '수 포함' 검사를 통과해 버린다.
+    # 실측: 10.1111/jdv.15936 Table 2 는 PDF(4쪽, 90° 회전 조판)에서 질환 29개가
+    # **행**인데 추출본은 8행 × 31열로 질환이 열이 됐다(렌더링으로 확인).
+    # 임상 표가 행보다 열이 3배 많은 일은 사실상 없다. 기존 표가 이미 그
+    # 모양이면(고칠 것이 없으므로) 따지지 않는다.
+    if chk_new["ndata"] and chk_new["ncols"] >= 3 * chk_new["ndata"] \
+            and not (chk_old["ndata"] and chk_old["ncols"] >= 3 * chk_old["ndata"]):
+        return "looks_transposed"
     old_n, new_n = _num_counts(old_md), _num_counts(new_md)
     missing = [k for k, v in old_n.items() if new_n.get(k, 0) < v]
     if missing:
         return "loses_numbers:" + ",".join(sorted(missing)[:6])
+    # 기호 되돌림 방어. textfix 가 이미 고쳐 놓은 자리를 재추출이 되돌리면
+    # 안 된다 — 실측: 10.1016/j.jaad.2020.10.061 Table I 의 '42.3 ± 15.3' 이
+    # 재추출로 '42.3 6 15.3' 이 됐다(JAAD 조판은 ± 를 '6' 슬롯에 넣는다).
+    # '6' 은 숫자로 읽히므로 임상 표에서 특히 해롭다. textfix 의 게이트는
+    # 이미 수리된 문서에서 서명이 지워져 열리지 않으므로, 여기서 막는다.
+    lost = [c for c in _REPAIRED_SYMBOLS if new_md.count(c) < old_md.count(c)]
+    if lost:
+        return "loses_symbols:" + "".join(lost)
     return None
+
+
+# textfix 가 복원해 둔 기호들. 재추출본에서 줄어들면 인코딩이 되돌아간 것이다.
+_REPAIRED_SYMBOLS = "±≥≤×·−°⁺"
 
 
 # ── 문서 단위 ───────────────────────────────────────────────────────
 def fill_document(doc: dict, pdf_path, *, repair: bool = True,
-                  drop_fake: bool = True) -> tuple[dict, dict]:
+                  drop_fake: bool = True, discover: bool = True
+                  ) -> tuple[dict, dict]:
     """정본 문서의 표를 PDF 로 채우고·고치고·걸러 낸다. (수정된 doc, 통계).
 
-    입력 doc 은 건드리지 않는다(깊은 복사본을 돌려준다). 세 갈래로 나뉜다.
-      1. **관문** — 표가 아닌 것(참고문헌 목록·약어 상자·지면 장식·본문 문단)을
-         `tables[]` 에서 뺀다. 캡션이 'Table N' 이면 절대 빼지 않는다.
-      2. **채움** — markdown 이 빈 표를 PDF 좌표로 복원한다(기존 동작).
-      3. **수리** — markdown 이 있으나 구조 검사에 걸린 표를, 새 추출이
+    입력 doc 은 건드리지 않는다(깊은 복사본을 돌려준다). 네 갈래로 나뉜다.
+      1. **관문** — 표가 아닌 것(참고문헌 목록·약어 상자·지면 장식·본문 문단·
+         그림)을 `tables[]` 에서 뺀다. 캡션이 'Table N' 이거나 PDF 안의 진짜
+         표 캡션에 그 문구가 들어 있으면 **절대** 빼지 않는다.
+      2. **채움** — markdown 이 빈 표를 PDF 좌표로 복원한다.
+      3. **수리** — markdown 이 있는 표를 전부 재추출해 보고, 새 추출이
          `better_reason() is None` 일 때만 갈아 끼운다. 아니면 그대로 둔다.
+      4. **발굴** — GROBID 가 아예 못 찾은 표를 PDF 에서 새로 만든다
+         (`discover_tables`). 소속을 확인할 수 없으면 하나도 만들지 않는다.
     복원에 성공한 표에는 각주(`footnote`)와 지면 좌표(`pdf_span`)도 담는다.
     """
     import copy
@@ -1333,25 +1743,49 @@ def fill_document(doc: dict, pdf_path, *, repair: bool = True,
         "tables_total": len(tables),
         "empty": 0, "filled": 0, "failed": 0,
         "broken": 0, "repaired": 0, "repair_declined": 0,
-        "dropped": 0, "footnotes": 0,
+        "dropped": 0, "footnotes": 0, "discovered": 0,
         "reasons": {}, "declined": {}, "items": [],
     }
-    if not tables:
-        return out, stats
 
     def bump(d: str, k: str) -> None:
         stats[d][k] = stats[d].get(k, 0) + 1
 
+    # PDF 텍스트층에서 새로 뽑은 문자열은 **본문과 같은 인코딩 수리**를 거쳐야
+    # 한다. 안 그러면 이미 고쳐져 있던 자리가 되돌아간다 — 실측:
+    # 10.1016/j.jaad.2020.10.061 Table I 의 'Age (y) 42.3 ± 15.3' 이 재추출로
+    # '42.3 6 15.3' 이 됐다(JAAD 조판은 ± 를 '6' 슬롯에 넣는다). '6' 은 숫자로
+    # 읽히므로 임상 표에서는 특히 해롭다. 정책을 두 벌 만들지 않으려고
+    # textfix 의 판정을 그대로 빌려 쓴다(멱등이라 뒤에서 또 돌아도 무해하다).
+    # 게이트는 **원문 doc 이 아니라 새로 뽑은 문자열**로 열어야 한다. doc 은
+    # 이미 textfix 를 거쳐 서명이 지워져 있어(그래서 표에 '±' 가 남아 있다)
+    # doc 으로 판정하면 게이트가 늘 닫힌다 — 실측: 10.1016/j.jaad.2020.10.061 은
+    # 본문·표가 이미 수리돼 encoding_profile(doc) 이 비었고, 그 결과 재추출한
+    # '42.3 6 15.3' 이 그대로 남았다. 그래서 재추출 결과로 프로파일을 만든다.
+    enc_probe: list[str] = []
     pdoc = fitz.open(str(pdf_path))
     try:
         pages = [_Page(p) for p in pdoc]
-        return _fill_with_pages(out, tables, pages, stats, bump,
-                                repair=repair, drop_fake=drop_fake)
+        return _fill_with_pages(out, doc, tables, pages, stats, bump,
+                                repair=repair, drop_fake=drop_fake,
+                                discover=discover, pdf_path=pdf_path)
     finally:
         pdoc.close()
 
 
-def _fill_with_pages(out, tables, pages, stats, bump, *, repair, drop_fake):
+def _encoder(src_doc: dict, probe: list[str]):
+    """textfix 의 인코딩 수리를 이 문서에 맞게 켜고 끈 함수를 만든다."""
+    try:
+        from . import textfix
+    except Exception:                           # noqa: BLE001 — 수리가 없어도 복원은 돈다
+        return (lambda s: s), False
+    pseudo = {"tables": [{"caption": "", "markdown": t} for t in probe]}
+    typeset = bool(textfix.encoding_profile(src_doc)
+                   or textfix.encoding_profile(pseudo))
+    return (lambda s: textfix.fix_encoding(s, typeset=typeset) if s else s), typeset
+
+
+def _fill_with_pages(out, src_doc, tables, pages, stats, bump, *,
+                     repair, drop_fake, discover=False, pdf_path=None):
     # ── 1. 관문 ─────────────────────────────────────────────────────
     kept: list[dict] = []
     for t in tables:
@@ -1387,15 +1821,25 @@ def _fill_with_pages(out, tables, pages, stats, bump, *, repair, drop_fake):
         if not check_markdown(md)["ok"]:
             stats["broken"] += 1
         todo.append((t, "repair" if repair else "note"))
-    if not todo:
+    if not todo and not discover:
         return out, stats
 
-    for t, job in todo:
+    # 1차: 원문 그대로 뽑아 둔다(인코딩 게이트를 이 결과로 판정하기 위해).
+    raw: list[tuple[str, dict]] = []
+    for t, _job in todo:
         caption = (t.get("caption") or "").strip()
         try:
-            md, info = extract_table(pages, caption)
+            raw.append(extract_table(pages, caption))
         except Exception as e:                  # noqa: BLE001 — 표 하나 실패로 문서를 버리지 않는다
-            md, info = "", {"reason": f"error:{type(e).__name__}"}
+            raw.append(("", {"reason": f"error:{type(e).__name__}"}))
+    enc, typeset = _encoder(src_doc, [m for m, _ in raw if m])
+    stats["encoding_typeset"] = typeset
+
+    for (t, job), (md, info) in zip(todo, raw):
+        caption = (t.get("caption") or "").strip()
+        md = enc(md)
+        if info.get("footnote"):
+            info["footnote"] = enc(info["footnote"])
         item = {"id": t.get("id"), "job": job, "caption": caption[:120]}
         item.update({k: v for k, v in info.items()
                      if k not in ("span",) and v not in (None, 0, False)})
@@ -1433,6 +1877,15 @@ def _fill_with_pages(out, tables, pages, stats, bump, *, repair, drop_fake):
                 item["status"] = "declined"
                 item["declined"] = why[:120]
         stats["items"].append(item)
+
+    # ── 4. 발굴 — GROBID 가 아예 못 찾은 표를 PDF 에서 새로 만든다 ──
+    if discover:
+        bmap = _boundary_map(src_doc, pdf_path)
+        found, dst = discover_tables(out, pages, bmap, src_doc, pdf_path)
+        stats["discover"] = dst
+        stats["discovered"] = len(found)
+        if found:
+            out["tables"] = list(tables) + found
     return out, stats
 
 
@@ -1486,7 +1939,9 @@ def run(config: dict | None = None, *, dry_run: bool = True) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict] = []
-    n_empty = n_filled = n_failed = n_nopdf = n_docs = n_wrote = 0
+    n_nopdf = n_docs = n_wrote = 0
+    tot = {"empty": 0, "filled": 0, "failed": 0, "broken": 0, "repaired": 0,
+           "repair_declined": 0, "dropped": 0, "footnotes": 0, "discovered": 0}
     reasons: dict[str, int] = {}
     for i, src in enumerate(files, 1):
         try:
@@ -1494,20 +1949,18 @@ def run(config: dict | None = None, *, dry_run: bool = True) -> None:
         except Exception as e:                  # noqa: BLE001 — 파일 단위 격리
             log(f"  [{i}/{len(files)}] 읽기 실패({src.name}): {type(e).__name__}: {e}")
             continue
-        targets = [t for t in (doc.get("tables") or [])
-                   if not ((t or {}).get("markdown") or "").strip()]
-        if not targets:
-            continue
+        # **빈 표가 있는 문서만 보면 안 된다.** 관문·수리·발굴은 표가 채워져
+        # 있는 문서에서도 할 일이 있다(가짜 표 지우기, 열 밀림 수리, GROBID 가
+        # 통째로 놓친 표 발굴). 예전에는 여기서 걸러 내 그 셋이 아예 돌지 않았다.
         n_docs += 1
-        n_empty += len(targets)
+        tot["empty"] += sum(1 for t in (doc.get("tables") or [])
+                            if not ((t or {}).get("markdown") or "").strip())
         pdf = _find_pdf(doc, pdf_dirs)
         if not pdf:
             n_nopdf += 1
-            n_failed += len(targets)
-            reasons["pdf_not_found"] = reasons.get("pdf_not_found", 0) + len(targets)
-            rows.append({"paper_id": doc.get("paper_id"), "empty": len(targets),
-                         "filled": 0, "failed": len(targets),
-                         "reasons": {"pdf_not_found": len(targets)}})
+            reasons["pdf_not_found"] = reasons.get("pdf_not_found", 0) + 1
+            rows.append({"paper_id": doc.get("paper_id"),
+                         "reasons": {"pdf_not_found": 1}})
             log(f"  [{i}/{len(files)}] PDF 없음: {doc.get('paper_id')}")
             continue
         try:
@@ -1517,19 +1970,27 @@ def run(config: dict | None = None, *, dry_run: bool = True) -> None:
             log(f"  [{i}/{len(files)}] 실패(계속): {doc.get('paper_id')} — "
                 f"{type(e).__name__}: {e}")
             continue
-        n_filled += st["filled"]
-        n_failed += st["failed"]
+        for k in tot:
+            if k != "empty":
+                tot[k] += st.get(k, 0)
         for k, v in st["reasons"].items():
             reasons[k] = reasons.get(k, 0) + v
         rows.append(st)
-        log(f"  [{i}/{len(files)}] {doc.get('paper_id')}: "
-            f"빈 표 {st['empty']} → 복원 {st['filled']} / 실패 {st['failed']}")
-        if not dry_run and st["filled"]:
+        changed = (st["filled"] or st["repaired"] or st["dropped"]
+                   or st["discovered"] or st["footnotes"])
+        if changed:
+            log(f"  [{i}/{len(files)}] {doc.get('paper_id')}: "
+                f"채움 {st['filled']} · 수리 {st['repaired']} · 삭제 {st['dropped']}"
+                f" · 발굴 {st['discovered']} · 각주 {st['footnotes']}")
+        if not dry_run and changed:
             utils.write_json(out_dir / src.name, fixed)
             n_wrote += 1
 
-    log(f"[표복원] 대상 {n_docs}편 · 빈 표 {n_empty}개 → "
-        f"복원 {n_filled} / 실패 {n_failed}"
+    log(f"[표복원] 문서 {n_docs}편 · 빈 표 {tot['empty']}개 → "
+        f"채움 {tot['filled']} / 실패 {tot['failed']} · "
+        f"수리 {tot['repaired']}(보류 {tot['repair_declined']}) · "
+        f"가짜 삭제 {tot['dropped']} · 발굴 {tot['discovered']} · "
+        f"각주 {tot['footnotes']}"
         + (f" · PDF 없음 {n_nopdf}편" if n_nopdf else ""))
     if reasons:
         log("        실패 사유: "

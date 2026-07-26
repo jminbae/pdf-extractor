@@ -1204,7 +1204,7 @@ def _reconstruct(lines: list[dict], body: float, title: str = "") -> list[Sectio
     flush()
     if cur.paragraphs:
         body_text.append(cur)
-    return sections
+    return body_text
 
 
 # ── 본문 회수(안전망) ────────────────────────────────────────────────
@@ -1321,20 +1321,31 @@ def _parse_open_doc(doc, path: Path, meta: dict) -> Document:
     )
     api_abstract = meta.get("abstract_pubmed") or meta.get("abstract") or ""
     if api_abstract:                 # 초록이 본문으로 한 번 더 들어오는 중복 제거
-        body_text = _drop_abstract_echo(sections, api_abstract)
-    return Document(
+        body_text = _drop_abstract_echo(body_text, api_abstract)
+    out = Document(
         paper_id=meta.get("doi") or meta.get("pmid") or "unknown",
         source="pdf_fallback", source_file=str(path), meta=m,
         abstract=api_abstract, abstract_source="api" if api_abstract else "none",
-        body_text=sections, figures=figures, tables=tables, references=[],
+        body_text=body_text, figures=figures, tables=tables, references=[],
     )
+    # 이웃 논문 혼입 제거 — 한 PDF 지면에 여러 편이 실린 경우(research letter).
+    # 경계를 확신할 수 없으면 boundary 가 아무것도 건드리지 않는다.
+    try:
+        from . import boundary
+        rep = boundary.apply_to_parsed(out, path, meta)
+        if rep.get("confident") or rep.get("identity_conflict"):
+            out.qc = dict(out.qc or {})
+            out.qc["boundary"] = rep
+    except Exception as e:                       # 안전망은 절대 파이프라인을 죽이지 않는다
+        utils.log(f"  경계 판정 생략({path.name}): {type(e).__name__}: {e}")
+    return out
 
 
 def _drop_abstract_echo(body_text: list[Section], abstract: str) -> list[Section]:
     """API 초록과 사실상 같은 본문 문단을 뺀다(초록은 abstract 필드에 이미 있다)."""
     ref = _shingles(abstract)
     if not ref:
-        return sections
+        return body_text
     out = []
     for sec in body_text:
         keep = [p for p in sec.paragraphs if _coverage(p.text, ref) < 0.8]
