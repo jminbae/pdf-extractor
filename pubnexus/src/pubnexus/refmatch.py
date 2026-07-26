@@ -156,7 +156,7 @@ def reresolve_cited(doc: dict) -> None:
     표시번호는 본문에 이미 [15] 로 박혀 있으므로 정보가 사라지지도 않는다.
     """
     keymap = {r["key"]: (r.get("doi") or r["key"]) for r in doc.get("references", [])}
-    for s in doc["sections"]:
+    for s in doc["body_text"]:
         for p in s["paragraphs"]:
             if p.get("cited_keys"):
                 p["cited_refs"] = [keymap[k] for k in p["cited_keys"] if k in keymap]

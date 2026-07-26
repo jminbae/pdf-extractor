@@ -107,7 +107,7 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
 
     last_path = []
     first_para = True
-    for sec in doc.get("sections", []):
+    for sec in doc.get("body_text", []):
         path = list(sec.get("path", []))
         paras = sec.get("paragraphs", [])
 

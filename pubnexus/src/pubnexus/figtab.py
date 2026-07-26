@@ -545,7 +545,7 @@ def document_vocabulary(doc: dict) -> frozenset[str]:
     """문서가 실제로 쓰는 낱말 집합(제목·초록·본문·표·그림·참고문헌 제목)."""
     parts: list[str] = [(doc.get("meta") or {}).get("title") or "",
                         doc.get("abstract") or ""]
-    for sec in doc.get("sections") or []:
+    for sec in doc.get("body_text") or []:
         parts.append(" ".join(x for x in (sec.get("path") or []) if x))
         for p in sec.get("paragraphs") or []:
             parts.append(p.get("text") or "")

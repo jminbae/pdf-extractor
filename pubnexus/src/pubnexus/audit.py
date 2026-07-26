@@ -36,7 +36,7 @@ def _is_letter(doc: dict, mrec: dict, meta: dict) -> bool:
 
 
 def audit_doc(doc: dict, mrec: dict, meta: dict) -> dict:
-    paras = [p for s in doc["sections"] for p in s["paragraphs"]]
+    paras = [p for s in doc["body_text"] for p in s["paragraphs"]]
     body = " ".join(p["text"] for p in paras)
     nchars = len(body)
     flags: list[str] = []
@@ -52,10 +52,10 @@ def audit_doc(doc: dict, mrec: dict, meta: dict) -> dict:
         flags.append("under_extracted")
 
     # 2) 섹션/문단
-    sig["n_sections"] = len(doc["sections"])
+    sig["n_sections"] = len(doc["body_text"])
     sig["n_paragraphs"] = len(paras)
     # Letter/편지류는 섹션·짧은 본문이 정상 → 제외
-    if not is_letter and pages >= 3 and len(doc["sections"]) <= 1:
+    if not is_letter and pages >= 3 and len(doc["body_text"]) <= 1:
         flags.append("no_sections")
     if not is_letter and pages >= 4 and nchars < 1500:
         flags.append("too_little_body")
@@ -89,7 +89,7 @@ def audit_doc(doc: dict, mrec: dict, meta: dict) -> dict:
     # 7) 이상 헤딩(숫자만/한 글자/문단이 통째로 헤딩된 과길이 >150)
     #    긴 소제목은 정상이므로 임계를 크게 잡음
     bad = 0
-    for s in doc["sections"]:
+    for s in doc["body_text"]:
         h = s["path"][-1] if s["path"] else ""
         if h and (re.fullmatch(r'[\d\s.|)]+', h) or len(h) == 1 or len(h) > 150):
             bad += 1

@@ -1164,7 +1164,7 @@ def _reconstruct(lines: list[dict], body: float, title: str = "") -> list[Sectio
     """헤딩·문단 재구성. front matter 제거, body 시작 이후만."""
     lines = lines[_body_start(lines, body, title):]
 
-    sections: list[Section] = []
+    body_text: list[Section] = []
     cur = Section(path=["Body"], section_type="other")
     pcount = [0]
     para: list[dict] = []
@@ -1185,7 +1185,7 @@ def _reconstruct(lines: list[dict], body: float, title: str = "") -> list[Sectio
         if _is_heading(ln, body):
             flush()
             if cur.paragraphs:
-                sections.append(cur)
+                body_text.append(cur)
             # 논문 제목 파라미터(title)를 덮어쓰지 않는다 — 지금은 _body_start 가
             # 먼저 끝나 결과가 같지만, 순서를 바꾸는 순간 조용히 깨지는 자리다.
             head = clean_heading(ln["text"])    # 자간 아티팩트 복원(textfix)
@@ -1203,7 +1203,7 @@ def _reconstruct(lines: list[dict], body: float, title: str = "") -> list[Sectio
 
     flush()
     if cur.paragraphs:
-        sections.append(cur)
+        body_text.append(cur)
     return sections
 
 
@@ -1215,8 +1215,8 @@ SHINGLE_N = 6
 def document_prose(doc: dict | Document) -> str:
     """정본(dict 또는 Document)의 본문 산문을 한 덩어리 문자열로."""
     if isinstance(doc, Document):
-        return " ".join(p.text for s in doc.sections for p in s.paragraphs)
-    return " ".join(p.get("text", "") for s in (doc.get("sections") or [])
+        return " ".join(p.text for s in doc.body_text for p in s.paragraphs)
+    return " ".join(p.get("text", "") for s in (doc.get("body_text") or [])
                     for p in (s.get("paragraphs") or []))
 
 
@@ -1277,11 +1277,11 @@ def missing_prose(pdf_path: str | Path, canonical_text: str, *,
     with fitz.open(str(pdf_path)) as doc:
         body, lines, flow = _prepare(doc)
         _figures_tables(doc, lines, body)      # 캡션·표 본문 구간도 skip 표시
-        sections = _reconstruct([l for l in flow if not l["skip"]], body, title)
+        body_text = _reconstruct([l for l in flow if not l["skip"]], body, title)
 
     ref = _shingles(canonical_text)
     out: list[dict] = []
-    for sec in sections:
+    for sec in body_text:
         for p in sec.paragraphs:
             t = p.text.strip()
             nw = len(t.split())
@@ -1308,7 +1308,7 @@ def parse_pdf(path: Path, meta: dict) -> Document:
 def _parse_open_doc(doc, path: Path, meta: dict) -> Document:
     body, lines, flow = _prepare(doc)
     figures, tables = _figures_tables(doc, lines, body)   # 캡션·표 본문 skip 표시
-    sections = _reconstruct([l for l in flow if not l["skip"]], body,
+    body_text = _reconstruct([l for l in flow if not l["skip"]], body,
                             meta.get("title", ""))
 
     m = Meta(
@@ -1321,22 +1321,22 @@ def _parse_open_doc(doc, path: Path, meta: dict) -> Document:
     )
     api_abstract = meta.get("abstract_pubmed") or meta.get("abstract") or ""
     if api_abstract:                 # 초록이 본문으로 한 번 더 들어오는 중복 제거
-        sections = _drop_abstract_echo(sections, api_abstract)
+        body_text = _drop_abstract_echo(sections, api_abstract)
     return Document(
         paper_id=meta.get("doi") or meta.get("pmid") or "unknown",
         source="pdf_fallback", source_file=str(path), meta=m,
         abstract=api_abstract, abstract_source="api" if api_abstract else "none",
-        sections=sections, figures=figures, tables=tables, references=[],
+        body_text=sections, figures=figures, tables=tables, references=[],
     )
 
 
-def _drop_abstract_echo(sections: list[Section], abstract: str) -> list[Section]:
+def _drop_abstract_echo(body_text: list[Section], abstract: str) -> list[Section]:
     """API 초록과 사실상 같은 본문 문단을 뺀다(초록은 abstract 필드에 이미 있다)."""
     ref = _shingles(abstract)
     if not ref:
         return sections
     out = []
-    for sec in sections:
+    for sec in body_text:
         keep = [p for p in sec.paragraphs if _coverage(p.text, ref) < 0.8]
         if keep:
             sec.paragraphs = keep
@@ -1371,9 +1371,9 @@ def run(config: dict | None = None) -> list[Document]:
             doc = parse_pdf(Path(r["file"]), metas.get(r["doi"], {"doi": r["doi"]}))
             dest = norm_dir / f"{utils.slug(doc.paper_id)}.json"
             utils.write_json(dest, doc.to_dict())
-            npar = sum(len(s.paragraphs) for s in doc.sections)
-            ncite = sum(len(p.cited_keys) for s in doc.sections for p in s.paragraphs)
-            log(f"  [{i}/{len(targets)}] {r['doi']}: 섹션 {len(doc.sections)} · "
+            npar = sum(len(s.paragraphs) for s in doc.body_text)
+            ncite = sum(len(p.cited_keys) for s in doc.body_text for p in s.paragraphs)
+            log(f"  [{i}/{len(targets)}] {r['doi']}: 섹션 {len(doc.body_text)} · "
                 f"문단 {npar} · 그림 {len(doc.figures)} · 표 {len(doc.tables)} · "
                 f"인용마커 {ncite} (참조링크 없음)")
             docs.append(doc)

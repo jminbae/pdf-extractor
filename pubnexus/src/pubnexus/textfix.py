@@ -577,7 +577,7 @@ def encoding_profile(doc: dict) -> frozenset[str]:
 def _iter_doc_text(doc: dict):
     """수리 대상 문자열을 흘려보낸다(초록·제목·문단·캡션·표 본문)."""
     yield doc.get("abstract") or ""
-    for sec in doc.get("sections") or []:
+    for sec in doc.get("body_text") or []:
         for p in sec.get("path") or []:
             yield p or ""
         for para in sec.get("paragraphs") or []:
@@ -726,7 +726,7 @@ def repair_encoding(doc: dict) -> tuple[int, list[str]]:
         return out
 
     doc["abstract"] = fix(doc.get("abstract") or "")
-    for sec in doc.get("sections") or []:
+    for sec in doc.get("body_text") or []:
         if sec.get("path"):
             sec["path"] = [fix(p or "") for p in sec["path"]]
         for para in sec.get("paragraphs") or []:
@@ -849,14 +849,14 @@ def repair_sections(doc: dict, carry_forward: bool = True) -> dict:
     methods 나 results 가 있을 때만 이어받는다.
     """
     direct = {_classify_path([clean_heading(p) for p in (s.get("path") or [])])
-              for s in doc.get("sections") or []}
+              for s in doc.get("body_text") or []}
     direct.discard("other")
     direct.discard("back")
     if not ({"methods", "results"} & direct and len(direct) >= 2):
         carry_forward = False
 
     prev_type = "other"
-    for sec in doc.get("sections") or []:
+    for sec in doc.get("body_text") or []:
         path = [clean_heading(p) for p in (sec.get("path") or [])]
         sec["path"] = path
         st = _classify_path(path)
@@ -961,10 +961,10 @@ def fix_document(doc: dict, carry_forward: bool = True) -> tuple[dict, dict]:
     # 2) 섹션 제목 수리 + 재분류
     #    path 안에 None 이 섞여 들어와도(파서 사고) 감사 로그 조립에서 죽지 않게 한다.
     before_titles = [[str(p) if p else "" for p in (s.get("path") or [])]
-                     for s in (doc.get("sections") or [])]
-    before_types = [s.get("section_type", "other") for s in (doc.get("sections") or [])]
+                     for s in (doc.get("body_text") or [])]
+    before_types = [s.get("section_type", "other") for s in (doc.get("body_text") or [])]
     repair_sections(doc, carry_forward=carry_forward)
-    for i, sec in enumerate(doc.get("sections") or []):
+    for i, sec in enumerate(doc.get("body_text") or []):
         if list(sec.get("path") or []) != before_titles[i]:
             st["headings_fixed"] += 1
             if len(st["heading_samples"]) < 10:
@@ -978,7 +978,7 @@ def fix_document(doc: dict, carry_forward: bool = True) -> tuple[dict, dict]:
 
     # 3) 문단 수리 — 잡음 제거 → 캡션 분리 → 중복/빈 문단 제거
     seen: set[str] = set()
-    for sec in doc.get("sections") or []:
+    for sec in doc.get("body_text") or []:
         kept = []
         for para in sec.get("paragraphs") or []:
             raw = para.get("text") or ""
@@ -1006,9 +1006,9 @@ def fix_document(doc: dict, carry_forward: bool = True) -> tuple[dict, dict]:
             para["text"] = text
             kept.append(para)
         sec["paragraphs"] = kept
-    before_secs = len(doc.get("sections") or [])
-    doc["sections"] = [s for s in (doc.get("sections") or []) if s.get("paragraphs")]
-    st["sections_dropped"] = before_secs - len(doc["sections"])
+    before_secs = len(doc.get("body_text") or [])
+    doc["body_text"] = [s for s in (doc.get("body_text") or []) if s.get("paragraphs")]
+    st["sections_dropped"] = before_secs - len(doc["body_text"])
 
     # 4) 그림·표 캡션 정리, 빈 표 제거
     for fig in doc.get("figures") or []:

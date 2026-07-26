@@ -502,7 +502,7 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
 
     figures: list[Figure] = []
     tables: list[Table] = []
-    sections: list[Section] = []
+    body_text: list[Section] = []
     pcount = [0]
 
     body = root.find(".//{*}text/{*}body")
@@ -533,7 +533,7 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
                     cited_keys=info["cited_keys"],
                     refs_figure=info["fig_ids"], refs_table=info["table_ids"]))
             if sec.paragraphs:
-                sections.append(sec)
+                body_text.append(sec)
 
         # figure / table (GROBID 는 body 하위에 <figure> 로 둠)
         for fig in body.iter("{*}figure"):
@@ -566,7 +566,7 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
         # (실측 5건) 렌더러·청커가 깨진 참조를 그대로 물고 간다.
         fig_ids = {f.id for f in figures}
         tab_ids = {t.id for t in tables}
-        for sec in sections:
+        for sec in body_text:
             for p in sec.paragraphs:
                 p.refs_figure = [x for x in p.refs_figure if x in fig_ids]
                 p.refs_table = [x for x in p.refs_table if x in tab_ids]
@@ -608,7 +608,7 @@ def parse_tei(tei_bytes: bytes, meta: dict, source_file: str = "") -> Document:
         paper_id=meta.get("doi") or meta.get("pmid") or "unknown",
         source="grobid", source_file=source_file, meta=m,
         abstract=abstract, abstract_source=abstract_source,
-        sections=sections, figures=figures, tables=tables,
+        body_text=sections, figures=figures, tables=tables,
         references=list(refs.values()),
     )
 
@@ -628,7 +628,7 @@ def _drop_empty_stale(norm_dir: Path, doi: str) -> None:
         d = utils.read_json(dest)
         if d.get("source") != "grobid":
             return
-        if any(p.get("text") for s in d.get("sections", [])
+        if any(p.get("text") for s in d.get("body_text", [])
                for p in s.get("paragraphs", [])):
             return
         dest.unlink()
@@ -678,9 +678,9 @@ def run(config: dict | None = None) -> list[Document]:
             doc = parse_tei(tei, metas.get(doi, {"doi": doi}), source_file=str(pdf))
             dest = norm_dir / f"{utils.slug(doc.paper_id)}.json"
             utils.write_json(dest, doc.to_dict())
-            npar = sum(len(s.paragraphs) for s in doc.sections)
-            ncite = sum(len(p.cited_refs) for s in doc.sections for p in s.paragraphs)
-            log(f"  [{i}/{len(targets)}] {doi}: 섹션 {len(doc.sections)} · 문단 {npar} · "
+            npar = sum(len(s.paragraphs) for s in doc.body_text)
+            ncite = sum(len(p.cited_refs) for s in doc.body_text for p in s.paragraphs)
+            log(f"  [{i}/{len(targets)}] {doi}: 섹션 {len(doc.body_text)} · 문단 {npar} · "
                 f"인용링크 {ncite} · 표 {len(doc.tables)} · 참고문헌 {len(doc.references)}")
             docs.append(doc)
         except Exception as e:  # noqa: BLE001 — 파일 단위 격리

@@ -80,7 +80,7 @@ def is_extracted(pdf_path: str | Path, out_json: str | Path | None = None) -> bo
     except Exception:  # noqa: BLE001 — 읽기/파싱 실패 = 미처리로 간주
         return False
     return isinstance(doc, dict) and bool(
-        doc.get("schema_version") or doc.get("sections") is not None)
+        doc.get("schema_version") or doc.get("body_text") is not None)
 
 
 def extract_one(pdf_path: str | Path, config: dict | None = None, *,
@@ -145,9 +145,9 @@ def extract_folder(folder: str | Path, config: dict | None = None, *,
                            on_progress=_forward(on_progress, i, total, pdf.name),
                            use_grobid=True)
             stats["done"] += 1
-            npar = sum(len(s.get("paragraphs") or []) for s in doc.get("sections") or [])
+            npar = sum(len(s.get("paragraphs") or []) for s in doc.get("body_text") or [])
             log(f"  [{i}/{total}] {doc.get('source')}: 섹션 "
-                f"{len(doc.get('sections') or [])} · 문단 {npar}  {pdf.name}")
+                f"{len(doc.get('body_text') or [])} · 문단 {npar}  {pdf.name}")
             _emit(on_progress, "file", i, total, pdf.name,
                   f"[{i}/{total}] 완료 {pdf.name}")
         except BaseException as e:  # noqa: BLE001 — 파일별 격리
@@ -529,7 +529,7 @@ def _doi_re(ident: dict):
 
 def _n_paragraphs(doc) -> int:
     try:
-        return sum(len(s.paragraphs) for s in doc.sections)
+        return sum(len(s.paragraphs) for s in doc.body_text)
     except Exception:  # noqa: BLE001
         return 0
 

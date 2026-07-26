@@ -22,9 +22,9 @@ _BROKEN_RE = re.compile(r'[�\x00-\x08\x0b\x0c\x0e-\x1f]')
 
 
 def score_doc(doc: dict, manifest_rec: dict, meta: dict) -> dict:
-    body_text = " ".join(p["text"] for s in doc["sections"] for p in s["paragraphs"])
-    n_sec = len(doc["sections"])
-    n_par = sum(len(s["paragraphs"]) for s in doc["sections"])
+    body_text = " ".join(p["text"] for s in doc["body_text"] for p in s["paragraphs"])
+    n_sec = len(doc["body_text"])
+    n_par = sum(len(s["paragraphs"]) for s in doc["body_text"])
     n_chars = len(body_text)
     source = doc.get("source", "")
     # 초록 대조는 '문서에서 실제 추출된 초록 vs API 초록'일 때만 유효.

@@ -74,7 +74,7 @@ def split_multi(values: list[str] | None) -> list[str]:
 
 def build_filters(args) -> dict:
     f: dict = {}
-    sections = split_multi(args.section)
+    body_text = split_multi(args.section)
     bad = [s for s in sections if s not in SECTION_TYPES]
     if bad:
         raise ValueError(f"모르는 섹션 타입: {', '.join(bad)} "

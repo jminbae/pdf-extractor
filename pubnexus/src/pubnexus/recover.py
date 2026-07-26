@@ -228,7 +228,7 @@ def find_truncated(doc: dict) -> list[tuple[int, int]]:
     이미 복원한 문단은 대문자로 시작하므로 자연히 재검출되지 않는다.
     """
     out: list[tuple[int, int]] = []
-    for si, sec in enumerate(doc.get("sections") or []):
+    for si, sec in enumerate(doc.get("body_text") or []):
         for pi, para in enumerate(sec.get("paragraphs") or []):
             t = (para.get("text") or "").strip()
             if not t or not _BAD_START.match(t) or _ALLOW_START.match(t):
@@ -762,7 +762,7 @@ def _seen_index(doc: dict) -> str:
     path 에 넣어버린 문서가 있다. 그 문장을 다시 본문에 되살리면 중복이 된다.
     """
     buf: list[str] = [doc.get("abstract") or ""]
-    for sec in doc.get("sections") or []:
+    for sec in doc.get("body_text") or []:
         buf.extend(sec.get("path") or [])
         for para in sec.get("paragraphs") or []:
             buf.append(para.get("text") or "")
@@ -778,7 +778,7 @@ def _seen_index(doc: dict) -> str:
 
 def _prev_text(doc: dict, si: int, pi: int) -> str | None:
     """직전 문단(같은 섹션 → 없으면 이전 섹션의 마지막 문단)."""
-    secs = doc.get("sections") or []
+    secs = doc.get("body_text") or []
     if pi > 0:
         return (secs[si]["paragraphs"][pi - 1].get("text") or "") or None
     for k in range(si - 1, -1, -1):
@@ -791,7 +791,7 @@ def _prev_text(doc: dict, si: int, pi: int) -> str | None:
 def _prev_candidates(doc: dict, si: int, pi: int,
                      limit: int = 4) -> list[tuple[int, int, dict]]:
     """뒤로 최대 limit 개의 선행 문단(문서 순서)."""
-    secs = doc.get("sections") or []
+    secs = doc.get("body_text") or []
     out: list[tuple[int, int, dict]] = []
     for j in range(pi - 1, -1, -1):
         out.append((si, j, secs[si]["paragraphs"][j]))
@@ -899,7 +899,7 @@ def recover_document(doc: dict, pdf_path: str | Path, max_chars: int = 600, *,
     letters, _omap = _letters_map(pdf_text)
     to_merge: list[tuple[int, int, dict]] = []
     for si, pi in targets:
-        para = out["sections"][si]["paragraphs"][pi]
+        para = out["body_text"][si]["paragraphs"][pi]
         ptext = para.get("text") or ""
         at = _locate(letters, _letters(ptext))
         anchor = _anchor_prev(letters, out, si, pi, at) if at >= 0 else None
@@ -946,7 +946,7 @@ def recover_document(doc: dict, pdf_path: str | Path, max_chars: int = 600, *,
     # 병합은 인덱스가 밀리므로 **뒤에서부터**. 대상 문단은 객체 참조로 잡아
     # 두었으므로(인덱스가 아니라) 연쇄 병합에도 안전하다. 섹션이 비면 섹션째 뺀다.
     for si, pi, target in sorted(to_merge, key=lambda x: (x[0], x[1]), reverse=True):
-        secs = out["sections"]
+        secs = out["body_text"]
         tail = secs[si]["paragraphs"][pi]
         _merge_paragraphs(target, tail)
         del secs[si]["paragraphs"][pi]

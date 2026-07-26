@@ -191,7 +191,7 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
     figures: list[Figure] = []
     tables: list[Table] = []
     pcount = [0]
-    sections: list[Section] = []
+    body_text: list[Section] = []
 
     body = root.find(".//{*}body")
     if body is not None:
@@ -212,7 +212,7 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
                         cited_keys=info["cited_keys"],
                         refs_figure=info["fig_ids"], refs_table=info["table_ids"]))
             if sec.paragraphs:
-                sections.append(sec)
+                body_text.append(sec)
 
     # 표/그림 단일 패스: body + floats-group + back 을 훑어 중복 없이 추출.
     # id 없는 것도 생성 id 부여(누락 방지). sub-article(동료심사 등)은 제외.
@@ -254,7 +254,7 @@ def parse(xml_bytes: bytes, meta: dict, source_file: str = "") -> Document:
         meta=m,
         abstract=abstract,
         abstract_source=abstract_source,
-        sections=sections,
+        body_text=sections,
         figures=figures,
         tables=tables,
         references=list(refs.values()),
@@ -302,9 +302,9 @@ def run(config: dict | None = None) -> list[Document]:
             doc = parse(xml, meta, source_file=src)
             dest = norm_dir / f"{utils.slug(doc.paper_id)}.json"
             utils.write_json(dest, doc.to_dict())
-            npar = sum(len(s.paragraphs) for s in doc.sections)
-            ncite = sum(len(p.cited_refs) for s in doc.sections for p in s.paragraphs)
-            log(f"  [{i}/{len(xml_metas)}] {pmcid}: 섹션 {len(doc.sections)} · "
+            npar = sum(len(s.paragraphs) for s in doc.body_text)
+            ncite = sum(len(p.cited_refs) for s in doc.body_text for p in s.paragraphs)
+            log(f"  [{i}/{len(xml_metas)}] {pmcid}: 섹션 {len(doc.body_text)} · "
                 f"문단 {npar} · 인용링크 {ncite} · 표 {len(doc.tables)} · "
                 f"그림 {len(doc.figures)} · 참고문헌 {len(doc.references)}")
             docs.append(doc)

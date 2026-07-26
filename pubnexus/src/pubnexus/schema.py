@@ -2,6 +2,13 @@
 
 JSON을 정본으로 두고 Markdown은 여기서 렌더링한다(설계서 5단계).
 Markdown -> 구조 복원은 불가능하므로 이 스키마가 단일 진실이다.
+
+최상위 키는 **역할**로 이름 짓는다:
+    abstract / body_text / figures / tables / references
+body_text 는 논문 본문이고, 그 안의 각 항목이 Section(절)이다.
+'sections' 라는 이름은 구조를 가리킬 뿐 그 필드가 무엇을 담는지 말해주지 않아
+S2ORC·CORD-19 와 같은 관례(body_text)를 따랐다 — 남이 이 JSON 을 받아 쓸 때
+바로 알아볼 수 있어야 한다.
 """
 from __future__ import annotations
 
@@ -82,7 +89,7 @@ class Document:
     meta: Meta = field(default_factory=Meta)
     abstract: str = ""
     abstract_source: str = "none"      # extracted | api | none — QC 순환검증 방지
-    sections: list[Section] = field(default_factory=list)
+    body_text: list[Section] = field(default_factory=list)
     figures: list[Figure] = field(default_factory=list)
     tables: list[Table] = field(default_factory=list)
     references: list[Reference] = field(default_factory=list)

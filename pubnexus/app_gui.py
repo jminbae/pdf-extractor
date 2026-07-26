@@ -449,12 +449,12 @@ class App(tk.Tk):
             self.var_meta.set(f"읽기 실패: {type(e).__name__}: {e}")
             return
         m = doc.get("meta", {})
-        n_par = sum(len(s.get("paragraphs") or []) for s in doc.get("sections", []))
+        n_par = sum(len(s.get("paragraphs") or []) for s in doc.get("body_text", []))
         body = sum(len(p.get("text") or "")
-                   for s in doc.get("sections", []) for p in s.get("paragraphs", []))
+                   for s in doc.get("body_text", []) for p in s.get("paragraphs", []))
         self.var_meta.set(
             f"{doc.get('paper_id')} · {m.get('journal') or '?'} {m.get('year') or ''} · "
-            f"섹션 {len(doc.get('sections', []))} · 문단 {n_par} · "
+            f"섹션 {len(doc.get('body_text', []))} · 문단 {n_par} · "
             f"그림 {len(doc.get('figures', []))} · 표 {len(doc.get('tables', []))} · "
             f"참고문헌 {len(doc.get('references', []))} · source {doc.get('source')}")
 

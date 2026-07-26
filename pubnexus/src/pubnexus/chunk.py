@@ -101,7 +101,7 @@ def _repair_doc(doc: dict) -> dict:
         return doc
     try:
         doc = dict(doc)
-        doc["sections"] = copy.deepcopy(doc.get("sections") or [])
+        doc["body_text"] = copy.deepcopy(doc.get("body_text") or [])
         return fn(doc) or doc
     except Exception as e:   # noqa: BLE001 — 수리 실패가 청킹을 멈추지 않도록 격리
         _warn_once("repair", f"      ! textfix.repair_sections 실패(원본 사용): "
@@ -327,7 +327,7 @@ def _prep_sections(doc: dict) -> list[dict]:
     out: list[dict] = []
     # .get(k, []) 가 아니라 `or []` 다 — 키가 있는데 값이 None 인 문서
     # (수작업 편집·부분 실패 산출물)에서 TypeError 로 한 편을 통째로 잃지 않도록.
-    for sec in (doc.get("sections") or []):
+    for sec in (doc.get("body_text") or []):
         path = [h for h in (_clean_heading(x) for x in (sec.get("path") or [])) if h]
         st = sec.get("section_type") or "other"
         if st == "other":
@@ -354,7 +354,7 @@ def _group_sections(sections: list[dict], respect_boundary: bool) -> list[dict]:
     if respect_boundary:
         return sections
     merged: list[dict] = []
-    for sec in sections:
+    for sec in body_text:
         if merged and merged[-1]["section_type"] == sec["section_type"]:
             merged[-1]["paragraphs"] = merged[-1]["paragraphs"] + sec["paragraphs"]
         else:
