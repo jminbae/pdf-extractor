@@ -153,25 +153,29 @@ for _f, _m in CHAR_MAP.items():
 
 
 # ── 글꼴 이름 정규화 ─────────────────────────────────────────────────
-# PDF 마다 서브셋 접두가 붙는다. 이 코퍼스에서 실제로 관측한 형태는 두 가지다.
-#   (a) 표준 6글자+플러스 : 'ABCDEF+AdvPi3'
+# PDF 마다 서브셋 접두가 붙는다. 이 코퍼스에서 실제로 관측한 형태는 세 가지다.
+#   (a) 표준 서브셋 접두 : 'ABCDEF+AdvPi3' — PDF 규격상 **대문자 정확히 6글자 + '+'**
 #   (b) Elsevier 무작위 접두(플러스 없음) : 'WmprvxAdvPi3',
 #       'GkkjkjNrnrxtAdvPi3'(접두가 **두 번** 붙기도 한다)
-# 그래서 '앞 6글자를 자른다' 같은 규칙은 쓰면 안 된다 — 실제로 그렇게 했다가
+#   (c) '+' 가 **접미**로 붙는 이름 : 'AdvOT3c2d9f11+20', 'AdvTTec369687+22'
+#       (Elsevier 인코딩 변종 번호). 여기서 '+' 앞을 버리면 이름이 '20' 이 된다.
+# 그래서 '+' 를 무조건 자르면 안 되고 (a) 의 형태일 때만 잘라야 한다.
+# 마찬가지로 '앞 6글자를 자른다' 같은 규칙도 쓰면 안 된다 — 실제로 그렇게 했다가
 # 'Symbol'→'' , 'SymbolMT'→'MT' , 'Wingdings3'→'ngs3' 로 이름이 부서졌다.
 # 아는 이름으로 **끝나는지**만 본다. 접두 길이에 의존하지 않는다.
 _MAPPED = tuple(sorted(CHAR_MAP, key=len, reverse=True))   # 긴 이름 우선
+_SUBSET = re.compile(r"^[A-Z]{6}\+")
 
 
 def normalize_font(name: str | None) -> str:
     """'ABCDEF+AdvPi3' · 'WmprvxAdvPi3' · 'GkkjkjNrnrxtAdvPi3' → 'AdvPi3'.
 
+    'AdvOT3c2d9f11+20' 처럼 '+' 가 접미인 이름은 그대로 둔다.
     표에 있는 글꼴로 해석되지 않으면 (접두만 떼고) 원래 이름을 돌려준다.
     """
     if not name:
         return ""
-    if "+" in name:
-        name = name.split("+", 1)[1]
+    name = _SUBSET.sub("", name, count=1)
     for k in _MAPPED:
         if name == k or name.endswith(k):
             return k

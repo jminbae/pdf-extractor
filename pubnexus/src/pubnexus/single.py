@@ -116,13 +116,18 @@ def extract_one(pdf_path: str | Path, config: dict | None = None, *,
 def extract_folder(folder: str | Path, config: dict | None = None, *,
                    on_progress=None, should_cancel=None,
                    overwrite: bool = False) -> dict:
-    """폴더 안 모든 PDF 를 처리해 각 PDF 옆에 .json 을 쓴다.
+    """폴더 안 모든 PDF 를 처리해 **앱 저장소**에 정본을 쓴다(PDF 옆이 아니다).
 
     반환 {'total','done','skipped','failed','failures':[(파일명, 사유)], 'cancelled'}
 
-    파일별 격리 — 한 편의 실패가 전체를 멈추지 않는다. 이미 .json 이 있으면
-    건너뛴다(overwrite=True 면 다시 처리). should_cancel() 이 True 면
-    지금까지 쓴 .json 은 그대로 두고 즉시 멈춘다(재실행하면 남은 것만 처리).
+    파일별 격리 — 한 편의 실패가 전체를 멈추지 않는다. 저장소에 이미 정본이
+    있으면 건너뛴다(overwrite=True 면 다시 처리). 짝은 파일 내용(sha1)으로 맺으므로
+    PDF 를 옮기거나 이름을 바꿔도 다시 뽑지 않는다.
+    should_cancel() 이 True 면 지금까지 쓴 것은 그대로 두고 즉시 멈춘다
+    (재실행하면 남은 것만 처리).
+
+    여러 편을 동시에 처리한다(_worker_count). 동시 편수는 남은 메모리에 맞춰
+    정하고, GROBID 호출만 따로 좁힌다 — 몰리면 서비스가 죽는다.
     """
     root = Path(folder)
     pdfs = sorted(p for p in root.rglob("*.pdf") if p.is_file())
@@ -373,6 +378,32 @@ def _extract(pdf: Path, cfg: dict, ctx: "_Ctx", *, out_json, on_progress,
                 notes.append(f"신원 의심({better}) — Crossref 미확인이라 두었다")
     except Exception as e:  # noqa: BLE001 — 신원 판정 실패가 추출을 막지 않는다
         notes.append(f"신원 판정 생략: {type(e).__name__}: {e}")
+
+    # 참고문헌 확정 — **번호·순서는 지면에서, 내용은 iCite 에서.**
+    #   지면 파싱만 쓰면 서지값을 못 믿고(DOI 순열 뒤섞임), iCite 만 쓰면 순서가
+    #   지면 번호가 아니다. 둘을 제목·DOI 로 짝지어야 본문 [15] 를 눌러 15번으로
+    #   갈 수 있다. 일괄 경로(refmatch.run)에는 있고 이 경로에는 없어서 앱으로
+    #   뽑으면 참고문헌이 파싱 그대로 남았다 — 산출물이 갈리지 않게 여기서도 부른다.
+    #   네트워크가 없으면 지면 목록만으로 채운다(비우지 않는다).
+    try:
+        from . import refmatch
+        pm = str((d.get("meta") or {}).get("pmid") or "")
+        art: dict = {}
+        detail: dict = {}
+        if pm and not getattr(ctx.http, "offline", False):
+            cache = utils.resolve(cfg["project"]["work_dir"]) / "icite"
+            art = (refmatch.fetch_icite([pm], cache, ctx.http) or {}).get(pm) or {}
+            ref_pmids = [str(x) for x in (art.get("references") or []) if x]
+            if ref_pmids:
+                detail = refmatch.fetch_icite(ref_pmids, cache, ctx.http)
+        st = refmatch.reconcile(d, art, detail)
+        paired = st["doi"] + st["title"] + st["author-year"]
+        notes.append(f"참고문헌 {st['printed']}개 중 번호 {st['numbered']} · "
+                     f"iCite 짝 {paired} · 인용링크 {st['linked_citations']}")
+        if st.get("foreign_block"):
+            notes.append(f"옆 논문 참고문헌 {st['foreign_block']}개 분리")
+    except Exception as e:  # noqa: BLE001 — 참조 실패가 본문 추출을 무효화하지 않는다
+        notes.append(f"참고문헌 확정 생략: {type(e).__name__}: {e}")
 
     try:
         from . import qc

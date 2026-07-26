@@ -349,17 +349,50 @@ def pair(printed: list[dict], items: list[dict],
 
 # ── 정본 반영 ────────────────────────────────────────────────────────
 def ensure_numbers(doc: dict) -> dict[str, int]:
-    """지면 번호가 없는 정본(JATS 경로)에 자리번호를 준다. key → number.
+    """지면 번호가 없는 정본에 자리번호를 준다. key → number.
 
-    JATS <ref-list> 는 지면 순서 그대로이므로 자리번호 = 지면 번호다.
-    GROBID 경로는 grobid_client 가 인용 마커로 이미 번호를 매겨 놓았다.
+    JATS <ref-list> 는 **지면 순서 그대로**이므로 자리번호 = 지면 번호다(출판사
+    정본 XML). GROBID 경로는 grobid_client 가 인용 마커로 이미 번호를 매겨 놓았다.
+
+    GROBID 정본인데 번호가 없다면 **옛 파서로 만든 정본**이다. 그때는 자리번호를
+    주지 않는다 — GROBID 의 나열 순서는 지면 순서가 아닐 수 있고(실측 104편 중
+    22편이 어긋났다. 10.25259/ijdvl_558_2021 은 첫 항목이 지면 21번), 자리번호를
+    믿고 본문을 이으면 [15] 가 딴 논문으로 간다. TEI 를 다시 읽어야 한다
+    (배치 경로는 renumber_from_tei 로 캐시에서 되살린다).
     """
     refs = doc.get("references") or []
     if any(r.get("number") for r in refs):
         return {r["key"]: r["number"] for r in refs if r.get("key") and r.get("number")}
+    if doc.get("source") == "grobid":
+        doc["references_numbering"] = "unknown"
+        return {}
     for i, r in enumerate(refs, 1):
         r["number"] = i
     return {r["key"]: r["number"] for r in refs if r.get("key")}
+
+
+def renumber_from_tei(doc: dict, tei_path: Path) -> int:
+    """옛 정본의 참고문헌을 TEI 캐시에서 다시 읽어 번호·원문을 되살린다.
+
+    GROBID 를 다시 부르지 않고(캐시가 있으므로) 번호·지면 순서·읽을 수 있는
+    원문(raw_reference)을 복구한다. 키가 서로 어긋나면 손대지 않는다.
+    """
+    refs = doc.get("references") or []
+    if not refs or any(r.get("number") for r in refs) or not tei_path.exists():
+        return 0
+    try:
+        from lxml import etree
+        from .grobid_client import _build_refs
+        fresh, key_num = _build_refs(etree.parse(str(tei_path)).getroot())
+    except Exception as e:  # noqa: BLE001 — 캐시가 깨졌으면 그냥 두고 넘어간다
+        log(f"      ! TEI 재번호 실패({tei_path.name}): {type(e).__name__}: {e}")
+        return 0
+    have = {r.get("key") for r in refs}
+    if not fresh or len(have & {r.key for r in fresh}) < 0.8 * len(have):
+        return 0                              # 다른 문서의 TEI — 건드리지 않는다
+    doc["references"] = [r.__dict__.copy() for r in fresh]
+    doc.pop("references_numbering", None)
+    return sum(1 for v in key_num.values() if v)
 
 
 def relink_cited_refs(doc: dict, key_num: dict[str, int]) -> int:
@@ -584,6 +617,12 @@ def run(config: dict | None = None) -> None:
 
     paths = sorted((work / "normalized").glob("*.json"))
     docs = {p: utils.read_json(p) for p in paths}
+    # 옛 파서로 만들어 번호를 잃은 정본은 TEI 캐시에서 번호를 되살린다
+    # (GROBID 를 다시 부르지 않는다 — 캐시가 곧 그때의 TEI 다).
+    n_renum = sum(1 for p, d in docs.items()
+                  if renumber_from_tei(d, work / "tei" / f"{p.stem}.tei.xml"))
+    if n_renum:
+        log(f"  TEI 캐시에서 지면 번호 복구: {n_renum}편")
     metas = {m.get("doi"): m for m in
              (utils.read_json(p) for p in (work / "meta").glob("*.json"))}
     log(f"[참조] 지면 번호 + iCite 내용으로 참고문헌 확정: {len(docs)}편")

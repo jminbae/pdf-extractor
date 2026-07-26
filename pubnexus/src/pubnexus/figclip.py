@@ -292,7 +292,14 @@ def _running_heads(doc, npages: int) -> set[str]:
 
 
 def _norm_head(s: str) -> str:
-    return re.sub(r"[^0-9a-z가-힣]+", "", (s or "").lower())[:60]
+    """러닝헤드 비교용 키 — **숫자를 버린다**.
+
+    러닝헤드에는 쪽번호가 붙는다('132 Choi et al.' · '436 BAE ET AL'). 숫자를
+    남기면 쪽마다 다른 문자열이 되어 '반복'으로 잡히지 않고, 그러면 지면 맨 위
+    그림의 장벽이 사라져 저자 러닝헤드가 그림 안에 들어온다(실측
+    10.1002/jso.23618 · 10.1002/lsm.22358).
+    """
+    return re.sub(r"[^a-z가-힣]+", "", (s or "").lower())[:60]
 
 
 def _page_blocks(lines: list[_cap.Line], body: float, pieces: list[_Piece],
@@ -427,13 +434,51 @@ def _band(pg: _FigPage, cap: _cap.Caption) -> tuple[float, float, float, float]:
         bx1 = max(max(c[1] for c in covered), cx1)
     else:
         bx0, bx1 = cx0, cx1
-    left = [c for c in pg.cols if c[1] <= bx0 + 1]
-    right = [c for c in pg.cols if c[0] >= bx1 - 1]
-    sx0 = ((max(c[1] for c in left) + bx0) / 2.0 if left
-           else max(pg.rect[0], bx0 - SIDE_MARGIN))
-    sx1 = ((min(c[0] for c in right) + bx1) / 2.0 if right
-           else min(pg.rect[2], bx1 + SIDE_MARGIN))
-    return bx0, bx1, sx0, sx1
+    # 그림은 캡션보다 넓을 수 있다 — 캡션은 그림 아래에 짧게 조판되기도 한다
+    # (실측 10.1002/jso.23438 의 forest plot 은 지면 폭인데 캡션이 좁아 왼쪽
+    #  연구명 칸이 잘려 나갔다). 그래서 **band 를 품은 단의 폭**까지는 허용한다.
+    span = max(1.0, bx1 - bx0)
+    host = [c for c in pg.cols
+            if (min(c[1], bx1) - max(c[0], bx0)) >= 0.60 * span]
+    hx0 = min([c[0] for c in host] + [bx0])
+    hx1 = max([c[1] for c in host] + [bx1])
+    # 좌우 한계는 일단 지면 끝. 실제 한계는 **그 높이에 옆 단 글이 있느냐**로
+    # 정한다(_side_limits). 옆 단과의 중간점으로 못박으면, 캡션은 한 단인데
+    # 그림은 전폭인 조판에서 그림이 잘린다(실측 10.5021/ad.2015.27.5.578 Fig 2
+    # 는 오른쪽 절반이 통째로 날아갔다).
+    return bx0, bx1, max(pg.rect[0], hx0 - 2 * SIDE_MARGIN), \
+        min(pg.rect[2], hx1 + 2 * SIDE_MARGIN)
+
+
+def _side_limits(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption],
+                 bx0: float, bx1: float, sx0: float, sx1: float,
+                 y0: float, y1: float) -> tuple[float, float]:
+    """그림이 놓인 높이 구간 [y0,y1] 에서의 좌·우 한계.
+
+    옆 단의 **본문 글**과 **다른 그림의 캡션**이 한계다. 그 높이에 옆 단 글이
+    없으면(그림이 전폭으로 자리를 차지했다는 뜻) 지면 끝까지 열어 둔다.
+    """
+    band_w = max(1.0, bx1 - bx0)
+    lo, hi = sx0, sx1
+
+    def bump(b) -> None:
+        nonlocal lo, hi
+        if min(b[3], y1) - max(b[1], y0) <= 2.0:
+            return                               # 이 높이에 걸치지 않는다
+        if b[2] <= bx0 + 1:
+            lo = max(lo, b[2] + 3.0)
+        elif b[0] >= bx1 - 1:
+            hi = min(hi, b[0] - 3.0)
+
+    for blk in pg.blocks:
+        if _is_barrier(blk, band_w):
+            bump(blk["bbox"])
+    for o in others:                             # 옆에 나란히 실린 다른 그림
+        if o is not cap and o.page == cap.page:
+            bump(o.bbox)
+    for t in pg.tables:
+        bump(t)
+    return (lo, hi) if hi - lo >= MIN_FIG_W else (sx0, sx1)
 
 
 # ── 세로 장벽 ────────────────────────────────────────────────────────
@@ -538,17 +583,18 @@ def _region(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption]
     def try_side(y0: float, y1: float, above: bool):
         if y1 - y0 < MIN_FIG_H:
             return None
-        zone = (sx0, y0, sx1, y1)
+        lo, hi = _side_limits(pg, cap, others, bx0, bx1, sx0, sx1, y0, y1)
+        zone = (lo, y0, hi, y1)
         cands = [p for p in pg.pieces
-                 if _xshare(p.rect, sx0, sx1) >= PIECE_IN_BAND
+                 if _xshare(p.rect, lo, hi) >= PIECE_IN_BAND
                  and _covered(p.rect, zone) >= PIECE_IN_REGION]
         if not cands:
             return None
         cands = _grow(cands, above)
         box = _union([p.rect for p in cands])
         # 구간 안으로 자른다(조각이 살짝 삐져나온 경우)
-        box = (max(box[0], sx0), max(box[1], y0),
-               min(box[2], sx1), min(box[3], y1))
+        box = (max(box[0], lo), max(box[1], y0),
+               min(box[2], hi), min(box[3], y1))
         # 그림 속 글자(축 라벨·패널 문자·범례)를 되붙인다 — 장벽이 아니고,
         # 도형 덩어리와 **실제로 세로로 맞물리는** 블록만. 맞물리지 않는 것은
         # 위아래 10pt 안의 짧은 조각(패널 문자 'a'·'b')일 때만 받는다.
@@ -557,7 +603,7 @@ def _region(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption]
             b = blk["bbox"]
             if _covered(b, zone) < 0.95 or _is_barrier(blk, band_w):
                 continue
-            if _xshare(b, sx0, sx1) < 0.6:
+            if _xshare(b, lo, hi) < 0.6:
                 continue
             ov = min(b[3], box[3]) - max(b[1], box[1])
             if ov <= 0 and not (ov > -10.0 and blk["chars"] <= 30):
@@ -568,8 +614,8 @@ def _region(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption]
         # 여유를 준 **뒤에** 한계 안으로 다시 자른다. 순서를 뒤집으면 캡션
         # 첫 줄의 머리가 그림 아래에 남는다(실측 JKMS Fig. 1).
         box = (box[0] - PAD, box[1] - PAD, box[2] + PAD, box[3] + PAD)
-        box = (max(box[0], sx0), max(box[1], y0),
-               min(box[2], sx1), min(box[3], y1))
+        box = (max(box[0], lo), max(box[1], y0),
+               min(box[2], hi), min(box[3], y1))
         w, h = box[2] - box[0], box[3] - box[1]
         if w < MIN_FIG_W or h < MIN_FIG_H or w * h < MIN_FIG_AREA:
             return None
@@ -836,20 +882,33 @@ def fill_document(doc: dict, pdf_path: str | Path, *,
                 stats["contaminated"] += 1
                 stats["skipped"] += 1
                 continue
+            # 같은 그림을 정본이 두 항목으로 담고 있을 수 있다(파서가 중복
+            # 생성). 같은 쪽·같은 영역이면 **파일 하나를 함께 가리키게** 한다.
+            spot = (cap.page, tuple(round(v) for v in box))
+            twin = next((q for q in plan if q["spot"] == spot), None)
+            if twin is not None:
+                plan.append(dict(twin, item=it, num=key, supp=supp,
+                                 dup=True))
+                continue
             plan.append({"item": it,
                          "stem": _file_stem(it, key, supp, used_names),
-                         "box": box, "kind": kind, "why": why,
-                         "page": cap.page, "num": key, "supp": supp})
+                         "box": box, "kind": kind, "why": why, "spot": spot,
+                         "page": cap.page, "num": key, "supp": supp,
+                         "dup": False})
 
         if write and plan:
             dest_dir.mkdir(parents=True, exist_ok=True)
         keep: set[str] = set()
+        made: dict[str, tuple[str, int, int]] = {}   # stem → (파일명, 크기, dpi)
         for p in plan:
             page = fdoc[p["page"]]
             nbytes = 0
             real_dpi = dpi
             name = f"{p['stem']}.png"
-            if write:
+            if p["stem"] in made:                # 중복 항목 — 같은 파일을 가리킨다
+                name, nbytes, real_dpi = made[p["stem"]]
+                nbytes = 0                       # 용량은 한 번만 센다
+            elif write:
                 try:
                     data, ext, real_dpi = render_clip(page, p["box"], dpi=dpi,
                                                       max_bytes=max_bytes)
@@ -861,6 +920,7 @@ def fill_document(doc: dict, pdf_path: str | Path, *,
                 (dest_dir / name).write_bytes(data)
                 nbytes = len(data)
                 keep.add(name)
+                made[p["stem"]] = (name, nbytes, real_dpi)
             rel = f"{folder}/{name}"
             p["item"]["image"] = rel
             stats["clipped"] += 1

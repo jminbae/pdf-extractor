@@ -1,7 +1,18 @@
 """정본 JSON → Markdown 뷰(설계서 5단계).
 
 JSON이 정본, Markdown은 여기서 렌더링해 '보기용'으로만 쓴다.
-참고문헌 목록은 본문 뷰에서 제외(API 메타로 보유), 인용은 각주 링크로 표기 가능.
+
+참고문헌은 맨 아래 `## References` 절에 **지면 번호 순서로** 싣는다.
+본문의 인용 마커 `[15]` 는 `[[15]](#ref-15)` 링크로 바꿔 내보낸다.
+번호를 확정하지 못한 항목에는 링크를 걸지 않는다 — 틀린 링크는 없는 링크보다
+해롭다는 것이 이 프로젝트의 원칙이다.
+
+**화면(HTML) 쪽과의 계약**
+  · 본문 링크의 목적지는 `#ref-<지면번호>` 다(REF_ANCHOR_FMT).
+  · 목록 항목은 `## References` 아래에서 `15. …` 처럼 **번호로 시작하는 줄**로
+    나온다. 여기에 `id="ref-15"` 를 붙이는 것은 **보여주는 쪽의 몫**이다 —
+    마크다운에 원시 HTML 을 섞으면 뷰어가 그것을 글자로 찍어버리기 때문이다.
+    번호 → 앵커 id 는 ref_anchor_id() 로 얻는다(양쪽이 같은 규칙을 쓰도록).
 """
 from __future__ import annotations
 
@@ -10,8 +21,19 @@ from pathlib import Path
 
 from . import utils
 
-# GROBID 내부 참조키(b0, b1 …). 사람이 볼 화면에 그대로 나오면 안 된다.
-_LOCAL_KEY_RE = re.compile(r"^b\d+$", re.I)
+# 본문에 박힌 인용 마커. grobid_client._cite_marker 가 [15] 형태로 남긴다.
+_CITE_MARK_RE = re.compile(r"\[(\d{1,3})\]")
+
+# 본문 링크와 목록 앵커가 만나는 지점. 화면(HTML) 쪽도 이 규칙을 써야 한다.
+REF_ANCHOR_FMT = "ref-{}"
+
+# `## References` 아래에서 한 항목이 시작하는 줄 — 화면 쪽이 앵커를 붙일 자리.
+REF_LINE_RE = re.compile(r"^(\d{1,3})\.\s")
+
+
+def ref_anchor_id(number: int | str) -> str:
+    """지면 번호 → 앵커 id. 본문 링크(#ref-15)와 목록 항목이 같은 값을 쓴다."""
+    return REF_ANCHOR_FMT.format(number)
 
 # 본문 첫머리에 남은 머리말 조각: 'DOI: 10.1111/bjd.15779 DEAR EDITOR, ...'
 _LEAD_DOI_RE = re.compile(
@@ -25,42 +47,93 @@ _OPENER_RE = re.compile(r"^\s*(DEAR\s+EDITOR|TO\s+THE\s+EDITOR|Dear\s+Editor|"
 _PLACEHOLDER_TITLES = {"body", "text", "unknown", "untitled", ""}
 
 
-def _ref_label(ref: dict, num: int) -> str:
-    """참고문헌 한 건을 사람이 읽는 짧은 표기로. '3. Kim (2019)' 형태."""
-    who = ""
-    raw = (ref.get("raw") or "").strip()
-    if ref.get("title"):
-        who = ref["title"][:60]
-    elif raw:
-        who = raw[:60]
-    year = ref.get("year")
-    tail = f" ({year})" if year else ""
-    return f"{num}. {who}{tail}" if who else f"{num}. {ref.get('doi') or ref.get('key')}"
+def _authors_line(authors: list[str], limit: int = 6) -> str:
+    """'Kim, Hyunjin' 표기를 'Kim H' 로 줄여 학술지 관례대로 잇는다."""
+    out = []
+    for a in authors[:limit]:
+        a = (a or "").strip()
+        if "," in a:
+            fam, giv = a.split(",", 1)
+            ini = "".join(w[0] for w in giv.split() if w[:1].isalpha())
+            out.append(f"{fam.strip()} {ini}".strip())
+        else:
+            out.append(a)
+    s = ", ".join(x for x in out if x)
+    return s + (", et al" if len(authors) > limit else "")
 
 
-def _citation_index(doc: dict) -> tuple[dict, list[dict]]:
-    """인용값(DOI 또는 내부키) → 번호. 본문에는 번호만 쓰고 뒤에 목록을 붙인다."""
+def format_reference(ref: dict) -> str:
+    """참고문헌 한 건을 사람이 읽는 한 줄로.
+
+    지면 원문(raw)이 있으면 그것을 쓴다 — 권·쪽까지 인쇄돼 있어 가장 완전하다.
+    원문이 없는 항목(지면에서 못 찾고 iCite 에만 있는 것)만 서지 필드로 조립한다.
+    확인된 식별자(doi·PMID)는 원문에 없을 때만 뒤에 덧붙인다.
+    """
+    body = (ref.get("raw") or "").strip()
+    if not body:
+        bits = []
+        if ref.get("authors"):
+            bits.append(_authors_line(ref["authors"]) + ".")
+        if ref.get("title"):
+            bits.append(ref["title"].rstrip(". ") + ".")
+        tail = " ".join(x for x in (ref.get("journal") or "",
+                                    str(ref.get("year") or "")) if x)
+        if tail:
+            bits.append(tail + ".")
+        body = " ".join(bits).strip()
+    if not body:
+        body = ref.get("doi") or ref.get("key") or ""
+
+    extra = []
+    doi = (ref.get("doi") or "").strip()
+    if doi and doi.lower() not in body.lower():
+        extra.append(f"doi:{doi}")
+    pmid = str(ref.get("pmid") or "").strip()
+    if pmid and f"pmid {pmid}".lower() not in body.lower() and pmid not in body:
+        extra.append(f"PMID {pmid}")
+    return (body + (" " + " · ".join(extra) if extra else "")).strip()
+
+
+def _link_citations(text: str, known: set[int]) -> str:
+    """본문의 [15] 를 [[15]](#ref-15) 로 바꾼다. 목록에 없는 번호는 그대로 둔다."""
+    if not known:
+        return text
+
+    def repl(m):
+        n = int(m.group(1))
+        return f"[[{n}]](#{ref_anchor_id(n)})" if n in known else m.group(0)
+
+    return _CITE_MARK_RE.sub(repl, text or "")
+
+
+def _references_block(doc: dict) -> list[str]:
+    """맨 아래 참고문헌 절. **번호로 시작하는 평범한 줄**로 낸다.
+
+    앵커(`<a id="ref-15">`)를 여기서 직접 쓰지 않는다. 마크다운을 보여주는 쪽이
+    원시 HTML 을 글자로 취급하면 화면에 `<a id="ref-2"></a>2. Oliver ID…` 가
+    그대로 찍힌다(실측). 앵커는 **보여주는 쪽**이 `15.` 로 시작하는 항목에
+    붙이는 것이 맞다 — 마크다운은 마크다운으로만 두고, HTML 은 HTML 을 아는
+    곳에서 만든다.
+    """
     refs = doc.get("references") or []
-    idx: dict[str, int] = {}
-    for i, r in enumerate(refs, 1):
-        if r.get("key"):
-            idx[str(r["key"])] = i
-        if r.get("doi"):
-            idx[str(r["doi"]).lower()] = i
-    return idx, refs
-
-
-def _cite_marks(cited: list[str], idx: dict) -> list[str]:
-    """인용값들을 번호로 바꾼다. 번호를 못 찾으면 **버린다**(내부키 노출 금지)."""
-    nums = []
-    for c in cited or []:
-        n = idx.get(str(c).lower()) or idx.get(str(c))
-        if n and n not in nums:
-            nums.append(n)
-        elif not n and not _LOCAL_KEY_RE.match(str(c)):
-            # 목록에 없는 DOI 는 그대로 보여준다(추적 가치가 있다)
-            nums.append(str(c))
-    return [str(n) for n in nums]
+    if not refs:
+        return []
+    numbered = [r for r in refs if r.get("number")]
+    rest = [r for r in refs if not r.get("number")]
+    out = ["", "## References"]
+    for r in sorted(numbered, key=lambda x: x["number"]):
+        out += ["", f'{r["number"]}. {format_reference(r)}']
+    if rest:
+        # 번호를 확정하지 못한 항목 — 버리지 않고 보여주되 링크는 걸지 않는다.
+        #   parsed  : 지면에 있으나 몇 번인지 셀 수 없었던 항목
+        #   icite   : API 에는 있는데 지면 목록에서 못 찾은 항목
+        #   foreign : 같은 지면에 실린 **옆 논문**의 참고문헌
+        out += ["", "### 번호 미확정 (본문 링크 없음)"]
+        for r in rest:
+            tag = {"icite": "API에만 있음", "foreign": "옆 논문 목록",
+                   }.get(r.get("source"), "지면 번호 미확정")
+            out += ["", f"- *({tag})* {format_reference(r)}"]
+    return out
 
 
 def _clean_lead(text: str) -> tuple[str, str | None]:
@@ -102,8 +175,9 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
     tab_by_id = {t["id"]: t for t in doc.get("tables", [])}
     fig_by_id = {f["id"]: f for f in doc.get("figures", [])}
 
-    cite_idx, refs = _citation_index(doc)
-    used_refs: set[int] = set()
+    # 목록에 실제로 있는 지면 번호만 링크 대상으로 삼는다.
+    known_nums = {int(r["number"]) for r in (doc.get("references") or [])
+                  if r.get("number")}
 
     last_path = []
     first_para = True
@@ -151,9 +225,9 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
             text = p.get("text", "")
             if not text.strip():
                 continue
-            out += ["", text]
-            # 인용은 본문 안에 [15] 로 이미 박혀 있다 → 문단 아래에 따로 붙이지 않는다.
-            # (텍스트만 가져가도 인용 위치가 정확히 남는 것이 목적)
+            # 인용은 본문 안에 [15] 로 이미 박혀 있다 → 문단 아래에 따로 붙이지
+            # 않고, 그 자리에서 눌러 목록으로 뛸 수 있게 링크로 바꾼다.
+            out += ["", _link_citations(text, known_nums)]
 
     # 표
     if doc.get("tables"):
@@ -170,6 +244,9 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
         if caps:
             out += ["", "## Figures"]
             out += [f"- {c}" for c in caps]
+
+    # 참고문헌 — 지면 번호 순서로 맨 아래. 본문 [15] 가 여기 15번으로 뛴다.
+    out += _references_block(doc)
 
     return "\n".join(out).strip() + "\n"
 

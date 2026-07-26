@@ -70,6 +70,14 @@ _STAGE = {
 }
 
 
+def _norm(p: str | Path) -> str:
+    """경로 비교용 정규화. 대소문자·상대경로 차이로 짝을 놓치지 않게."""
+    try:
+        return os.path.normcase(os.path.abspath(str(p)))
+    except Exception:  # noqa: BLE001
+        return str(p).lower()
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Markdown(뷰) → HTML
 #
@@ -85,22 +93,37 @@ _ITALIC_LINE_RE = re.compile(r"^\*([^*].*[^*])\*$")
 _BOLD_LINE_RE = re.compile(r"^\*\*(.+)\*\*$")
 _SUB_RE = re.compile(r"^<sub>(.*)</sub>$")
 _CITE_RE = re.compile(r"\[\s*\d{1,3}(?:\s*[–—,-]\s*\d{1,3})*\s*\]")
-_LINK_RE = re.compile(r"\[([^\]\n]{1,80})\]\((#[-\w.:]{1,60})\)")
+#  [[15]](#ref-15) — 대괄호가 한 겹 더 있다(인용 마커 자체가 [15] 라서).
+#  안쪽 대괄호 한 겹까지 받아들인다.
+_LINK_RE = re.compile(r"\[((?:[^\[\]\n]|\[[^\[\]\n]*\])*?)\]\((#[-\w.:]{1,60})\)")
+#  렌더러가 원시 앵커를 넣는 경로가 남아 있을 수 있다 — 글자로 찍히면 안 된다.
+_RAW_A_RE = re.compile(r'<a\s+(?:id|name)\s*=\s*"([-\w.:]{1,60})"\s*>\s*</a>', re.I)
 _REFHEAD_RE = re.compile(r"references|참고\s*문헌|bibliography|works cited", re.I)
 _REFNUM_RE = re.compile(r"^\s*\[?(\d{1,3})[\].]\s")
 _INLINE_RE = re.compile(r"(\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*)")
 
 
 def _inline(text: str) -> str:
-    """평문 한 줄 → HTML. 이스케이프가 먼저, 서식이 나중."""
-    esc = _html.escape(text, quote=False)
-    # 앵커 링크 [15](#ref-15) 는 먼저 떼어 보관한다 — 뒤의 인용 서식이 건드리지
-    # 않게. 참고문헌 절이 들어오면 이 링크로 본문↔목록을 오간다.
+    """평문 한 줄 → HTML. 이스케이프가 먼저, 서식이 나중.
+
+    앵커·링크는 이스케이프 전후로 떼어 보관한다 — 안 그러면 화면에
+    `<a id="ref-2"></a>2. Oliver ID…` 가 글자로 그대로 찍힌다(실측).
+    """
     kept: list[str] = []
 
-    def _link(m: re.Match) -> str:
-        kept.append(f'<a class="cite" href="{m.group(2)}">[{m.group(1)}]</a>')
+    def _keep(frag: str) -> str:
+        kept.append(frag)
         return f"\x00{len(kept) - 1}\x00"
+
+    # 0) 원시 앵커는 **이스케이프 전에** 빼둔다
+    text = _RAW_A_RE.sub(lambda m: _keep(f'<a id="{m.group(1)}"></a>'), text)
+    esc = _html.escape(text, quote=False)
+
+    def _link(m: re.Match) -> str:
+        label = m.group(1)
+        if not (label.startswith("[") and label.endswith("]")):
+            label = f"[{label}]"          # [[15]](#ref-15) 는 이미 대괄호가 있다
+        return _keep(f'<a class="cite" href="{m.group(2)}">{label}</a>')
 
     esc = _LINK_RE.sub(_link, esc)
     out: list[str] = []
@@ -204,7 +227,44 @@ def chips_html(meta: dict) -> str:
     return "".join(out)
 
 
-def md_to_html(md: str, chips: str = "") -> str:
+def figures_html(doc: dict, sha1: str) -> str:
+    """그림을 실제 이미지로. 파일이 아직 없으면 **빈 자리를 만들지 않는다.**
+
+    `figures[].image` 는 store.figs_dir(sha1) 기준 상대경로다(절대경로도 받는다).
+    한 장도 실제로 없으면 빈 문자열을 돌려 마크다운의 캡션 목록을 그대로 쓰게 한다.
+    """
+    figs = doc.get("figures") or []
+    if not figs:
+        return ""
+    from pubnexus import store
+    base = store.figs_dir(sha1)
+    items: list[tuple[str, str]] = []
+    for f in figs:
+        cap = str((f or {}).get("caption") or "").strip()
+        img = str((f or {}).get("image") or "").strip()
+        url = ""
+        if img:
+            p = Path(img)
+            fp = p if p.is_absolute() else (base / img)
+            if utils.path_exists(fp):
+                url = ("/fig?s=" + urllib.parse.quote(sha1) +
+                       "&amp;f=" + urllib.parse.quote(img))
+        if url or cap:
+            items.append((url, cap))
+    if not any(u for u, _ in items):
+        return ""                       # 아직 그림 파일이 없다 → 자리를 만들지 않는다
+    out = ["<h2>Figures</h2>"]
+    for url, cap in items:
+        out.append('<figure class="fig">')
+        if url:
+            out.append(f'<img src="{url}" loading="lazy" alt="">')
+        if cap:
+            out.append(f"<figcaption>{_inline(cap)}</figcaption>")
+        out.append("</figure>")
+    return "".join(out)
+
+
+def md_to_html(md: str, chips: str = "", figs: str = "") -> str:
     """to_markdown() 결과를 읽기 화면용 HTML 로.
 
     앞머리(제목·서지·저자)는 본문과 다른 대접을 한다. pub_types 줄은 **버린다** —
@@ -215,6 +275,7 @@ def md_to_html(md: str, chips: str = "") -> str:
     i, n = 0, len(lines)
     seen_h2 = False          # 첫 ## 전까지가 앞머리
     put_chips = False        # 키워드 칩을 앞머리에 한 번만
+    drop_figs = False        # 그림 절을 이미지판으로 갈아끼우는 중
     in_refs = False          # 참고문헌 절: 항목마다 #ref-N 앵커를 붙인다
     ul: list[str] = []
 
@@ -258,6 +319,11 @@ def md_to_html(md: str, chips: str = "") -> str:
         if h:
             flush_ul()
             lv = len(h.group(1))
+            drop_figs = False
+            if figs and h.group(2).strip().lower() == "figures":
+                out.append(figs)     # 캡션 목록 대신 진짜 그림
+                drop_figs = True
+                continue
             if lv >= 2 and not seen_h2 and chips and not put_chips:
                 out.append(chips)
                 put_chips = True
@@ -269,7 +335,8 @@ def md_to_html(md: str, chips: str = "") -> str:
             continue
 
         if line.startswith("- "):
-            ul.append(_inline(line[2:]))
+            if not drop_figs:
+                ul.append(_inline(line[2:]))
             continue
         flush_ul()
 
@@ -303,6 +370,17 @@ def md_to_html(md: str, chips: str = "") -> str:
         m = _ITALIC_LINE_RE.match(line)
         if m:
             out.append(f'<p class="aside">{_inline(m.group(1))}</p>')
+            continue
+
+        if in_refs:
+            # 참고문헌은 `15. Kim …` 처럼 문단으로 온다. 본문 [15] 가 내려앉을
+            # 착지점을 여기서 만든다(렌더러가 앵커를 직접 넣어주면 그쪽이 우선).
+            m = _REFNUM_RE.match(line)
+            body = _inline(line)
+            if m and 'id="ref-' not in body:
+                out.append(f'<p class="ref" id="ref-{m.group(1)}">{body}</p>')
+                continue
+            out.append(f'<p class="ref">{body}</p>')
             continue
 
         out.append(f"<p>{_inline(line)}</p>")
@@ -458,8 +536,9 @@ class App:
             self.cfg = {}
         self.folder: Path | None = None
         self.pdfs: list[Path] = []
-        self.jmap: dict[str, Path] = {}          # PDF 파일명 → JSON 경로
-        self.jcache: dict[str, tuple[float, int, str]] = {}
+        # 정본은 PDF 옆이 아니라 앱 저장소에 있다(store.py). 짝은 내용 지문(sha1).
+        self.done: dict[str, str] = {}           # 정규화한 PDF 경로 → sha1
+        self.found: dict[str, str] = {}          # 열어 보고 확인한 것(경로가 바뀐 PDF)
         self.renderer = PageRenderer()
         self.cancel = threading.Event()
         self.worker: threading.Thread | None = None
@@ -493,58 +572,50 @@ class App:
         self.status(f"{self.folder.name} 훑는 중…", busy=True, force=True)
         self.pdfs = sorted((p for p in self.folder.rglob("*.pdf") if p.is_file()),
                            key=lambda p: p.name.lower())
-        self.scan_jsons()
+        self.scan_store()
         self.push("folder", {"path": str(self.folder), "files": self.file_rows()})
         self.status("", busy=False, force=True)
 
-    def scan_jsons(self) -> None:
-        """폴더 안 정본 JSON 을 훑어 {PDF 파일명 → JSON 경로}.
+    def scan_store(self) -> None:
+        """저장소 요약을 읽어 {PDF 경로 → sha1} 지도를 만든다.
 
-        JSON 이름은 DOI(slug)라 파일명만으로는 짝을 못 찾는다 — 안의 source_file
-        로 맺는다. 246편을 통째로 파싱하면 느리니 앞부분만 읽는다(스키마상
-        source_file 은 문서 머리에 있다). 실패하면 그때만 전체를 읽는다.
+        목록을 그릴 때 205편의 sha1 을 일일이 계산하면 폴더 열기가 몇 초씩
+        걸린다. 요약(index.json)에 적힌 경로로 먼저 맞춰 보고, **실제로 열 때만**
+        내용 지문을 계산해 확인한다(그 사이 파일이 옮겨졌을 수 있으므로).
         """
-        if not self.folder:
-            return
-        idx: dict[str, Path] = {}
-        pat = re.compile(r'"source_file"\s*:\s*"((?:[^"\\]|\\.)*)"')
-        for jp in self.folder.rglob("*.json"):
-            try:
-                st = jp.stat()
-            except OSError:
-                continue
-            ck = str(jp)
-            cached = self.jcache.get(ck)
-            if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
-                src = cached[2]
-            else:
-                src = ""
-                try:
-                    with open(utils.long_path(jp), "r", encoding="utf-8",
-                              errors="replace") as f:
-                        head = f.read(8192)
-                    m = pat.search(head)
-                    if m:
-                        src = json.loads('"' + m.group(1) + '"')
-                    elif '"paper_id"' in head:
-                        d = utils.read_json(jp)
-                        src = str(d.get("source_file") or "") if isinstance(d, dict) else ""
-                except Exception:
-                    src = ""
-                self.jcache[ck] = (st.st_mtime, st.st_size, src)
-            if src:
-                idx[Path(src).name] = jp
-        self.jmap = idx
+        from pubnexus import store
+        done: dict[str, str] = {}
+        try:
+            for sha, row in (store.index() or {}).items():
+                pdf = str((row or {}).get("pdf") or "")
+                if pdf:
+                    done[_norm(pdf)] = sha
+        except Exception as e:  # noqa: BLE001 — 요약이 깨져도 화면은 떠야 한다
+            utils.log(f"[app] 저장소 요약을 읽지 못했다: {e}")
+        done.update(self.found)          # 열어 보고 확인한 것은 계속 유지
+        self.done = done
 
-    def json_for(self, pdf: Path) -> Path | None:
-        hit = self.jmap.get(pdf.name)
-        if hit is not None:
+    def sha_for(self, pdf: Path, deep: bool = False) -> str | None:
+        """이 PDF 의 정본 지문. deep=True 면 내용까지 읽어 확인한다."""
+        from pubnexus import store
+        hit = self.done.get(_norm(pdf))
+        if hit:
             return hit
-        side = pdf.with_suffix(".json")          # 옛 규칙(PDF 이름) 호환
-        return side if utils.path_exists(side) else None
+        if not deep:
+            return None
+        try:
+            sha = store.file_sha1(pdf)
+        except OSError:
+            return None
+        if store.has(sha):               # 옮겼거나 이름이 바뀐 PDF — 내용으로 찾았다
+            self.found[_norm(pdf)] = sha
+            self.done[_norm(pdf)] = sha
+            self.push("mark", {"name": pdf.name})
+            return sha
+        return None
 
     def file_rows(self) -> list[dict]:
-        return [{"name": p.name, "done": self.json_for(p) is not None}
+        return [{"name": p.name, "done": _norm(p) in self.done}
                 for p in self.pdfs]
 
     # ── 문서 한 편 ──────────────────────────────────────────────────
@@ -562,20 +633,21 @@ class App:
         return res
 
     def doc_view(self, pdf: Path) -> dict:
-        jp = self.json_for(pdf)
-        if jp is None:
+        from pubnexus import store
+        sha = self.sha_for(pdf, deep=True)
+        if not sha:
             return {"extracted": False}
-        try:
-            d = utils.read_json(jp)
-        except Exception as e:  # noqa: BLE001
-            return {"extracted": False, "error": f"{type(e).__name__}: {e}"}
+        d = store.load(sha)
+        if d is None:
+            return {"extracted": False}
         # 옛 산출물은 본문 키가 sections 다(정본 스키마는 body_text).
         # render 는 body_text 만 보므로 여기서만 맞춰 끼운다 — 파일은 안 건드린다.
         if not d.get("body_text") and d.get("sections"):
             d = dict(d, body_text=d["sections"])
         from pubnexus import render
         md = render.to_markdown(d)
-        html = md_to_html(md, chips_html(d.get("meta") or {}))
+        html = md_to_html(md, chips_html(d.get("meta") or {}),
+                          figures_html(d, sha))
 
         secs = d.get("body_text") or []
         npar = sum(len(s.get("paragraphs") or []) for s in secs)
@@ -595,7 +667,8 @@ class App:
         return {
             "extracted": True, "html": html,
             "info": " · ".join(bits), "notes": notes,
-            "paper_id": str(d.get("paper_id") or ""), "json": str(jp),
+            "paper_id": str(d.get("paper_id") or ""),
+            "json": str(store.doc_path(sha)), "sha1": sha,
             "thin": nchar < 500,
         }
 
@@ -633,13 +706,15 @@ class App:
                               (ev.get("done") or 0) / steps, times)
 
                 try:
-                    # DOI 는 추출이 끝나야 안다 → 문서를 받아 여기서 이름을 짓는다.
-                    doc = single.extract_one(p, cfg, on_progress=prog)
-                    pid = str(doc.get("paper_id") or p.stem)
-                    dest = p.parent / f"{utils.slug(pid)}.json"
-                    utils.write_json(dest, doc)
-                    self.jcache.pop(str(dest), None)
-                    self.jmap[p.name] = dest
+                    # 정본은 앱 저장소에 들어간다(PDF 옆이 아니다). 자리와 목록
+                    # 요약 갱신은 파이프라인이 맡는다 — 여기서 경로를 짓지 않는다.
+                    dest = single.default_json_path(p)
+                    doc = single.extract_one(p, cfg, out_json=dest,
+                                             on_progress=prog)
+                    sha = str(doc.get("sha1") or "")
+                    if sha:
+                        self.found[_norm(p)] = sha
+                        self.done[_norm(p)] = sha
                     self.push("mark", {"name": p.name})   # 목록에 즉시 ✓
                 except Exception as e:  # noqa: BLE001 — 파일별 격리
                     fails.append((p.name, f"{type(e).__name__}: {e}"))
@@ -650,7 +725,7 @@ class App:
             utils.log(traceback.format_exc())
         finally:
             stopped = self.cancel.is_set()
-            self.scan_jsons()
+            self.scan_store()
             self.push("run", {
                 "on": False, "files": self.file_rows(), "stopped": stopped,
                 "done": max(i - (1 if stopped else 0), 0) - len(fails),
@@ -703,6 +778,30 @@ class Handler(BaseHTTPRequestHandler):
         self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
 
+    _IMG = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
+
+    def _fig(self, sha1: str, rel: str) -> None:
+        """저장소 그림 폴더의 이미지 한 장. 폴더 밖으로는 절대 나가지 않는다."""
+        from pubnexus import store
+        if not re.fullmatch(r"[0-9a-fA-F]{6,64}", sha1 or ""):
+            self.send_error(404)
+            return
+        base = store.figs_dir(sha1).resolve()
+        try:
+            fp = (base / rel).resolve()
+        except Exception:  # noqa: BLE001
+            self.send_error(404)
+            return
+        if base not in fp.parents and fp.parent != base:
+            self.send_error(403)         # ../ 로 저장소 밖을 훔쳐보려는 시도
+            return
+        ctype = self._IMG.get(fp.suffix.lower())
+        if not ctype or not fp.exists():
+            self.send_error(404)
+            return
+        self._send(fp.read_bytes(), ctype, cache="max-age=600")
+
     def do_GET(self) -> None:  # noqa: N802
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
@@ -721,6 +820,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error(404)
                 else:
                     self._send(data, "image/png", cache="max-age=600")
+            elif u.path == "/fig":
+                self._fig(q.get("s", [""])[0], q.get("f", [""])[0])
             else:
                 self.send_error(404)
         except Exception:  # noqa: BLE001
@@ -769,7 +870,11 @@ class Api:
                 return {"ok": False, "why": "왼쪽에서 논문을 먼저 고르세요"}
             targets = [a.pdfs[index]]
         else:
-            targets = [p for p in a.pdfs if a.json_for(p) is None]
+            # 여기서만 내용 지문까지 확인한다. 옮겨오거나 이름만 바꾼 PDF 를
+            # 다시 뽑느라 몇 분을 버리느니, 몇 초 더 읽는 편이 낫다.
+            a.status("이미 처리된 것이 있는지 확인하는 중…", busy=True, force=True)
+            targets = [p for p in a.pdfs if a.sha_for(p, deep=True) is None]
+            a.status("", busy=False, force=True)
             if not targets:
                 targets = list(a.pdfs)
         if not targets:
@@ -779,7 +884,7 @@ class Api:
 
     def count_todo(self) -> dict:
         a = self._app
-        todo = [p for p in a.pdfs if a.json_for(p) is None]
+        todo = [p for p in a.pdfs if a.sha_for(p) is None]
         return {"todo": len(todo), "total": len(a.pdfs)}
 
     def cancel(self) -> dict:
@@ -950,6 +1055,9 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
   padding:2.5px 6px;border-radius:4px}
 #art .chipmore:hover{background:#f4f5f7;color:var(--ink2)}
 #art p.aside{font-family:var(--ui);font-size:11.5px;color:var(--mut)}
+/* 참고문헌 — 번호가 왼쪽으로 걸리는 매달린 들여쓰기, 본문보다 조금 작게 */
+#art p.ref{font-family:var(--serif);font-size:13.3px;line-height:1.62;
+  color:#3a424b;margin:0 0 7px;padding-left:1.5em;text-indent:-1.5em}
 #art p.cap{font-family:var(--ui);font-size:12.5px;font-weight:620;color:#2b333d;
   margin:20px 0 7px}
 #art blockquote{margin:0 0 15px;padding:2px 0 2px 14px;
@@ -965,6 +1073,11 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 #art a.cite:hover{color:var(--accent)}
 #art .hit{background:#fff6d8;border-radius:3px;
   transition:background .5s ease}                /* 눌러서 찾아간 항목 잠깐 표시 */
+#art .fig{margin:0 0 18px;padding:0}
+#art .fig img{max-width:100%;height:auto;display:block;border:1px solid var(--line);
+  border-radius:6px;background:#fff}
+#art .fig figcaption{font-family:var(--ui);font-size:11.5px;color:var(--mut);
+  margin-top:6px;line-height:1.55}
 #art .twrap{overflow-x:auto;overscroll-behavior-x:contain;margin:0 0 18px;
   border:1px solid var(--line);border-radius:8px;background:#fff}
 #art table{border-collapse:collapse;width:100%;font-family:var(--ui);
@@ -1148,12 +1261,22 @@ function flashAt(top){
     setTimeout(()=>best.classList.remove("hit"),1300);}}
 $("#bback").onclick=()=>histGo(-1);
 $("#bfwd").onclick=()=>histGo(1);
-/* 마우스 옆 버튼(뒤로 3 / 앞으로 4) — WebView2 가 안 넘겨줄 수 있어 키보드도 둔다 */
-for(const ev of ["mousedown","auxclick"])
-  window.addEventListener(ev,e=>{if(e.button===3||e.button===4)e.preventDefault();});
-window.addEventListener("mouseup",e=>{
-  if(e.button===3){e.preventDefault();histGo(-1);}
-  else if(e.button===4){e.preventDefault();histGo(1);}});
+/* 마우스 옆 버튼(뒤로 3 / 앞으로 4).
+   한 번 누르면 pointerdown·mousedown·mouseup·auxclick 이 줄줄이 오는데, 어느
+   것이 오고 어느 것이 안 오는지가 WebView2 에서 일정하지 않았다(앞으로가 두
+   번에 한 번 씹혔다). 그래서 **오는 것 아무거나** 받아 움직이고, 같은 한 번의
+   누름이 두 번 세지 않게 짧은 잠금으로 막는다. */
+let navGuard=0;
+function sideNav(btn){
+  const t=Date.now();
+  if(t-navGuard<320)return;
+  navGuard=t;
+  histGo(btn===3?-1:1);}
+for(const ev of ["pointerdown","mousedown","mouseup","auxclick","pointerup"])
+  window.addEventListener(ev,e=>{
+    if(e.button!==3&&e.button!==4)return;
+    e.preventDefault();e.stopPropagation();
+    sideNav(e.button);},{capture:true});
 window.addEventListener("keydown",e=>{
   if(!e.altKey)return;
   if(e.key==="ArrowLeft"){e.preventDefault();histGo(-1);}
@@ -1317,7 +1440,9 @@ $("#doc").addEventListener("click",e=>{
   /* 뛰기 전에 지금 자리를 이력에 남긴다 — 뒤로 눌러 돌아올 수 있게 */
   histPush({p:S.sel,top:Math.max(0,t.offsetTop-dbox().clientHeight/2)});
   t.scrollIntoView({behavior:"smooth",block:"center"});
-  t.classList.add("hit");setTimeout(()=>t.classList.remove("hit"),1400);
+  /* 착지점이 빈 앵커면 감싼 문단을 물들인다 — 빈 태그는 강조해도 안 보인다 */
+  const box=(t.textContent||"").trim()?t:(t.parentElement||t);
+  box.classList.add("hit");setTimeout(()=>box.classList.remove("hit"),1400);
 });
 
 /* ── 추출 ───────────────────────────────────────────────── */
