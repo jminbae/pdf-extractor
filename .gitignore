@@ -7,3 +7,5 @@ transferred_pdfs/
 PaperExtract.exe
 grobid-win64.zip
 PDF Extractor.exe
+.playwright-mcp/
+probe_esearch.json

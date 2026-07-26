@@ -57,9 +57,14 @@
 지면 위·아래 5% 띠(러닝헤드·꼬리말 자리)도 아예 보지 않는다.
 
 ── 저장 ────────────────────────────────────────────────────────────
-JSON 옆 `<paper_id slug>_figs/` 폴더에 넣고, `figures[].image` 에는 **JSON 기준
-상대경로**를 담는다(절대경로 금지 — 폴더를 옮기면 깨진다). 폴더는 한 편에
-하나이고, 다시 돌리면 그 폴더를 이번 산출물로 맞춘다(멱등).
+`figures[].image` 에는 늘 **상대경로**를 담는다(절대경로 금지 — 폴더를 옮기면
+깨진다). 기준점은 부르는 쪽이 정한다.
+  · `out_dir` 을 주면 그 폴더에 넣고 image 는 **파일 이름만**. 앱 저장소는
+    정본을 `docs/<앞2>/<sha1>.json`, 그림을 `figs/<앞2>/<sha1>/` 에 따로 두고
+    `store.figs_dir(sha1)` 기준으로 image 를 푼다 — single.py 가 이 길로 부른다.
+  · 없으면 JSON 옆 `<paper_id slug>_figs/` 에 넣고 **JSON 기준** 상대경로.
+어느 쪽이든 폴더는 한 편에 하나이고, 다시 돌리면 그 폴더를 이번 산출물로
+맞춘다(멱등 — 지난 실행이 남긴 그림은 지운다).
 
 기본 형식은 PNG(170dpi)다. 한 장이 MAX_BYTES 를 넘으면 DPI 를 96까지 낮추고,
 그래도 넘으면 그때만 JPEG 로 바꾼다 — 임상 사진은 PNG 로 담으면 96dpi 에서도
@@ -107,6 +112,13 @@ DPI_DEFAULT = 170           # 기본 해상도
 DPI_MIN = 96                # 더 낮추지 않는다(읽을 수 없어진다)
 MAX_BYTES = 480_000         # PNG 한 장의 상한
 MAX_PIXELS = 2200           # 긴 변 픽셀 상한
+JPG_QUALITY = 82            # PNG 가 상한을 못 지킬 때만 쓰는 최후 수단
+
+# 원본 그대로 꺼내기(native_clip)의 잣대. 하나라도 어긋나면 렌더로 되돌린다.
+NATIVE_MIN_COVER = 0.88     # 이 그림 영역을 원본 한 장이 이만큼은 덮어야 한다
+NATIVE_AR_TOL = 0.05        # 가로세로 비 차이 한계 — 넘으면 회전·왜곡해 앉힌 것
+DECOR_MIN_COVER = 0.70      # 이만큼 덮는 사각형 하나는 테두리·배경으로 본다
+DECOR_THIN_PT = 2.5         # 이보다 얇으면 선·괘선
 
 _HEADING_RE = re.compile(
     r"^\s*(?:abstract|introduction|background|materials?\s+and\s+methods?|"
@@ -775,12 +787,109 @@ def render_clip(page, box, *, dpi: int = DPI_DEFAULT,
         dpi = max(DPI_MIN, min(dpi - 8, nxt))
     if len(data) > max_bytes and pix is not None:
         try:
-            jpg = pix.tobytes("jpeg", jpg_quality=82)
+            jpg = pix.tobytes("jpeg", jpg_quality=JPG_QUALITY)
             if jpg and len(jpg) < len(data):
                 return jpg, "jpg", dpi
         except Exception:                        # noqa: BLE001 — JPEG 미지원이면 PNG 그대로
             pass
     return data, "png", dpi
+
+
+def native_clip(page, box, *, max_bytes: int = MAX_BYTES
+                ) -> tuple[bytes, str, int] | None:
+    """그림이 **내장 이미지 한 장**이면 그 원본을 그대로 꺼낸다. 아니면 None.
+
+    지면을 다시 그리면(`render_clip`) 원본이 1418×1145 인 사진도 170dpi 에서
+    816×600 이 된다 — 화소의 30% 만 남는다(실측 6편 0.25~0.34). 이미 완성된
+    이미지가 파일로 박혀 있는데 다시 그릴 이유가 없다. 화질도 속도도 이쪽이 낫다.
+
+    다만 아래는 렌더로 돌려보낸다. 원본을 쓰면 **오히려 틀린다**.
+      · 조각이 둘 이상이다 — 패널 a·b·c 를 합친 그림이라 한 장으로 안 된다
+      · 조각이 이 그림 밖으로 걸쳐 있다 — 이 그림의 것이 아니다
+      · 원본과 놓인 자리의 **가로세로 비가 다르다** — 회전했거나 찌그러뜨려 앉혔다
+      · 원본이 놓인 크기에 비해 너무 작다(96dpi 미만) — 늘려 앉힌 것이라 이득이 없다
+      · 용량 상한을 못 지킨다 — 렌더 쪽에는 DPI 를 낮추는 사다리가 있다
+    """
+    import fitz
+
+    rect = fitz.Rect(*box) & page.rect
+    if rect.is_empty:
+        return None
+    area = rect.get_area() or 1.0
+
+    # 사진 위에 얹힌 도형이 무엇인지 가린다. 테두리·배경은 버려도 되지만
+    # **화살표·표식은 버리면 안 된다** — 화질보다 내용이 먼저다.
+    # 실측: 테두리는 선 굵기 0.2pt 짜리 그림 전체 크기 사각형(항목 1개),
+    # 배경은 채워진 그림 전체 크기 사각형(항목 1개). 화살표는 28×54 에 항목 6개.
+    try:
+        for dr in page.get_drawings():
+            dbox = dr.get("rect")
+            if dbox is None or (dbox & rect).get_area() <= 0:
+                continue
+            if min(dbox.width, dbox.height) <= DECOR_THIN_PT:
+                continue                         # 얇은 선·괘선
+            items = dr.get("items") or ()
+            # **사각형 하나**로 그림을 두르거나 깔아 놓은 것만 장식으로 본다.
+            # 항목 수만 보면 위험하다 — 그림을 대각선으로 가로지르는 화살표가
+            # 폴리라인 하나(items=1)로 그려지면 bbox 가 그림만 해진다.
+            if (len(items) == 1 and items[0] and items[0][0] == "re"
+                    and dbox.get_area() >= DECOR_MIN_COVER * area):
+                continue
+            return None                          # 그 밖은 내용일 수 있다
+    except Exception:                            # noqa: BLE001
+        return None
+
+    hit = None
+    for item in page.get_images(full=True):
+        xref = int(item[0])
+        # item[1] 은 SMask(투명도 마스크) xref. Pixmap(doc, xref) 는 마스크를
+        # 합성해 주지 않으므로, 있으면 원본만 꺼냈을 때 화면과 달라진다 → 렌더로.
+        if len(item) > 1 and int(item[1] or 0):
+            return None
+        try:
+            rects = page.get_image_rects(xref)
+        except Exception:                        # noqa: BLE001
+            return None
+        for r in rects:
+            inter = (r & rect).get_area()
+            if inter <= 0:
+                continue
+            if inter < 0.5 * (r.get_area() or 1.0):
+                return None                      # 그림 밖으로 걸친 조각
+            if hit is not None:
+                return None                      # 두 장 이상
+            hit = (xref, r)
+    if hit is None:
+        return None
+    xref, r = hit
+    if (r & rect).get_area() < NATIVE_MIN_COVER * area:
+        return None                              # 영역을 다 못 채운다 → 도형이 섞였다
+
+    try:
+        pix = fitz.Pixmap(page.parent, xref)
+        if pix.colorspace is None or pix.n - pix.alpha >= 4:   # CMYK·분판
+            pix = fitz.Pixmap(fitz.csRGB, pix)
+        w, h = pix.width, pix.height
+        if not w or not h:
+            return None
+        ar_native, ar_placed = w / h, (r.width or 1.0) / (r.height or 1.0)
+        if abs(ar_native - ar_placed) > NATIVE_AR_TOL * max(ar_native, ar_placed):
+            return None                          # 회전·왜곡해 앉힌 것
+        eff_dpi = int(w * 72.0 / max(r.width, 1.0))
+        if eff_dpi < DPI_MIN:
+            return None                          # 늘려 앉힌 저해상도 원본
+        if max(w, h) > MAX_PIXELS:               # 상단 상수와 같은 뜻(긴 변 기준)
+            return None                          # 메모리 폭주 방지 — 렌더 쪽 사다리로
+        data = pix.tobytes("png")
+        ext = "png"
+        if len(data) > max_bytes:
+            jpg = pix.tobytes("jpeg", jpg_quality=JPG_QUALITY)
+            if not jpg or len(jpg) > max_bytes:
+                return None
+            data, ext = jpg, "jpg"
+    except Exception:                            # noqa: BLE001 — 한 장 실패가 전체를 막지 않는다
+        return None
+    return data, ext, eff_dpi
 
 
 # ── 그림 항목 ↔ PDF 캡션 짝짓기 ──────────────────────────────────────
@@ -890,6 +999,7 @@ def fill_document(doc: dict, pdf_path: str | Path, *,
         "paper_id": out.get("paper_id"), "pdf": str(pdf_path),
         "figures_total": len(figs), "clipped": 0, "from_image": 0,
         "from_draw": 0, "from_mixed": 0, "skipped": 0, "contaminated": 0,
+        "native": 0,                             # 원본을 그대로 꺼낸 장수
         "bytes": 0, "dir": str(dest_dir), "reasons": {}, "items": [],
     }
 
@@ -1020,13 +1130,22 @@ def fill_document(doc: dict, pdf_path: str | Path, *,
                 name, nbytes, real_dpi = made[p["stem"]]
                 nbytes = 0                       # 용량은 한 번만 센다
             elif write:
-                try:
-                    data, ext, real_dpi = render_clip(page, p["box"], dpi=dpi,
-                                                      max_bytes=max_bytes)
-                except Exception as e:           # noqa: BLE001 — 한 장 실패가 전체를 막지 않는다
-                    bump(f"render_fail:{type(e).__name__}")
-                    stats["skipped"] += 1
-                    continue
+                got = None
+                if p["kind"] in ("image", "mixed"):
+                    # 사진 한 장짜리 그림은 원본을 그대로 꺼낸다(화질·속도 둘 다 이득).
+                    # 조건에 안 맞으면 None 을 주고 아래 렌더로 내려간다.
+                    got = native_clip(page, p["box"], max_bytes=max_bytes)
+                    if got is not None:
+                        stats["native"] += 1
+                if got is None:
+                    try:
+                        got = render_clip(page, p["box"], dpi=dpi,
+                                          max_bytes=max_bytes)
+                    except Exception as e:       # noqa: BLE001 — 한 장 실패가 전체를 막지 않는다
+                        bump(f"render_fail:{type(e).__name__}")
+                        stats["skipped"] += 1
+                        continue
+                data, ext, real_dpi = got
                 name = f"{p['stem']}.{ext}"
                 (dest_dir / name).write_bytes(data)
                 nbytes = len(data)
@@ -1084,5 +1203,5 @@ def apply_to_parsed(document, pdf_path: str | Path, *,
     return stats
 
 
-__all__ = ["fill_document", "apply_to_parsed", "render_clip",
+__all__ = ["fill_document", "apply_to_parsed", "render_clip", "native_clip",
            "DPI_DEFAULT", "MAX_BYTES"]

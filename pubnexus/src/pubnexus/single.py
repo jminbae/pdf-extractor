@@ -343,9 +343,14 @@ def _extract(pdf: Path, cfg: dict, ctx: "_Ctx", *, out_json, on_progress,
     # figures[].image 가 전부 None 이었다(앱이 캡션만 띄우고 그림은 못 띄웠다).
     # tablefill 뒤에 둔다 — tables[].pdf_span 을 표 영역 장벽으로 쓴다.
     try:
-        from . import figclip
+        from . import figclip, store
+        # 앱 저장소는 정본(docs/)과 그림(figs/)을 다른 자리에 둔다. app.py 는
+        # figures[].image 를 **store.figs_dir(sha1) 기준**으로 푼다(app.py
+        # figures_html). 그러니 sha1 이 있으면 그 폴더에 바로 넣는다.
+        _sha = str(rec.get("sha1") or "")
         d, _st = figclip.fill_document(
-            d, pdf, json_path=out_json or default_json_path(pdf))
+            d, pdf, json_path=out_json or default_json_path(pdf),
+            out_dir=store.figs_dir(_sha) if _sha else None)
         if _st.get("clipped"):
             notes.append(f"그림 추출 {_st['clipped']}장"
                          f"({_st['bytes'] // 1024}KB)")

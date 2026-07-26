@@ -227,6 +227,25 @@ def chips_html(meta: dict) -> str:
     return "".join(out)
 
 
+def fig_path(sha1: str, rel: str) -> Path | None:
+    """저장소 그림 폴더 안의 파일 하나. 폴더 밖이거나 없으면 None.
+
+    화면에 그림을 흘려보내는 쪽과 '다른 이름으로 저장' 쪽이 **같은 잣대**를 쓴다.
+    한쪽만 느슨하면 그쪽이 구멍이 된다.
+    """
+    from pubnexus import store
+    if not re.fullmatch(r"[0-9a-fA-F]{6,64}", sha1 or ""):
+        return None
+    base = store.figs_dir(sha1).resolve()
+    try:
+        fp = (base / rel).resolve()
+    except Exception:  # noqa: BLE001
+        return None
+    if base not in fp.parents and fp.parent != base:
+        return None                      # ../ 로 저장소 밖을 훔쳐보려는 시도
+    return fp if fp.exists() else None
+
+
 def _img_size(fp: Path) -> tuple[int, int] | None:
     """이미지의 픽셀 크기를 헤더만 읽어 알아낸다(PNG·JPEG). 모르면 None.
 
@@ -306,7 +325,17 @@ def figures_html(doc: dict, sha1: str) -> str:
         return ""                       # 아직 그림 파일이 없다 → 자리를 만들지 않는다
     out = ["<h2>Figures</h2>"]
     for url, cap, wh in items:
-        out.append('<figure class="fig">')
+        # 본문의 'Figure 1' 이 찾아올 착지점. 번호 읽기는 captions 것을 그대로
+        # 쓴다 — 여기서 정규식을 새로 쓰면 'Supplementary Figure 1' 과 'Figure 1'
+        # 이 같은 id 를 갖는다(둘 다 있는 논문이 흔하다).
+        anchor = ""
+        if cap:
+            from pubnexus import captions as _cap
+            got = _cap.parse_caption(cap, min_desc=0)
+            if got and got["kind"] == "fig" and got["num"] is not None \
+                    and not got["supp"]:
+                anchor = f' id="fig-{got["num"]}"'
+        out.append(f'<figure class="fig"{anchor}>')
         if url:
             # 크기를 함께 보낸다 — 자리를 미리 잡아야 링크 착지점이 밀리지 않는다.
             dim = f' width="{wh[0]}" height="{wh[1]}"' if wh else ""
@@ -912,21 +941,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _fig(self, sha1: str, rel: str) -> None:
         """저장소 그림 폴더의 이미지 한 장. 폴더 밖으로는 절대 나가지 않는다."""
-        from pubnexus import store
-        if not re.fullmatch(r"[0-9a-fA-F]{6,64}", sha1 or ""):
-            self.send_error(404)
-            return
-        base = store.figs_dir(sha1).resolve()
-        try:
-            fp = (base / rel).resolve()
-        except Exception:  # noqa: BLE001
-            self.send_error(404)
-            return
-        if base not in fp.parents and fp.parent != base:
-            self.send_error(403)         # ../ 로 저장소 밖을 훔쳐보려는 시도
-            return
-        ctype = self._IMG.get(fp.suffix.lower())
-        if not ctype or not fp.exists():
+        fp = fig_path(sha1, rel)
+        ctype = self._IMG.get(fp.suffix.lower()) if fp else None
+        if not ctype:
             self.send_error(404)
             return
         self._send(fp.read_bytes(), ctype, cache="max-age=600")
@@ -989,6 +1006,31 @@ class Api:
             return {"ok": False}
         self._app.set_folder(Path(res[0]))
         return {"ok": True, "path": str(self._app.folder)}
+
+    def save_figure(self, sha1: str, name: str) -> dict:
+        """그림 한 장을 원장이 고른 자리에 저장한다(우클릭 → 다른 이름으로 저장).
+
+        화면의 <img> 는 저장소 안을 가리키는 내부 주소라 브라우저 기본 저장이
+        먹지 않는다. 파일을 그대로 복사해 준다.
+        """
+        import shutil
+        import webview
+        src = fig_path(sha1, name)
+        if src is None:
+            return {"ok": False, "why": "그림 파일을 찾지 못했습니다"}
+        w = self._app.window
+        res = w.create_file_dialog(webview.SAVE_DIALOG,
+                                   save_filename=Path(name).name)
+        if not res:
+            return {"ok": False}                     # 취소는 실패가 아니다
+        dst = Path(res[0] if isinstance(res, (list, tuple)) else res)
+        if not dst.suffix:
+            dst = dst.with_suffix(src.suffix)        # 확장자를 지우고 저장하는 사람이 있다
+        try:
+            shutil.copyfile(utils.long_path(src), utils.long_path(dst))
+        except OSError as e:
+            return {"ok": False, "why": f"저장하지 못했습니다: {e.strerror or e}"}
+        return {"ok": True, "path": str(dst)}
 
     def extract(self, which: str, index: int = -1) -> dict:
         a = self._app
@@ -1084,9 +1126,8 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .btn.ghost:hover{background:#f2f4f7;color:var(--ink2)}
 #path{flex:1;min-width:0;color:var(--ink2);font-size:12.5px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#path b{font-weight:600}
-/* 앞쪽(상위 경로)은 옅게, 끝의 폴더 이름만 진하게 — 순서는 실제 경로 그대로다. */
-#path span{color:var(--mut2)}
+/* 경로는 한 덩어리로 고르게 보여준다. 끝만 굵거나 진하면 시선이 그리로 끌려
+   경로를 읽는 흐름이 끊긴다. 어차피 전체 경로는 툴팁에 있다. */
 #gro{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);
   padding:3px 9px;border-radius:20px;background:#f4f5f7;white-space:nowrap}
 #gro i{width:7px;height:7px;border-radius:50%;background:var(--mut2);
@@ -1117,7 +1158,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 
 /* ── 3분할 ──────────────────────────────────────────────── */
 #cols{flex:1;min-height:0;display:grid;
-  grid-template-columns:minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,3fr)}
+  grid-template-columns:minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,2fr)}
 .split{background:var(--line);cursor:col-resize;position:relative}
 .split::after{content:"";position:absolute;inset:0 -4px;z-index:5}
 .split:hover{background:var(--accent)}
@@ -1224,6 +1265,23 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 #refpop .go{font-family:var(--ui);font-size:11px;color:var(--mut);
   background:none;border:0;padding:4px 0 0;cursor:pointer;display:block}
 #refpop .go:hover{color:var(--accent);text-decoration:underline}
+#refpop .pic{display:block;max-width:100%;max-height:52vh;height:auto;
+  border:1px solid var(--line);border-radius:4px;background:#fff}
+#refpop .cap{font-family:var(--ui);font-size:11.5px;color:var(--mut);
+  line-height:1.55;margin-top:7px}
+#art a.figref{color:var(--accent);text-decoration:none;cursor:pointer;
+  border-bottom:1px dotted rgba(90,120,170,.5)}
+#art a.figref:hover{border-bottom-style:solid}
+#art a.figref.on{background:#eef3fb;border-radius:3px}
+/* 그림 우클릭 메뉴 */
+#figmenu{position:fixed;z-index:70;min-width:158px;padding:4px;
+  background:#fff;border:1px solid var(--line);border-radius:7px;
+  box-shadow:0 8px 24px rgba(20,26,34,.18)}
+#figmenu button{display:block;width:100%;text-align:left;border:0;background:none;
+  font-family:var(--ui);font-size:12.5px;color:#2b333d;
+  padding:7px 10px;border-radius:5px;cursor:pointer}
+#figmenu button:hover{background:#eef3fb;color:var(--accent)}
+#art .fig img{cursor:context-menu}
 #art .fig{margin:0 0 18px;padding:0}
 #art .fig img{max-width:100%;height:auto;display:block;border:1px solid var(--line);
   border-radius:6px;background:#fff}
@@ -1355,11 +1413,8 @@ function renderPath(){
   const name=parts.pop()||full;
   let segs=parts,cut=false;
   const draw=()=>{
-    el.textContent="";
     const head=(cut?"…\\":"")+(segs.length?segs.join("\\")+"\\":"");
-    if(head){const s=document.createElement("span");s.textContent=head;
-      el.appendChild(s);}
-    const b=document.createElement("b");b.textContent=name;el.appendChild(b);};
+    el.textContent=head+name;};
   draw();
   let guard=0;
   while(el.scrollWidth>el.clientWidth+1&&segs.length&&guard++<40){
@@ -1536,6 +1591,7 @@ function renderDoc(d){
   const art=$("#art");
   art.innerHTML=d.html||"";
   linkCites(art);
+  linkFigs(art);
   box.scrollTop=0;
   const f=$("#foot");f.textContent="";
   const s=document.createElement("span");s.textContent=d.info||"";f.appendChild(s);
@@ -1568,6 +1624,39 @@ function linkCites(art){
     const a=document.createElement("a");
     a.className="cite";a.href="#ref-"+m[1];a.textContent=s.textContent;
     s.replaceWith(a);});
+}
+
+/* 본문의 'Figure 1'·'Fig. 2' 를 그림으로 가는 링크로. 렌더러가 앵커를 주지
+   않으므로 화면에서 만든다 — 있는 그림에만 건다(없는 번호는 그냥 글자). */
+const _FIGREF=/\bfigs?\.?\s*(\d{1,2})|\bfigures?\s*(\d{1,2})/gi;
+function linkFigs(art){
+  if(!art.querySelector('[id^="fig-"]'))return;
+  const walk=document.createTreeWalker(art,NodeFilter.SHOW_TEXT,{
+    acceptNode(n){
+      /* 캡션·제목·이미 링크인 곳은 건드리지 않는다 */
+      if(!n.nodeValue||!/fig/i.test(n.nodeValue))return NodeFilter.FILTER_REJECT;
+      const p=n.parentElement;
+      if(!p||p.closest("a,figcaption,h1,h2,h3,h4,code"))return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;}});
+  const hits=[];for(let n;(n=walk.nextNode());)hits.push(n);
+  hits.forEach(node=>{
+    const t=node.nodeValue;let last=0,frag=null;
+    _FIGREF.lastIndex=0;
+    for(let m;(m=_FIGREF.exec(t));){
+      const num=m[1]||m[2];
+      /* 'Supplementary Figure 1' 은 본문 Figure 1 이 아니다 — 앵커도 본문
+         그림에만 붙는다(figures_html). 앞말을 보고 건너뛴다. */
+      if(/supp(?:l|lementary)?\.?\s*$/i.test(t.slice(Math.max(0,m.index-16),m.index)))
+        continue;
+      if(!art.querySelector("#fig-"+num))continue;
+      frag=frag||document.createDocumentFragment();
+      if(m.index>last)frag.appendChild(document.createTextNode(t.slice(last,m.index)));
+      const a=document.createElement("a");
+      a.className="figref";a.href="#fig-"+num;a.textContent=m[0];
+      frag.appendChild(a);last=m.index+m[0].length;}
+    if(frag){
+      if(last<t.length)frag.appendChild(document.createTextNode(t.slice(last)));
+      node.replaceWith(frag);}});
 }
 
 /* ── PDF: 모든 쪽을 이어 붙이고, 보이는 곳만 그린다 ──────── */
@@ -1630,14 +1719,14 @@ window.addEventListener("resize",()=>{clearTimeout(rt);
 /* ── 분할선 ───────────────────────────────────────────────
    폭을 px 로 굳히지 않고 **비율(fr)** 로 유지한다 — 창 크기를 바꿔도
    1 : 1 : 2 로 잡아둔 배분이 그대로 따라간다. 분할선을 두 번 누르면 기본값. */
-const DEF_COLS="minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,3fr)";
+const DEF_COLS="minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,2fr)";
 (function(){
   let cur=null,x0=0,a0=0,b0=0,c0=0;
   const cols=$("#cols"), MIN=150;
   const put=(a,b,c)=>{cols.style.gridTemplateColumns=
     a.toFixed(3)+"fr 1px "+b.toFixed(3)+"fr 1px "+c.toFixed(3)+"fr";};
   document.querySelectorAll(".split").forEach(s=>{
-    s.title="끌어서 폭 조절 · 두 번 누르면 기본 비율(1 : 2 : 3)";
+    s.title="끌어서 폭 조절 · 두 번 누르면 기본 비율(1 : 2 : 2)";
     s.addEventListener("dblclick",()=>{cols.style.gridTemplateColumns=DEF_COLS;layout(true);});
     s.addEventListener("mousedown",e=>{
       cur=+s.dataset.s;x0=e.clientX;
@@ -1677,13 +1766,32 @@ function refPop(a,t){
   popClose();
   const p=document.createElement("div");
   p.id="refpop";
-  const num=(a.textContent||"").replace(/[\[\]\s]/g,"");
-  p.innerHTML=(num?'<span class="num">참고문헌 '+num+'</span>':"")+
+  const isFig=t.tagName==="FIGURE";
+  const num=isFig?(t.id||"").replace("fig-","")
+                 :(a.textContent||"").replace(/[\[\]\s]/g,"");
+  p.innerHTML=(num?'<span class="num">'+(isFig?"그림 ":"참고문헌 ")+num+'</span>':"")+
               '<div class="body"></div>'+
-              '<button class="go" type="button">목록에서 보기 →</button>';
-  /* 항목 글만 넣는다. 원본을 그대로 옮기면 id 가 겹쳐 다음 클릭이 팝업을
-     가리키게 된다 — textContent 로 담아 그런 일을 막는다. */
-  p.querySelector(".body").textContent=(t.textContent||"").trim();
+              '<button class="go" type="button">'+
+              (isFig?"그림 자리로 →":"목록에서 보기 →")+'</button>';
+  const body=p.querySelector(".body");
+  if(isFig){
+    /* 그림은 글이 아니라 그림을 보여줘야 한다. 원본을 옮기면 id 가 겹치므로
+       이미지 주소만 가져다 새로 만든다. */
+    const im=t.querySelector("img");
+    if(im){const c=document.createElement("img");c.className="pic";
+      /* 크기를 함께 넘긴다 — 안 넘기면 높이 0 으로 재고 나서 이미지가 도착해
+         카드가 화면 밖으로 밀린다(본문에서 겪은 그 문제와 같다). */
+      ["width","height"].forEach(k=>{const v=im.getAttribute(k);
+        if(v)c.setAttribute(k,v);});
+      c.src=im.getAttribute("src");body.appendChild(c);}
+    const cap=t.querySelector("figcaption");
+    if(cap){const d=document.createElement("div");d.className="cap";
+      d.textContent=(cap.textContent||"").trim();body.appendChild(d);}
+  }else{
+    /* 항목 글만 넣는다. 원본을 그대로 옮기면 id 가 겹쳐 다음 클릭이 팝업을
+       가리키게 된다 — textContent 로 담아 그런 일을 막는다. */
+    body.textContent=(t.textContent||"").trim();
+  }
   p.querySelector(".go").onclick=()=>{popClose();jumpTo(t);};
   document.body.appendChild(p);
 
@@ -1695,9 +1803,64 @@ function refPop(a,t){
   p.style.left=left+"px";p.style.top=top+"px";
   a.classList.add("on");popFor=a;
 }
-window.addEventListener("keydown",e=>{if(e.key==="Escape")popClose();},true);
+/* ── 그림 우클릭: 복사·저장 ────────────────────────────────────────
+   <img> 가 가리키는 곳이 저장소 안 내부 주소라 브라우저 기본 저장이 먹지
+   않는다. 복사는 클립보드로 바로, 저장은 파이썬에 파일 복사를 시킨다. */
+function figMenuClose(){const m=$("#figmenu");if(m)m.remove();}
+function figSrcParts(img){
+  const u=new URL(img.getAttribute("src"),location.href);
+  return {sha:u.searchParams.get("s")||"",name:u.searchParams.get("f")||""};
+}
+$("#doc").addEventListener("contextmenu",e=>{
+  const img=e.target.closest(".fig img");
+  if(!img)return;
+  e.preventDefault();figMenuClose();popClose();
+  const m=document.createElement("div");
+  m.id="figmenu";
+  m.innerHTML='<button type="button" data-a="copy">이미지 복사</button>'+
+              '<button type="button" data-a="save">다른 이름으로 저장…</button>';
+  document.body.appendChild(m);
+  const b=m.getBoundingClientRect(),M=8;
+  m.style.left=Math.min(e.clientX,innerWidth-b.width-M)+"px";
+  m.style.top=Math.min(e.clientY,innerHeight-b.height-M)+"px";
+  m.onclick=async ev=>{
+    const act=(ev.target.dataset||{}).a; if(!act)return;
+    figMenuClose();
+    const {sha,name}=figSrcParts(img);
+    if(act==="save"){
+      const r=await api().save_figure(sha,name);
+      if(r&&r.ok)toast("저장했습니다");
+      else if(r&&r.why)toast(r.why);
+      return;
+    }
+    try{
+      const blob=await (await fetch(img.src)).blob();
+      /* 클립보드는 PNG 만 확실히 받는다. JPEG 는 캔버스로 옮겨 담는다. */
+      let item=blob;
+      if(blob.type!=="image/png"){
+        item=await new Promise(res=>{
+          const im=new Image();
+          im.onload=()=>{const c=document.createElement("canvas");
+            c.width=im.naturalWidth;c.height=im.naturalHeight;
+            c.getContext("2d").drawImage(im,0,0);c.toBlob(res,"image/png");};
+          im.src=URL.createObjectURL(blob);});
+      }
+      await navigator.clipboard.write([new ClipboardItem({"image/png":item})]);
+      toast("이미지를 복사했습니다");
+    }catch(err){toast("복사하지 못했습니다");}
+  };
+},true);
 window.addEventListener("mousedown",e=>{
-  if($("#refpop")&&!e.target.closest("#refpop")&&!e.target.closest("a.cite"))popClose();},true);
+  if($("#figmenu")&&!e.target.closest("#figmenu"))figMenuClose();},true);
+window.addEventListener("scroll",figMenuClose,true);
+window.addEventListener("resize",figMenuClose);
+
+window.addEventListener("keydown",e=>{if(e.key==="Escape"){popClose();figMenuClose();}},true);
+window.addEventListener("mousedown",e=>{
+  /* 인용·그림 링크는 예외다 — 여기서 닫아 버리면 뒤이은 click 의 '또 누르면
+     닫기' 토글이 무력해져 닫혔다가 즉시 다시 열린다. */
+  if($("#refpop")&&!e.target.closest("#refpop")&&!e.target.closest("a.cite,a.figref"))
+    popClose();},true);
 /* 자리를 fixed 로 잡으므로, 스크롤·창 크기 변화로 링크가 움직이면 닫는다 —
    안 그러면 카드만 허공에 남는다. 다른 칸(PDF 쪽) 스크롤도 마찬가지다. */
 window.addEventListener("scroll",popClose,true);
@@ -1710,7 +1873,8 @@ $("#doc").addEventListener("click",e=>{
   const id=a.getAttribute("href").slice(1);
   const t=document.getElementById(id);
   if(!t)return;
-  if(id.indexOf("ref-")===0){refPop(a,t);return;}
+  /* 참고문헌도 그림도 **읽던 자리에서** 보여준다. 아래로 뛰면 자리를 잃는다. */
+  if(id.indexOf("ref-")===0||id.indexOf("fig-")===0){refPop(a,t);return;}
   jumpTo(t);
 });
 
