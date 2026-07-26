@@ -2,7 +2,7 @@
 
     [폴더] [추출하기]                          진행률
     ┌──────────┬──────────────────┬──────────────────┐
-    │ 파일 목록 │ PDF 원본          │ 추출 결과         │
+    │ 파일 목록 │ PDF               │ 추출 결과         │
     │  ✓ 추출됨 │ (페이지 이미지)    │ (Markdown)       │
     └──────────┴──────────────────┴──────────────────┘
 
@@ -364,9 +364,9 @@ class App(tk.Tk):
         self.lb.bind("<<ListboxSelect>>", self.on_select)
         pan.add(left, weight=0)
 
-        # 2) PDF 원본
+        # 2) PDF
         mid = ttk.Frame(pan)
-        ttk.Label(mid, text="PDF 원본", style="Pane.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(mid, text="PDF", style="Pane.TLabel").pack(anchor="w", pady=(0, 4))
         pbox = ttk.Frame(mid, style="Card.TFrame")
         pbox.pack(fill="both", expand=True)
         self.pdf = PdfPane(pbox)

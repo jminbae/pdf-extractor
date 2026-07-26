@@ -129,6 +129,9 @@ def _references_block(doc: dict) -> list[str]:
         #   icite   : API 에는 있는데 지면 목록에서 못 찾은 항목
         #   foreign : 같은 지면에 실린 **옆 논문**의 참고문헌
         out += ["", "### 번호 미확정 (본문 링크 없음)"]
+        if doc.get("references_warning") == "icite_no_overlap":
+            out += ["", "*API 목록이 지면 목록과 한 건도 겹치지 않는다 — "
+                        "이 논문의 참고문헌이 아닐 수 있다(PMID 오배정 의심).*"]
         for r in rest:
             tag = {"icite": "API에만 있음", "foreign": "옆 논문 목록",
                    }.get(r.get("source"), "지면 번호 미확정")

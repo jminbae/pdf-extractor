@@ -2,7 +2,7 @@
 
     [폴더 열기]  경로            GROBID ●        [이 논문만] [전부 추출] [중지]
     ┌────────┬──────────────────────┬──────────────────────────┐
-    │ 파일   │ PDF 원본              │ 추출 결과                 │
+    │ 파일   │ PDF                   │ 추출 결과                 │
     │ 목록   │ (모든 쪽 연속 스크롤)  │ (논문처럼 읽히는 화면)     │
     └────────┴──────────────────────┴──────────────────────────┘
 
@@ -287,8 +287,10 @@ def md_to_html(md: str, chips: str = "", figs: str = "") -> str:
         """
         if not in_refs or 'id="ref-' in x:
             return f"<li>{x}</li>"
-        m = _REFNUM_RE.match(re.sub(r"<[^>]+>", "", x))
-        return f'<li id="ref-{m.group(1)}">{x}</li>' if m else f"<li>{x}</li>"
+        from pubnexus import render as _r
+        m = _r.REF_LINE_RE.match(re.sub(r"<[^>]+>", "", x))
+        return (f'<li id="{_r.ref_anchor_id(m.group(1))}">{x}</li>'
+                if m else f"<li>{x}</li>")
 
     def flush_ul() -> None:
         if ul:
@@ -374,11 +376,14 @@ def md_to_html(md: str, chips: str = "", figs: str = "") -> str:
 
         if in_refs:
             # 참고문헌은 `15. Kim …` 처럼 문단으로 온다. 본문 [15] 가 내려앉을
-            # 착지점을 여기서 만든다(렌더러가 앵커를 직접 넣어주면 그쪽이 우선).
-            m = _REFNUM_RE.match(line)
+            # 착지점을 여기서 만드는 것이 **화면 쪽 몫**이다(확정 계약).
+            # 번호 → 앵커 id 규칙은 render 것을 그대로 쓴다 — 어긋나면 안 된다.
+            from pubnexus import render as _r
+            m = _r.REF_LINE_RE.match(line)
             body = _inline(line)
             if m and 'id="ref-' not in body:
-                out.append(f'<p class="ref" id="ref-{m.group(1)}">{body}</p>')
+                aid = _r.ref_anchor_id(m.group(1))
+                out.append(f'<p class="ref" id="{aid}">{body}</p>')
                 continue
             out.append(f'<p class="ref">{body}</p>')
             continue
@@ -566,6 +571,27 @@ class App:
         self._last_push = now
         self.push("status", {"text": text, "pct": pct, "busy": busy})
 
+    # ── 지난번에 보던 자리 ──────────────────────────────────────────
+    def ui_path(self) -> Path:
+        from pubnexus import store
+        return store.root() / "ui.json"
+
+    def ui_load(self) -> dict:
+        try:
+            d = utils.read_json(self.ui_path())
+            return d if isinstance(d, dict) else {}
+        except Exception:  # noqa: BLE001 — 없거나 깨졌으면 그냥 처음처럼
+            return {}
+
+    def ui_save(self, **kw) -> None:
+        try:
+            d = self.ui_load()
+            d.update(kw)
+            self.ui_path().parent.mkdir(parents=True, exist_ok=True)
+            utils.write_json(self.ui_path(), d)
+        except Exception:  # noqa: BLE001 — 기억 못 해도 앱은 돌아간다
+            pass
+
     # ── 폴더 ────────────────────────────────────────────────────────
     def set_folder(self, folder: Path) -> None:
         self.folder = Path(folder)
@@ -573,7 +599,11 @@ class App:
         self.pdfs = sorted((p for p in self.folder.rglob("*.pdf") if p.is_file()),
                            key=lambda p: p.name.lower())
         self.scan_store()
-        self.push("folder", {"path": str(self.folder), "files": self.file_rows()})
+        ui = self.ui_load()
+        last = ui.get("paper") if _norm(ui.get("folder") or "") == _norm(self.folder) else None
+        self.ui_save(folder=str(self.folder))
+        self.push("folder", {"path": str(self.folder), "files": self.file_rows(),
+                             "last": last})
         self.status("", busy=False, force=True)
 
     def scan_store(self) -> None:
@@ -893,8 +923,15 @@ class Api:
 
     def state(self) -> dict:
         a = self._app
+        ui = a.ui_load()
+        last = ui.get("paper") if _norm(ui.get("folder") or "") == _norm(a.folder or "") else None
         return {"path": str(a.folder or ""), "grobid": a.grobid.state,
-                "sec": a.grobid.secs, "files": a.file_rows()}
+                "sec": a.grobid.secs, "files": a.file_rows(), "last": last}
+
+    def remember(self, name: str) -> dict:
+        """마지막에 보던 논문. 다음에 켜면 그 자리에서 이어 본다."""
+        self._app.ui_save(paper=str(name or ""))
+        return {"ok": True}
 
     def reveal(self, path: str) -> dict:
         try:
@@ -949,7 +986,8 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 #path{flex:1;min-width:0;color:var(--ink2);font-size:12.5px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #path b{font-weight:600}
-#path span{color:var(--mut2);font-size:11.5px;margin-left:7px}
+/* 앞쪽(상위 경로)은 옅게, 끝의 폴더 이름만 진하게 — 순서는 실제 경로 그대로다. */
+#path span{color:var(--mut2)}
 #gro{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);
   padding:3px 9px;border-radius:20px;background:#f4f5f7;white-space:nowrap}
 #gro i{width:7px;height:7px;border-radius:50%;background:var(--mut2);
@@ -961,8 +999,12 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 /* ── 진행 표시 — 일이 없으면 자리를 차지하지 않는다 ────────── */
 #prog{flex:none;height:0;overflow:hidden;background:var(--panel);
   border-bottom:1px solid transparent;transition:height .18s ease}
+#prog.idle{height:27px;border-bottom-color:var(--line)}
 #prog.on{height:41px;border-bottom-color:var(--line)}
-#prog .in{display:flex;align-items:center;gap:14px;padding:0 15px;height:38px}
+#prog .in{display:flex;align-items:center;gap:12px;padding:0 15px;height:27px}
+#prog.on .in{height:38px}
+#prog:not(.on) #bar{display:none}
+#prog:not(.on) .sep{display:none}
 #pcount{font-size:12px;color:var(--ink2);font-variant-numeric:tabular-nums;
   white-space:nowrap}
 #pstage{font-size:11.5px;color:var(--mut);white-space:nowrap}
@@ -984,12 +1026,11 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
   overflow:hidden}
 
 /* ── 왼쪽: 목록 ─────────────────────────────────────────── */
-#find{padding:10px 10px 8px}
+#find{padding:10px 10px 9px}
 #q{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:7px;
   font:inherit;font-size:12px;background:#fafbfc;outline:none}
 #q:focus{border-color:#c3cfe6;background:#fff;box-shadow:0 0 0 3px var(--accent-s)}
-#count{padding:0 12px 7px;font-size:11px;color:var(--mut2)}
-#list{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 6px 10px}
+#list{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 6px 10px;outline:none}
 .row{display:flex;gap:7px;align-items:flex-start;padding:6px 7px;border-radius:6px;
   cursor:default;font-size:11.5px;line-height:1.45;color:var(--ink2);
   overflow-wrap:anywhere;word-break:normal;hyphens:none}
@@ -1125,8 +1166,8 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 <div id="prog">
   <div class="in">
     <span id="pcount"></span><span class="sep"></span>
-    <span id="pstage"></span>
     <span id="pname"></span>
+    <span id="pstage"></span>
     <span id="peta"></span>
   </div>
   <div id="bar"><span></span></div>
@@ -1134,13 +1175,12 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 
 <div id="cols">
   <div class="pane">
-    <div id="find"><input id="q" placeholder="파일 이름으로 걸러내기" spellcheck="false"></div>
-    <div id="count"></div>
-    <div id="list"></div>
+    <div id="find"><input id="q" placeholder="파일 이름 검색" spellcheck="false"></div>
+    <div id="list" tabindex="0"></div>
   </div>
   <div class="split" data-s="0"></div>
   <div class="pane">
-    <div class="head"><span class="t">PDF 원본</span><span class="sp"></span>
+    <div class="head"><span class="t">PDF</span><span class="sp"></span>
       <button class="zbtn" id="zo" title="축소">−</button>
       <span id="pgno">—</span>
       <button class="zbtn" id="zi" title="확대">＋</button>
@@ -1173,7 +1213,8 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 const $=s=>document.querySelector(s), DPR=Math.min(window.devicePixelRatio||1,2);
 const S={files:[],view:[],sel:-1,key:null,pages:[],zoom:1,fitW:0,bucket:1200,
          els:[],io:null,busy:false,ready:false,
-         hist:[],hidx:-1,mem:{}};   /* 이동 이력 · 논문별로 읽던 자리 */
+         hist:[],hidx:-1,mem:{},    /* 이동 이력 · 논문별로 읽던 자리 */
+         cursor:-1,last:null};      /* 목록 커서 · 지난번에 보던 논문 */
 
 /* ── 도우미 ─────────────────────────────────────────────── */
 let tmr=null;
@@ -1187,41 +1228,87 @@ function ask(title,msg,ok,alone){return new Promise(res=>{
     $("#mo").onclick=null;$("#mc").onclick=null;res(v);};
   $("#mo").onclick=()=>done(true);$("#mc").onclick=()=>done(false);});}
 const api=()=>window.pywebview&&window.pywebview.api;
-/* 경로 전체를 늘어놓으면 지저분하다 — 폴더 이름만, 전체는 툴팁으로 */
+/* 경로는 **읽는 순서 그대로** 보여 준다 — 상위 경로를 옅게 앞에, 폴더 이름을 진하게 뒤에.
+   예전에는 폴더 이름을 앞에 두고 상위 경로를 뒤에 붙였는데("예시  C:\\…\\전달용"),
+   실제 경로와 순서가 뒤집혀 읽는 사람이 한 번 더 생각해야 했다. 좁으면 앞이 잘리도록
+   direction:rtl 대신 그냥 ellipsis 를 쓰고, 전체 경로는 툴팁에 남긴다. */
 function setPath(p){
   const el=$("#path");el.textContent="";el.title=p||"";
   if(!p){el.textContent="폴더를 고르세요";return;}
-  const parts=p.replace(/[\\/]+$/,"").split(/[\\/]/);
-  const b=document.createElement("b");b.textContent=parts.pop()||p;
-  const s=document.createElement("span");s.textContent=parts.join("\\");
-  el.appendChild(b);el.appendChild(s);}
+  const clean=p.replace(/[\\/]+$/,"");
+  const cut=Math.max(clean.lastIndexOf("\\"),clean.lastIndexOf("/"));
+  const s=document.createElement("span");s.textContent=cut>=0?clean.slice(0,cut+1):"";
+  const b=document.createElement("b");b.textContent=cut>=0?clean.slice(cut+1):clean;
+  el.appendChild(s);el.appendChild(b);}
 
 /* ── 목록 ───────────────────────────────────────────────── */
 function setFiles(files){S.files=files||[];draw();}
 function draw(){
   const q=$("#q").value.trim().toLowerCase();
   S.view=[];const L=$("#list");L.textContent="";
-  const frag=document.createDocumentFragment();let done=0;
+  const frag=document.createDocumentFragment();
   S.files.forEach((f,i)=>{
     if(q&&f.name.toLowerCase().indexOf(q)<0)return;
-    S.view.push(i);if(f.done)done++;
+    S.view.push(i);
     const d=document.createElement("div");
-    d.className="row"+(f.done?" done":"")+(i===S.sel?" sel":"");
+    d.className="row"+(f.done?" done":"")+(i===S.cursor?" sel":"");
     d.dataset.i=i;
     d.title=f.name;
     d.innerHTML='<span class="dot"></span><span class="nm"></span>';
     d.lastChild.textContent=f.name;
     frag.appendChild(d);});
   L.appendChild(frag);
-  $("#count").textContent=S.files.length
-    ? `추출됨 ${done} / ${S.view.length}편`+(S.view.length!==S.files.length?` (전체 ${S.files.length})`:"")
-    : "";
+  updateCount();
   $("#ball").disabled=!S.ready||!S.files.length||S.busy;
   $("#bone").disabled=!S.ready||S.sel<0||S.busy;
 }
+/* 편수는 늘 목록에서 다시 세어 쓴다 — 더하기로 굴리면 어긋난다(실측) */
+/* 숫자는 **한 곳에 하나만.** 배치 진행 순번과 누적 추출 수가 따로 놀면
+   왜 60 과 77 이 다른지 알 수 없다(원장 지적). 기준은 하나 — 전체 중 끝난 편수. */
+function updateCount(){
+  const done=S.files.reduce((n,f)=>n+(f.done?1:0),0);
+  $("#pcount").textContent=S.files.length?`${done} / ${S.files.length} 추출됨`:"";
+  if(!S.busy)showProg(false);}
 $("#list").addEventListener("click",e=>{
-  const r=e.target.closest(".row");if(!r)return;openPaper(+r.dataset.i);});
-$("#q").addEventListener("input",draw);
+  const r=e.target.closest(".row");if(!r)return;
+  $("#list").focus({preventScroll:true});openPaper(+r.dataset.i);});
+$("#q").addEventListener("input",()=>{draw();autoPick();});
+
+/* 목록을 화살표로 오르내린다. 연타할 때 매번 열면 버벅이므로 커서만 먼저
+   움직이고, 손을 멈춘 뒤에 연다. */
+let pickTimer=null;
+function markCursor(i){
+  S.cursor=i;
+  const L=$("#list");
+  L.querySelectorAll(".row.sel").forEach(r=>r.classList.remove("sel"));
+  const r=L.querySelector('.row[data-i="'+i+'"]');
+  if(r){r.classList.add("sel");r.scrollIntoView({block:"nearest"});}}
+function moveSel(d){
+  if(!S.view.length)return;
+  let k=S.view.indexOf(S.cursor);
+  k=(k<0)?(d>0?0:S.view.length-1):Math.min(S.view.length-1,Math.max(0,k+d));
+  const i=S.view[k];
+  if(i===S.cursor)return;
+  markCursor(i);
+  clearTimeout(pickTimer);
+  pickTimer=setTimeout(()=>{if(S.cursor===i&&S.sel!==i)openPaper(i);},170);}
+/* 폴더를 열면 빈 화면을 보여주지 않는다 — 지난번에 보던 논문, 없으면 첫 항목 */
+function autoPick(){
+  if(!S.view.length)return;
+  if(S.view.indexOf(S.sel)>=0){markCursor(S.sel);return;}
+  let i=S.view[0];
+  if(S.last){const k=S.files.findIndex(f=>f.name===S.last);
+    if(k>=0&&S.view.indexOf(k)>=0)i=k;}
+  markCursor(i);openPaper(i);}
+window.addEventListener("keydown",e=>{
+  if(e.key!=="ArrowDown"&&e.key!=="ArrowUp")return;
+  const t=e.target,tag=(t&&t.tagName||"").toLowerCase();
+  if(tag==="input"||tag==="textarea"||(t&&t.isContentEditable))return;
+  /* 본문·PDF 를 스크롤하는 중이면 그쪽이 우선 — Ctrl 을 누르면 언제나 목록 */
+  const inPane=t&&t.closest&&(t.closest("#doc")||t.closest("#scroll"));
+  if(inPane&&!e.ctrlKey)return;
+  e.preventDefault();
+  moveSel(e.key==="ArrowDown"?1:-1);});
 
 /* ── 이동 이력 ───────────────────────────────────────────
    원장은 목록을 오르내리며 원본과 대조한다. 인용을 눌러 참고문헌으로 뛰었으면
@@ -1283,12 +1370,17 @@ window.addEventListener("keydown",e=>{
   else if(e.key==="ArrowRight"){e.preventDefault();histGo(1);}});
 
 /* ── 논문 열기 ──────────────────────────────────────────── */
-let openSeq=0;
+let openSeq=0, memTimer=null;
+function rememberSoon(){
+  clearTimeout(memTimer);
+  memTimer=setTimeout(()=>{if(S.last&&api())api().remember(S.last);},900);}
 async function openPaper(i,opt){
   opt=opt||{};
   const from=(S.sel>=0)?curPos():null;                    /* 떠나는 자리 */
   if(from&&S.sel!==i)S.mem[S.sel]=from.top;               /* 읽던 자리 기억 */
-  S.sel=i;draw();
+  S.sel=i;S.cursor=i;draw();
+  S.last=S.files[i]?S.files[i].name:null;
+  rememberSoon();                       /* 훑는 동안 파일을 매번 쓰지 않게 */
   const seq=++openSeq;
   $("#dtitle").textContent=S.files[i]?S.files[i].name:"";
   $("#scroll").innerHTML='<div class="empty">여는 중…</div>';
@@ -1466,14 +1558,13 @@ $("#bopen").onclick=async()=>{const r=await api().pick_folder();
 /* ── 파이썬이 밀어넣는 신호 ─────────────────────────────── */
 window.pnx={on(m){
   if(m.kind==="status"){          /* 폴더 훑기처럼 편수가 없는 일 */
-    if(m.text!==undefined){$("#pcount").textContent="";$("#pstage").textContent=m.text;
+    if(m.text!==undefined){$("#pstage").textContent=m.text;
       $("#pname").textContent="";$("#peta").textContent="";}
     if(m.pct!==null&&m.pct!==undefined)$("#bar").firstChild.style.width=m.pct+"%";
     if(m.busy!==undefined&&m.busy!==null)showProg(m.busy||S.busy);
   }else if(m.kind==="prog"){
-    $("#pcount").textContent=m.i+" / "+m.total;
+    $("#pname").textContent=m.name?("지금: "+m.name):"";
     $("#pstage").textContent=m.stage||"";
-    $("#pname").textContent=m.name||"";
     $("#peta").textContent=m.eta?etaText(m.eta):"";   /* 못 믿을 값은 아예 안 쓴다 */
     $("#bar").firstChild.style.width=(m.pct||0)+"%";
   }else if(m.kind==="mark"){
@@ -1481,9 +1572,7 @@ window.pnx={on(m){
     if(f&&!f.done){f.done=true;
       const r=$("#list").querySelector('.row[data-i="'+S.files.indexOf(f)+'"]');
       if(r)r.classList.add("done");
-      const c=$("#count").textContent.match(/^추출됨 (\d+)/);
-      if(c)$("#count").textContent=$("#count").textContent.replace(
-        /^추출됨 \d+/,"추출됨 "+(+c[1]+1));}
+      updateCount();}
   }else if(m.kind==="grobid"){
     /* 원장은 GROBID 가 뭔지 알 필요가 없다. 준비 상태만 조용히 보이면 된다. */
     const g=$("#gro");g.className=m.state==="ok"?"ok":m.state==="starting"?"starting":
@@ -1494,13 +1583,15 @@ window.pnx={on(m){
     g.title=m.state==="off"
       ?"논문 분석기를 켜지 못해 PDF 자체 텍스트만 씁니다 — 추출은 계속됩니다":"";
   }else if(m.kind==="folder"){
-    S.hist=[];S.hidx=-1;S.mem={};navBtns();
+    S.hist=[];S.hidx=-1;S.mem={};S.sel=-1;S.cursor=-1;navBtns();
     setPath(m.path);setFiles(m.files);
+    if(m.last!==undefined)S.last=m.last;
+    autoPick();
   }else if(m.kind==="run"){
     S.busy=!!m.on;showProg(S.busy);
     $("#bstop").style.display=S.busy?"":"none";
     $("#bstop").textContent="중지";$("#bstop").disabled=false;
-    if(m.on){$("#pcount").textContent="0 / "+m.total;$("#pstage").textContent="시작";
+    if(m.on){$("#pstage").textContent="시작";
       $("#pname").textContent="";$("#peta").textContent="";
       $("#bar").firstChild.style.width="0%";}
     draw();
@@ -1514,7 +1605,12 @@ function etaText(s){
   if(s<75)return "1분 이내";
   if(s<3600)return "약 "+Math.round(s/60)+"분 남음";
   return "약 "+(s/3600).toFixed(1)+"시간 남음";}
-function showProg(on){$("#prog").classList.toggle("on",!!on);}
+function showProg(on){
+  const e=$("#prog");e.classList.toggle("on",!!on);
+  /* 놀 때는 편수 한 줄만 남긴다(자리를 거의 안 먹는다) */
+  e.classList.toggle("idle",!on&&S.files.length>0);
+  if(!on){$("#pname").textContent="";$("#pstage").textContent="";
+    $("#peta").textContent="";}}
 /* 끝난 뒤 보고 — 실패를 조용히 넘기지 않는다 */
 function report(m){
   const ok=m.done||0, nf=m.nfail||0;
@@ -1531,7 +1627,8 @@ window.addEventListener("pywebviewready",async()=>{
   S.ready=true;
   const st=await api().state();
   setPath(st.path);
-  if(st.files&&st.files.length)setFiles(st.files);else draw();
+  if(st.last)S.last=st.last;
+  if(st.files&&st.files.length){setFiles(st.files);autoPick();}else draw();
   window.pnx.on({kind:"grobid",state:st.grobid,sec:st.sec});
 });
 fetch("/files").then(r=>r.json()).then(d=>{
@@ -1635,10 +1732,16 @@ def build(folder: str | Path | None = None):
         background_color="#ffffff", text_select=True)
     app.window = win
 
-    # 설정에 시작 폴더가 없으면 아무 폴더도 열지 않는다 — 빈 값으로 resolve 하면
-    # 프로젝트 루트가 나와 리포 전체를 훑게 된다.
-    _cfg_dir = (app.cfg.get("project") or {}).get("input_dir") or ""
-    start = Path(folder) if folder else (utils.resolve(_cfg_dir) if _cfg_dir else None)
+    # 시작 폴더: 지난번에 열었던 곳 → 설정 → 없음.
+    # 빈 값으로 resolve 하면 프로젝트 루트가 나와 리포 전체를 훑게 된다.
+    start = Path(folder) if folder else None
+    if start is None:
+        prev = (app.ui_load().get("folder") or "").strip()
+        if prev and Path(prev).is_dir():
+            start = Path(prev)
+    if start is None:
+        _cfg_dir = (app.cfg.get("project") or {}).get("input_dir") or ""
+        start = utils.resolve(_cfg_dir) if _cfg_dir else None
 
     def boot() -> None:
         paint_caption()          # 제목표시줄을 본문과 같은 흰색으로(창이 뜬 뒤에)

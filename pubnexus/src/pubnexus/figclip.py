@@ -87,6 +87,7 @@ PROSE_SIZE_TOL = 0.8        # 본문 크기로 볼 허용 오차(pt)
 BIG_PIECE_AREA = 2600.0     # 이보다 큰 조각 안의 글자는 '그림 속 글자'
 GAP_MAX = 96.0              # 조각 무리가 이보다 벌어지면 다른 그림이다
 LABEL_GAP = 30.0            # 도형에서 이 안쪽에 있는 글자만 그림 라벨로 붙인다
+CAPTION_SLACK = 70.0        # 옆 단 그림의 캡션은 그림 아래 이만큼까지 내려간다
 DPI_DEFAULT = 170           # 기본 해상도
 DPI_MIN = 96                # 더 낮추지 않는다(읽을 수 없어진다)
 MAX_BYTES = 480_000         # PNG 한 장의 상한
@@ -446,8 +447,7 @@ def _band(pg: _FigPage, cap: _cap.Caption) -> tuple[float, float, float, float]:
     # 정한다(_side_limits). 옆 단과의 중간점으로 못박으면, 캡션은 한 단인데
     # 그림은 전폭인 조판에서 그림이 잘린다(실측 10.5021/ad.2015.27.5.578 Fig 2
     # 는 오른쪽 절반이 통째로 날아갔다).
-    return bx0, bx1, max(pg.rect[0], hx0 - 2 * SIDE_MARGIN), \
-        min(pg.rect[2], hx1 + 2 * SIDE_MARGIN)
+    return bx0, bx1, pg.rect[0], pg.rect[2]
 
 
 def _side_limits(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption],
@@ -461,9 +461,9 @@ def _side_limits(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption],
     band_w = max(1.0, bx1 - bx0)
     lo, hi = sx0, sx1
 
-    def bump(b) -> None:
+    def bump(b, slack: float = 0.0) -> None:
         nonlocal lo, hi
-        if min(b[3], y1) - max(b[1], y0) <= 2.0:
+        if min(b[3], y1 + slack) - max(b[1], y0) <= 2.0:
             return                               # 이 높이에 걸치지 않는다
         if b[2] <= bx0 + 1:
             lo = max(lo, b[2] + 3.0)
@@ -473,9 +473,12 @@ def _side_limits(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption],
     for blk in pg.blocks:
         if _is_barrier(blk, band_w):
             bump(blk["bbox"])
-    for o in others:                             # 옆에 나란히 실린 다른 그림
+    # 옆 단에 **나란히 실린 다른 그림**. 그 그림의 캡션은 그림 **아래**에 있어
+    # 구간과 세로로 안 겹치는 일이 많으므로 아래쪽으로 여유를 준다.
+    for o in others:
         if o is not cap and o.page == cap.page:
-            bump(o.bbox)
+            bump(o.bbox, CAPTION_SLACK)
+    bump(cap.bbox)
     for t in pg.tables:
         bump(t)
     return (lo, hi) if hi - lo >= MIN_FIG_W else (sx0, sx1)
@@ -515,7 +518,10 @@ def _limits(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption],
     top, bottom = pg.top, pg.bottom
     for blk in pg.blocks:
         b = blk["bbox"]
-        if _hits_band(b, bx0, bx1) < 0.45:
+        # 러닝헤드는 **지면 폭 전체**의 장벽이다 — 옆 단에 찍혀 있어도 그 아래가
+        # 판면의 시작이다. 이걸 단 안에서만 보면 지면 맨 위 그림에 저널 로고가
+        # 딸려 온다(실측 10.3346/jkms.2017.32.5.873 1쪽 JKMS 마크).
+        if not blk["running"] and _hits_band(b, bx0, bx1) < 0.45:
             continue                             # 옆 단 글은 장벽이 아니다
         if not _is_barrier(blk, band_w):
             continue
@@ -571,6 +577,38 @@ def _grow(pieces: list[_Piece], anchor_far: bool
     return taken
 
 
+def _caption_block(pg: _FigPage, cap: _cap.Caption
+                   ) -> tuple[float, float, float, float]:
+    """캡션이 실린 **글줄 덩어리 전체**의 bbox.
+
+    captions.py 의 Caption.bbox 는 '캡션으로 확정한 줄들'만 감싼다. 조판 덩어리는
+    그보다 길 수 있다. 그림에서 캡션을 빼낼 때는 덩어리 전체를 알아야 한다.
+    """
+    best, cover = cap.bbox, 0.0
+    for blk in pg.blocks:
+        b = blk["bbox"]
+        ov = _inter(b, cap.bbox)
+        if ov > cover:
+            best, cover = b, ov
+    return best if cover > 0.5 * _area(cap.bbox) else cap.bbox
+
+
+def _cut_out(box, cut) -> tuple[float, float, float, float]:
+    """box 에서 cut 을 도려낸다 — 네 방향으로 잘라 **가장 넓게 남는** 쪽.
+
+    잘라낸 그림 안에 그 그림의 캡션이 통째로 들어오는 조판이 있다(실측
+    10.1111/1346-8138.13053 1쪽: 패널 (d)~(i) 오른쪽에 캡션 939자가 세로로
+    세워져 있어 그림과 같은 높이를 차지한다). 캡션은 그림이 아니므로 잘라 낸다.
+    """
+    if _inter(box, cut) <= 0.02 * _area(box):
+        return box
+    cands = [(box[0], box[1], min(box[2], cut[0] - 2.0), box[3]),
+             (max(box[0], cut[2] + 2.0), box[1], box[2], box[3]),
+             (box[0], box[1], box[2], min(box[3], cut[1] - 2.0)),
+             (box[0], max(box[1], cut[3] + 2.0), box[2], box[3])]
+    return max(cands, key=_area)
+
+
 def _region(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption]
             ) -> tuple[tuple[float, float, float, float], str, str] | None:
     """(잘라낼 사각형, 갈래('image'|'draw'|'mixed'), 근거 문장). 없으면 None."""
@@ -578,6 +616,7 @@ def _region(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption]
     if sx1 - sx0 < MIN_FIG_W:
         return None
     top, bottom = _limits(pg, cap, others, bx0, bx1)
+    cbox = _caption_block(pg, cap)
     cy0, cy1 = cap.bbox[1], cap.bbox[3]
 
     def try_side(y0: float, y1: float, above: bool):
@@ -616,6 +655,7 @@ def _region(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption]
         box = (box[0] - PAD, box[1] - PAD, box[2] + PAD, box[3] + PAD)
         box = (max(box[0], lo), max(box[1], y0),
                min(box[2], hi), min(box[3], y1))
+        box = _cut_out(box, cbox)                # 자기 캡션은 그림이 아니다
         w, h = box[2] - box[0], box[3] - box[1]
         if w < MIN_FIG_W or h < MIN_FIG_H or w * h < MIN_FIG_AREA:
             return None

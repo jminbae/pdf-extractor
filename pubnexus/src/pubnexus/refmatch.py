@@ -304,15 +304,43 @@ def _author_year_score(pref: dict, item: dict) -> float:
     return 80.0
 
 
-def pair(printed: list[dict], items: list[dict],
-         host_doi: str | None = None) -> list[tuple[int, int, str]]:
+def strip_banned_dois(printed: list[dict], ban: set[str]) -> int:
+    """조판 잔재 DOI 를 지면 원문에서 떼어낸다(화면에 그대로 나가지 않게).
+
+    출판사가 참고문헌 줄마다 그 **논문 자신의** DOI 를 붙여 인쇄하면
+    '… Adv Skin Wound Care 2005;18:2-12. http://dx.doi.org/10.1016/j.jaad.2013.05.012'
+    처럼 남의 식별자가 참조에 달라붙는다. 참조의 DOI 로 오인되는 것도 문제지만
+    사람이 읽을 때도 틀린 정보다.
+    """
+    if not ban:
+        return 0
+    n = 0
+    for p in printed:
+        raw = p.get("raw") or ""
+        if not raw:
+            continue
+        def repl(m, _ban=ban):
+            return "" if _norm_doi(m.group(0)) in _ban else m.group(0)
+        new = re.sub(r"(?:https?://(?:dx\.)?doi\.org/|doi:\s*)?"
+                     r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+", repl, raw)
+        new = re.sub(r"\s{2,}", " ", new).strip()
+        if new != raw:
+            p["raw"] = new
+            n += 1
+    return n
+
+
+def pair(printed: list[dict], items: list[dict], host_doi: str | None = None,
+         ban: set[str] | None = None) -> list[tuple[int, int, str]]:
     """지면 항목 ↔ iCite 항목 짝짓기. (지면 index, iCite index, 근거) 목록.
 
     후보쌍을 전부 채점해 **점수 높은 순으로 확정**한다(양쪽 다 아직 안 쓰인 것만).
     한 지면 항목이 여러 iCite 항목에 비슷하게 닮았을 때 앞쪽부터 집어 먹는
     탐욕적 순회의 오배정을 막기 위해서다.
     """
-    ban = _banned_dois(printed, host_doi)
+    # 원문에서 이미 떼어낸 뒤라도 **떼기 전에 계산한 금지목록**을 그대로 쓴다
+    # (파싱된 doi 필드에는 아직 남아 있을 수 있다).
+    ban = _banned_dois(printed, host_doi) if ban is None else ban
     cand: list[tuple[float, int, int, str]] = []
     for pi, p in enumerate(printed):
         pdois = _dois_of(p, ban)
@@ -496,7 +524,10 @@ def merge(doc: dict, items: list[dict], host_doi: str | None = None) -> dict:
 
     돌려주는 값은 집계(감사용). doc 는 제자리에서 고친다.
     """
-    printed = list(doc.get("references") or [])
+    # 앞선 실행이 뒤에 붙여 둔 iCite 전용 항목은 '지면 목록'이 아니다. 그대로 두면
+    # 다시 돌릴 때마다 그것들이 지면 항목으로 승격돼 목록이 불어난다(재실행 안전성).
+    printed = [r for r in (doc.get("references") or [])
+               if r.get("source") != "icite"]
     for p in printed:                      # 옛 스키마로 만든 정본도 받아들인다
         p.setdefault("number", None)
         p.setdefault("journal", "")
@@ -505,13 +536,15 @@ def merge(doc: dict, items: list[dict], host_doi: str | None = None) -> dict:
         p.setdefault("source", "parsed")
         p.setdefault("match", "")
     n_corrupt = _distrust_corrupt(printed)
+    ban = _banned_dois(printed, host_doi)
+    strip_banned_dois(printed, ban)
     stat = {"printed": len(printed), "icite": len(items), "corrupt": n_corrupt,
             "doi": 0, "title": 0, "author-year": 0,
             "unpaired_printed": 0, "icite_only": 0}
 
     matched_i: dict[int, int] = {}         # iCite index → printed index
     if printed and items:
-        for pi, ii, how in pair(printed, items, host_doi):
+        for pi, ii, how in pair(printed, items, host_doi, ban):
             matched_i[ii] = pi
             stat[how] += 1
             p, it = printed[pi], items[ii]
@@ -591,6 +624,17 @@ def reconcile(doc: dict, icite_rec: dict | None,
     key_num = {r["key"]: r["number"] for r in doc.get("references") or []
                if r.get("key") and r.get("number")}
     stat["linked_citations"] = relink_cited_refs(doc, key_num)
+
+    # 지면 목록과 iCite 목록이 **한 건도** 겹치지 않으면 둘 중 하나는 이 논문의
+    # 것이 아니다. 실측 원인은 meta.pmid 오배정이었다 — 10.25259/ijdvl_558_2021
+    # (지면 73개가 사마귀 면역치료)에 PMID 35962512('Neutrophil extracellular traps
+    # and Sweet syndrome')가 붙어 iCite 가 딴 논문 참조 5건을 줬다. 짝을 안 지은
+    # 것은 옳은 판단이고, 여기서는 그 사실을 **표시**해 화면이 섞어 보여주지 않게 한다.
+    paired_n = stat["doi"] + stat["title"] + stat["author-year"]
+    if paired_n == 0 and stat["printed"] >= 5 and stat["icite"] >= 3:
+        doc["references_warning"] = "icite_no_overlap"
+    else:
+        doc.pop("references_warning", None)
 
     kinds = {r.get("source") for r in doc.get("references") or []}
     if not kinds:

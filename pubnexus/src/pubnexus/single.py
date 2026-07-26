@@ -115,7 +115,7 @@ def extract_one(pdf_path: str | Path, config: dict | None = None, *,
 
 def extract_folder(folder: str | Path, config: dict | None = None, *,
                    on_progress=None, should_cancel=None,
-                   overwrite: bool = False) -> dict:
+                   overwrite: bool = False, queue: "WorkQueue | None" = None) -> dict:
     """폴더 안 모든 PDF 를 처리해 **앱 저장소**에 정본을 쓴다(PDF 옆이 아니다).
 
     반환 {'total','done','skipped','failed','failures':[(파일명, 사유)], 'cancelled'}
@@ -128,6 +128,9 @@ def extract_folder(folder: str | Path, config: dict | None = None, *,
 
     여러 편을 동시에 처리한다(_worker_count). 동시 편수는 남은 메모리에 맞춰
     정하고, GROBID 호출만 따로 좁힌다 — 몰리면 서비스가 죽는다.
+
+    queue 를 넘기면 처리 **순서를 바꿀 수 있다**. 화면이 `queue.bump(pdf)` 로
+    사용자가 지금 고른 논문을 맨 앞으로 당긴다(WorkQueue 참고).
     """
     root = Path(folder)
     pdfs = sorted(p for p in root.rglob("*.pdf") if p.is_file())
@@ -186,16 +189,35 @@ def extract_folder(folder: str | Path, config: dict | None = None, *,
             _emit(on_progress, "failed", n, total, pdf.name,
                   f"[{n}/{total}] 실패 {pdf.name}: {reason}")
 
-    if workers <= 1:
-        for i, pdf in enumerate(pdfs, 1):
+    # 처리 순서를 **일감 통**에 담아 하나씩 꺼내 쓴다.
+    #   미리 전부 배정해 버리면 순서를 바꿀 수 없다. 원장이 목록 뒤쪽 논문을
+    #   클릭하면 거기까지 기다려야 하는데, 그건 못 쓸 물건이다.
+    #   queue.bump(pdf) 로 지금 보고 있는 논문을 맨 앞으로 당긴다.
+    if queue is None:
+        queue = WorkQueue()
+    queue.reset(pdfs)
+
+    def pump() -> None:
+        """일감 통이 빌 때까지 하나씩 꺼내 처리한다."""
+        while True:
             if _cancelled(should_cancel):
-                break
-            work(i, pdf)
+                return
+            item = queue.take()
+            if item is None:
+                return
+            idx, pdf = item
+            try:
+                work(idx, pdf)
+            finally:
+                queue.finish(pdf)
+
+    if workers <= 1:
+        pump()
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [pool.submit(work, i, p) for i, p in enumerate(pdfs, 1)]
+            futs = [pool.submit(pump) for _ in range(workers)]
             for f in futs:
-                f.result()           # work 가 예외를 삼키므로 여기서 안 터진다
+                f.result()           # pump 안에서 예외를 삼키므로 여기서 안 터진다
 
     if _cancelled(should_cancel):
         stats["cancelled"] = True
@@ -742,6 +764,63 @@ def _n_paragraphs(doc) -> int:
         return sum(len(s.paragraphs) for s in doc.body_text)
     except Exception:  # noqa: BLE001
         return 0
+
+
+class WorkQueue:
+    """처리 순서를 담는 통. **사용자가 지금 보는 논문을 앞으로 당길 수 있다.**
+
+    폴더 순서대로만 처리하면, 원장이 목록 뒤쪽 논문을 클릭했을 때 거기까지
+    전부 끝나기를 기다려야 한다. 화면은 `bump(pdf)` 로 그 논문을 맨 앞에 놓는다.
+
+    이미 다른 일꾼이 그 논문을 잡고 있으면 앞으로 당기지 않는다 — **같은 논문을
+    두 번 처리하면** 같은 파일에 동시에 쓰게 되어 반쪽 산출물이 나온다.
+    화면은 `is_running(pdf)` 로 '지금 처리 중' 을 표시하고 기다리면 된다.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._order: list[Path] = []          # 남은 일감(앞이 먼저)
+        self._idx: dict[Path, int] = {}       # 원래 순번(진행 표시용)
+        self._running: set[Path] = set()
+
+    def reset(self, pdfs) -> None:
+        with self._lock:
+            self._order = list(pdfs)
+            self._idx = {p: i for i, p in enumerate(self._order, 1)}
+            self._running.clear()
+
+    def take(self) -> tuple[int, Path] | None:
+        with self._lock:
+            if not self._order:
+                return None
+            p = self._order.pop(0)
+            self._running.add(p)
+            return self._idx.get(p, 0), p
+
+    def finish(self, pdf: Path) -> None:
+        with self._lock:
+            self._running.discard(pdf)
+
+    def bump(self, pdf: str | Path) -> str:
+        """그 논문을 맨 앞으로. 'queued'|'running'|'done'|'unknown' 을 돌려준다."""
+        p = Path(pdf)
+        with self._lock:
+            if p in self._running:
+                return "running"
+            try:
+                self._order.remove(p)
+            except ValueError:
+                return "done" if p in self._idx else "unknown"
+            self._order.insert(0, p)
+            return "queued"
+
+    def is_running(self, pdf: str | Path) -> bool:
+        with self._lock:
+            return Path(pdf) in self._running
+
+    def remaining(self) -> int:
+        with self._lock:
+            return len(self._order)
 
 
 def _worker_count(cfg: dict) -> int:
