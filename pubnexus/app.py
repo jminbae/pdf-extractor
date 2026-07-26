@@ -668,6 +668,8 @@ class App:
         self.renderer = PageRenderer()
         self.cancel = threading.Event()
         self.worker: threading.Thread | None = None
+        self.tr_worker: threading.Thread | None = None   # 한국어 번역 일꾼
+        self.tr_stop = threading.Event()
         self.queue = None            # 배치 처리 순서(WorkQueue) — 클릭하면 당긴다
         self.grobid = Grobid(
             (self.cfg.get("grobid") or {}).get("url", ""),
@@ -818,7 +820,7 @@ class App:
             return None
         return st if st in ("queued", "running") else None
 
-    def doc_view(self, pdf: Path) -> dict:
+    def doc_view(self, pdf: Path, lang: str = "en") -> dict:
         from pubnexus import store
         sha = self.sha_for(pdf, deep=True)
         if not sha:
@@ -831,7 +833,16 @@ class App:
         if not d.get("body_text") and d.get("sections"):
             d = dict(d, body_text=d["sections"])
         from pubnexus import render
-        md = render.to_markdown(d)
+        # 번역은 **정본 단계에서 갈아 끼운다** — 그 뒤 렌더·화면 코드가 하나뿐이어야
+        # 어긋나지 않는다. 아직 안 된 문단은 원문 그대로라, 번역 중에도 읽을 수 있다.
+        view, tr_done, tr_total = d, 0, 0
+        if lang == "ko":
+            from pubnexus import translate as tr
+            cache = tr.load_cache(sha)
+            tr_total = tr.unit_count(d)
+            tr_done = sum(1 for k in cache if k)
+            view = tr.apply(d, cache)
+        md = render.to_markdown(view)
         html = md_to_html(md, chips_html(d.get("meta") or {}), sha)
 
         secs = d.get("body_text") or []
@@ -856,6 +867,7 @@ class App:
             "paper_id": str(d.get("paper_id") or ""),
             "json": str(store.doc_path(sha)), "sha1": sha,
             "thin": nchar < 500,
+            "lang": lang, "tr_done": tr_done, "tr_total": tr_total,
         }
 
     # ── 추출 ────────────────────────────────────────────────────────
@@ -1047,6 +1059,58 @@ class Api:
             return {"ok": False}
         self._app.set_folder(Path(res[0]))
         return {"ok": True, "path": str(self._app.folder)}
+
+    # ── 한국어 번역 ─────────────────────────────────────────────────
+    def doc_lang(self, index: int, lang: str = "en") -> dict:
+        """같은 논문을 그 언어로 다시 그린다. 번역 캐시가 없으면 원문 그대로."""
+        a = self._app
+        if not (0 <= index < len(a.pdfs)):
+            return {"ok": False}
+        return {"ok": True, "doc": a.doc_view(a.pdfs[index], lang=lang)}
+
+    def translate(self, index: int) -> dict:
+        """이 논문을 한국어로 옮기기 시작한다(워커). 진행은 push 로 알린다."""
+        a = self._app
+        if not (0 <= index < len(a.pdfs)):
+            return {"ok": False, "why": "논문을 먼저 고르세요"}
+        if a.tr_worker and a.tr_worker.is_alive():
+            return {"ok": False, "why": "이미 번역 중입니다"}
+        pdf = a.pdfs[index]
+        sha = a.sha_for(pdf, deep=True)
+        if not sha:
+            return {"ok": False, "why": "먼저 추출해야 합니다"}
+        from pubnexus import store, translate as tr
+        d = store.load(sha)
+        if d is None:
+            return {"ok": False, "why": "먼저 추출해야 합니다"}
+        cfg = (a.cfg.get("translate") or {})
+        url = cfg.get("url") or tr.DEFAULT_URL
+        model = cfg.get("model") or tr.DEFAULT_MODEL
+        if not tr.is_alive(url):
+            return {"ok": False, "why": "번역기가 꺼져 있습니다 — Ollama 를 켜 주세요"}
+        if model not in tr.models(url):
+            return {"ok": False,
+                    "why": f"모델이 없습니다: ollama pull {model}"}
+
+        a.tr_stop.clear()
+
+        def run() -> None:
+            def prog(done: int, total: int) -> None:
+                a.push("trans", {"state": "run", "done": done, "total": total})
+            try:
+                tr.translate_doc(d, sha, url=url, model=model, on_progress=prog,
+                                 should_stop=a.tr_stop.is_set)
+            except Exception as e:               # noqa: BLE001 — 번역 실패가 앱을 멈추게 하지 않는다
+                utils.log(f"[app] 번역 실패: {type(e).__name__}: {e}")
+            a.push("trans", {"state": "done"})
+
+        a.tr_worker = threading.Thread(target=run, daemon=True)
+        a.tr_worker.start()
+        return {"ok": True, "model": model}
+
+    def translate_stop(self) -> dict:
+        self._app.tr_stop.set()
+        return {"ok": True}
 
     def save_figure(self, sha1: str, name: str) -> dict:
         """그림 한 장을 원장이 고른 자리에 저장한다(우클릭 → 다른 이름으로 저장).
@@ -1399,6 +1463,10 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
       <button class="zbtn" id="bback" title="이전 위치 (Alt+←, 마우스 옆 버튼)" disabled>‹</button>
       <button class="zbtn" id="bfwd" title="다음 위치 (Alt+→, 마우스 옆 버튼)" disabled>›</button>
       <span class="t" id="dtitle">추출 결과</span>
+      <span class="sp"></span>
+      <button class="btn ghost" id="bko" disabled
+              style="padding:3px 10px;font-size:11.5px"
+              title="본문을 한국어로 (이 PC 안에서 번역합니다)">KO</button>
     </div>
     <div id="doc"><div class="empty">왼쪽에서 논문을 고르세요</div></div>
     <div id="notes"></div>
@@ -1419,7 +1487,8 @@ const $=s=>document.querySelector(s), DPR=Math.min(window.devicePixelRatio||1,2)
 const S={files:[],view:[],sel:-1,key:null,pages:[],zoom:1,fitW:0,bucket:1200,
          els:[],io:null,busy:false,ready:false,
          hist:[],hidx:-1,mem:{},    /* 이동 이력 · 논문별로 읽던 자리 */
-         cursor:-1,last:null,waiting:null};  /* 목록 커서 · 지난번 논문 · 기다리는 논문 */
+         cursor:-1,last:null,waiting:null,   /* 목록 커서 · 지난번 논문 · 기다리는 논문 */
+         lang:"en",trDone:0,trTotal:0};      /* 보고 있는 언어 · 번역 진척 */
 
 /* ── 도우미 ─────────────────────────────────────────────── */
 let tmr=null;
@@ -1611,7 +1680,34 @@ async function openPaper(i,opt){
   if(top)requestAnimationFrame(()=>{dbox().scrollTop=top;flashAt(top);});
   if(!opt.noHist)histPush({p:i,top:top},from);
 }
-function renderDoc(d){
+/* ── 한국어 보기 ────────────────────────────────────────────
+   번역은 **정본을 갈아 끼워** 다시 그린다(서버). 화면은 그 결과를 받을 뿐이라
+   영어판과 그리는 길이 하나다. 아직 안 된 문단은 원문이 그대로 보이므로,
+   번역이 도는 동안에도 읽을 수 있다. */
+function koBtn(){return $("#bko");}
+function setKo(on,label){
+  const b=koBtn(); if(!b)return;
+  b.classList.toggle("primary",!!on);
+  b.textContent=label||(on?"EN":"KO");
+  b.title=on?"원문(영어)으로 되돌리기":"본문을 한국어로 (이 PC 안에서 번역합니다)";
+}
+async function paintLang(){
+  if(S.sel<0)return;
+  const r=await api().doc_lang(S.sel,S.lang);
+  if(r&&r.ok&&r.doc)renderDoc(r.doc,{keepTop:true});
+}
+async function toggleKo(){
+  if(S.sel<0)return;
+  if(S.lang==="ko"){S.lang="en";setKo(false);await paintLang();return;}
+  S.lang="ko";setKo(true);await paintLang();
+  if(S.trDone>=S.trTotal&&S.trTotal>0)return;      /* 이미 다 되어 있다 */
+  const r=await api().translate(S.sel);
+  if(!r||!r.ok){toast((r&&r.why)||"번역을 시작하지 못했습니다");return;}
+  setKo(true,"번역 중…");
+}
+
+function renderDoc(d,opt){
+  opt=opt||{};
   const box=$("#doc");
   if(!d.extracted){
     S.waiting=d.queued?($("#dtitle").textContent||""):null;
@@ -1624,12 +1720,19 @@ function renderDoc(d){
       +'<br><span style="font-size:11.5px;color:#b3b9c2">'+msg[1]+'</span></div>';
     $("#foot").textContent=d.error||"";return;}
   S.waiting=null;
+  const keep=opt.keepTop?box.scrollTop:0;
   box.innerHTML='<article id="art"></article>';
   const art=$("#art");
   art.innerHTML=d.html||"";
   linkCites(art);
   linkFigs(art);
-  box.scrollTop=0;
+  if(d.sha1!==undefined){
+    S.trDone=d.tr_done||0;S.trTotal=d.tr_total||0;
+    if(d.lang)S.lang=d.lang;
+    koBtn().disabled=false;
+    setKo(S.lang==="ko");
+  }
+  box.scrollTop=keep;
   const f=$("#foot");f.textContent="";
   const s=document.createElement("span");s.textContent=d.info||"";f.appendChild(s);
   if(d.notes&&d.notes.length){
@@ -1903,6 +2006,7 @@ $("#doc").addEventListener("click",e=>{
 });
 
 /* ── 추출 ───────────────────────────────────────────────── */
+$("#bko").onclick=toggleKo;
 $("#bone").onclick=async()=>{
   if(S.sel<0){toast("왼쪽에서 논문을 먼저 고르세요");return;}
   const r=await api().extract("one",S.sel); if(!r.ok)toast(r.why||"시작하지 못했습니다");};
@@ -1942,6 +2046,17 @@ window.pnx={on(m){
       if(S.waiting&&S.waiting===m.name&&S.sel>=0&&S.files[S.sel]&&
          S.files[S.sel].name===m.name){S.waiting=null;
         openPaper(S.sel,{noHist:true,top:0});}}
+  }else if(m.kind==="trans"){
+    /* 번역 진행. 다 될 때까지 기다리게 하지 않고 **틈틈이 다시 그린다** —
+       된 문단부터 한국어로 바뀐다. 너무 자주 그리면 읽는 중에 글이 튄다. */
+    if(m.state==="done"){
+      setKo(S.lang==="ko");
+      if(S.lang==="ko")paintLang();
+    }else if(m.total){
+      S.trDone=m.done;S.trTotal=m.total;
+      setKo(true,"번역 중 "+Math.floor(100*m.done/m.total)+"%");
+      if(S.lang==="ko"&&m.done-(S.lastPaint||0)>=8){S.lastPaint=m.done;paintLang();}
+    }
   }else if(m.kind==="grobid"){
     /* 원장은 GROBID 가 뭔지 알 필요가 없다. 준비 상태만 조용히 보이면 된다. */
     const g=$("#gro");

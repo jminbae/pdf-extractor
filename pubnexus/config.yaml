@@ -39,6 +39,16 @@ grobid:
   segment_sentences: 0
   timeout_sec: 300
 
+translate:
+  # 본문 한국어 번역(KO 단추). **이 PC 안에서** 돈다 — 논문을 바깥에 올리지 않는다.
+  # OpenAI 호환 /v1/chat/completions 를 말하는 서버면 무엇이든 된다(Ollama·llama-server).
+  url: "http://localhost:11434"
+  # RTX 2060(6GB)에서 다섯을 재 보고 고른 값. 자세한 근거는 translate.py 머리말.
+  #   EXAONE 3.5 7.8B  7.8초/문단 · 가장 자연스럽다 (라이선스 NC — 판매용 배포는 불가)
+  #   gemma3:4b        4.4초/문단 · 빠르지만 인용을 지어낸다
+  #   qwen2.5:7b       중국어로 답한다 / qwen3:4b 사고 모드로 16배 느리다
+  model: "exaone3.5:7.8b"
+
 textfix:
   # 정본 JSON 의 추출 결함 수리(자간 아티팩트·러닝헤더·캡션 누수·중복 문단·빈 표)
   # 와 섹션 타입 재분류. 원본은 data/normalized_raw/ 로 백업되므로 되돌릴 수 있다.

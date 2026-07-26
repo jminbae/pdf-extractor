@@ -114,6 +114,11 @@ def figs_dir(sha1: str) -> Path:
     return root() / "figs" / _shard(sha1) / sha1
 
 
+def trans_path(sha1: str, lang: str = "ko") -> Path:
+    """번역 캐시. 한 번 번역한 문단을 다시 번역하지 않는다(느리고 값비싸다)."""
+    return root() / "trans" / _shard(sha1) / f"{sha1}.{lang}.json"
+
+
 def index_path() -> Path:
     return root() / "index.json"
 

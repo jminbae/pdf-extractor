@@ -39,6 +39,11 @@ $cfgSrc = Join-Path $repo "pubnexus\config.yaml"
 $cfgTmp = Join-Path $work "config.yaml"
 Copy-Item $cfgSrc $cfgTmp -Force
 
+# 의학용어 사전도 같은 이유로 빌드 폴더를 거쳐 넣는다. 모듈은 아카이브 안으로
+# 들어가므로 __file__ 옆에서 못 찾는다 — translate.glossary() 가 동봉본을 먼저 본다.
+$glsTmp = Join-Path $work "glossary.json"
+Copy-Item (Join-Path $repo "pubnexus\src\pubnexus\glossary.json") $glsTmp -Force
+
 Push-Location (Join-Path $repo "pubnexus")
 try {
     $args = @(
@@ -55,6 +60,7 @@ try {
         # 설정을 exe 안에 동봉한다 — exe 를 아무 폴더에 혼자 놔도 실행되게.
         # (utils.load_config 가 exe 옆 → 프로젝트 루트 → 동봉본 순으로 찾는다)
         "--add-data", "$cfgTmp;.",
+        "--add-data", "$glsTmp;.",
         "--collect-submodules", "pubnexus",
         "--collect-all", "webview",
         "--hidden-import", "clr_loader",
