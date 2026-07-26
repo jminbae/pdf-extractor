@@ -22,13 +22,17 @@
 가장 강한 단서는 **캡션의 좌표**다. captions.py 가 캡션의 bbox 를 글꼴·크기
 근거로 이미 확정해 둔다. 그림은 캡션 바로 위(드물게 아래)에 있다.
 
-  1. **가로**: 캡션이 걸친 단(段)만 본다. 2단 조판에서 옆 단을 물면 안 되므로
-     양옆 한계를 **옆 단과의 중간점**으로 둔다(safe_x0·safe_x1). 조각은 폭의
-     60% 이상이 이 안에 들어와야 채택한다.
-  2. **세로**: 캡션에서 위로 올라가며 **본문 글줄 덩어리(블록)** 가 나오면 거기서
-     멈춘다. 다른 캡션·절 제목도 같은 장벽이다. 장벽이 없으면 지면 윗 여백까지.
+  1. **세로**: 캡션에서 위로 올라가며 **본문 글줄 덩어리(블록)** 가 나오면 거기서
+     멈춘다. 다른 캡션·절 제목·러닝헤드·표 영역(tablefill 의 `pdf_span`)도 같은
+     장벽이다. 장벽이 없으면 지면 윗 여백까지.
+  2. **가로**: 그 높이에 **옆 단 본문 글이 있느냐**로 정한다(`_side_limits`).
+     글이 있으면 그 앞에서 끊고, 없으면(그림이 전폭으로 자리를 차지했다는 뜻)
+     지면 끝까지 연다. 옆 단과의 중간점으로 못박으면 캡션은 한 단인데 그림은
+     전폭인 조판에서 그림이 반쪽 난다.
   3. 그 구간 안의 조각들의 **합집합 bbox** 로 범위를 좁힌다. 조각이 하나도 없으면
      **자르지 않는다** — 그림이 없는 것이 엉뚱하게 잘린 그림보다 낫다.
+  4. 캡션을 그림 **옆**에 좁고 길게 세워 싣는 조판(Springer)도 있다. 캡션 덩어리가
+     좁고 길면(높이 ≥ 폭의 0.5배) 그 옆을 먼저 본다.
 
 '본문 글줄'을 블록 단위로 보는 이유: 문단의 **마지막 줄은 짧다**. 줄 단위로
 '긴 줄'만 장벽으로 삼으면 그 짧은 꼬리 한 줄이 그림 영역 안에 남는다. 블록
@@ -46,16 +50,28 @@
 **한 장도 만들지 않는다.**
 
 ── 지면 장식 ───────────────────────────────────────────────────────
-로고·저널 마크·아이콘·QR 은 그림이 아니다. 신호 두 가지로 버린다.
-  · 아주 작다(가로·세로 어느 쪽이든 28pt 미만, 또는 넓이 1,600pt² 미만)
-  · **여러 쪽의 같은 자리에 반복**된다(같은 xref 가 절반 이상의 쪽에 나온다)
+로고·저널 마크·아이콘·QR 은 그림이 아니다. 신호 세 가지로 버린다.
+  · 아주 작다(짧은 변 26pt 미만 또는 넓이 1,300pt² 미만)
+  · **두 쪽 이상의 같은 자리에 반복**된다(같은 xref, 좌상단 ±6pt)
+  · 지면 폭을 가로지르는 얇은 장식선, 지면의 55% 이상을 덮는 배경 사각형
 지면 위·아래 5% 띠(러닝헤드·꼬리말 자리)도 아예 보지 않는다.
 
 ── 저장 ────────────────────────────────────────────────────────────
-JSON 옆 `<paper_id slug>_figs/` 폴더에 PNG 로 넣고, `figures[].image` 에는
-**JSON 기준 상대경로**를 담는다(절대경로 금지 — 폴더를 옮기면 깨진다).
-한 장이 대략 200~500KB 를 넘지 않도록 DPI 를 자동으로 낮춘다(MAX_BYTES).
-exe 로 묶어 배포하므로 **PyMuPDF 말고 아무것도 쓰지 않는다.**
+JSON 옆 `<paper_id slug>_figs/` 폴더에 넣고, `figures[].image` 에는 **JSON 기준
+상대경로**를 담는다(절대경로 금지 — 폴더를 옮기면 깨진다). 폴더는 한 편에
+하나이고, 다시 돌리면 그 폴더를 이번 산출물로 맞춘다(멱등).
+
+기본 형식은 PNG(170dpi)다. 한 장이 MAX_BYTES 를 넘으면 DPI 를 96까지 낮추고,
+그래도 넘으면 그때만 JPEG 로 바꾼다 — 임상 사진은 PNG 로 담으면 96dpi 에서도
+800KB 를 넘는다(실측). exe 로 묶어 배포하므로 **PyMuPDF 말고 아무것도 쓰지
+않는다.**
+
+── 실측(정본 사본 52편 · 그림 130개) ───────────────────────────────
+  · 119개(92%) 추출 — 내장 이미지 57 · 벡터 20 · 섞임 42
+  · 이웃 논문 오염 0건 · 총 25.1MB · 한 장 평균 206KB · 최대 457KB
+  · 119장 전부를 대조표로 눈으로 확인했다(본문 문장이 섞인 것 0장).
+  · 못 뽑은 11개: 캡션이 PDF 에 없음 4 · 조각 없음 2(지면 전체를 덮는 배경) ·
+    눕힌 캡션 1 · 번호 모호 1 · 그림 캡션을 못 찾은 문서 1편(3개)
 """
 from __future__ import annotations
 
@@ -67,7 +83,6 @@ from pathlib import Path
 from typing import Any
 
 from . import captions as _cap
-from .utils import log
 
 # ── 튜닝 상수(pt 단위. 이 코퍼스 실측으로 정했다) ────────────────────
 MIN_PIECE_SIDE = 26.0       # 조각의 짧은 변이 이보다 작으면 장식(불릿·아이콘)
@@ -338,8 +353,13 @@ def _page_blocks(lines: list[_cap.Line], body: float, pieces: list[_Piece],
             if share > best and share >= 0.7:
                 best, colw = share, max(1.0, c[1] - c[0])
         txt = " ".join(l.text.strip() for l in ls)
+        # 눕힌 조판(세로 글) — 줄 상자가 저마다 가로보다 세로로 길다.
+        # 세로로 눕힌 표가 그림 옆에 실리는 일이 있다(실측 10.1016/j.jaad.2016.04.002
+        # 의 세로 표가 사진 세 장과 함께 한 장으로 잘렸다).
+        tall = sum(1 for l in ls if (l.y1 - l.y0) > (l.x1 - l.x0))
         out.append({"id": bid, "bbox": box, "chars": chars, "size": med,
                     "lines": ls, "in_piece": in_piece, "colw": colw,
+                    "rotated": len(ls) >= 4 and tall >= 0.8 * len(ls),
                     "running": _norm_head(txt) in heads,
                     "heading": bool(len(ls) == 1
                                     and _HEADING_RE.match(ls[0].text.strip())),
@@ -488,6 +508,9 @@ def _side_limits(pg: _FigPage, cap: _cap.Caption, others: list[_cap.Caption],
 def _is_barrier(blk: dict, band_w: float) -> bool:
     """이 블록이 그림 영역을 끊는 '본문'인가."""
     if blk["heading"] or blk["running"]:
+        return True
+    # 눕힌 표·세로 조판 글덩어리. 축 라벨도 눕지만 그건 4줄이 안 되고 짧다.
+    if blk["rotated"] and blk["chars"] >= PROSE_MIN_CHARS:
         return True
     if blk["in_piece"]:
         return False                             # 그림 속 글자
@@ -795,10 +818,19 @@ def _table_spans(doc: dict) -> dict[int, list[tuple[float, float, float, float]]
     return out
 
 
-def _folder_name(doc: dict) -> str:
+def _folder_name(doc: dict, pdf_path: Path) -> str:
+    """`<paper_id slug>_figs`.
+
+    폴더는 **한 편에 하나**여야 한다. 폴더 정리(멱등성)가 그 폴더 안의 그림을
+    지우기 때문에, 두 편이 같은 폴더를 쓰면 서로의 그림을 지운다. paper_id 가
+    비면 PDF 파일 이름으로 대신한다(single.py 는 DOI→sha1→파일명 순으로 항상
+    고유한 paper_id 를 넣지만, 이 모듈만 따로 부를 수도 있다).
+    """
     from . import utils
 
-    pid = str(doc.get("paper_id") or "unknown")
+    pid = str(doc.get("paper_id") or "").strip()
+    if not pid or pid.lower() == "unknown":
+        pid = f"file:{Path(pdf_path).stem}"
     return f"{utils.slug(pid)[:80]}_figs"
 
 
@@ -844,7 +876,7 @@ def fill_document(doc: dict, pdf_path: str | Path, *,
     figs = out.get("figures") or []
     pdf_path = Path(pdf_path)
     base = Path(json_path) if json_path else pdf_path.with_suffix(".json")
-    folder = _folder_name(out)
+    folder = _folder_name(out, pdf_path)
     dest_dir = base.parent / folder
 
     stats: dict[str, Any] = {

@@ -110,7 +110,13 @@ def _build_ref_map(root) -> tuple[dict[str, Reference], dict[str, str]]:
                 year = int(yr.text[:4])
             except ValueError:
                 pass
-        raw = norm_text("".join(scope.itertext()))[:400]
+        # 요소를 **구분자 없이** 이어 붙이면 'McGovernVJMihmMCJr…' 처럼 읽을 수
+        # 없는 덩어리가 된다(JATS 는 저자 하나를 <surname>/<given-names> 로 쪼갠다).
+        # 지면에는 'McGovern VJ, Mihm MC Jr, …' 로 인쇄돼 있다. 공백으로 잇고
+        # 문장부호 앞뒤의 군더더기 공백만 정리한다.
+        raw = norm_text(" ".join(t for t in scope.itertext() if t and t.strip()))
+        raw = re.sub(r"\s+([,.;:)\]])", r"\1", raw)
+        raw = re.sub(r"([(\[])\s+", r"\1", raw)[:400]
         refs[key] = Reference(key=key, doi=doi, pmid=pmid,
                               title=title or "", year=year, raw=raw)
         rid_to_ref[key] = doi or key

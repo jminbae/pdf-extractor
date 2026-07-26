@@ -19,10 +19,12 @@ DOI 이름은 정본 안(`paper_id`)에 그대로 있고, 내보내기 할 때 �
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 from . import utils
@@ -31,6 +33,57 @@ from .utils import log
 APP_NAME = "PDF Extractor"
 
 _lock = threading.Lock()          # index.json 을 여러 스레드가 함께 쓴다
+
+
+@contextlib.contextmanager
+def _file_lock(timeout: float = 5.0):
+    """프로세스 사이 잠금 — 앱과 배치가 동시에 목록을 고칠 때 서로 덮어쓰지 않게.
+
+    잠금을 못 얻어도 **그냥 진행한다.** 목록은 언제든 `rebuild_index()` 로 다시
+    만들 수 있는 부수물이라, 여기서 추출을 멈추는 것이 더 나쁘다.
+    """
+    p = root() / "index.lock"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    f = None
+    try:
+        f = open(p, "a+b")
+        if sys.platform == "win32":
+            import msvcrt
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() > deadline:
+                        f.close(); f = None
+                        break
+                    time.sleep(0.05)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    except Exception:  # noqa: BLE001 — 잠금이 안 되면 잠금 없이 진행한다
+        if f:
+            try:
+                f.close()
+            except Exception:  # noqa: BLE001
+                pass
+        f = None
+    try:
+        yield
+    finally:
+        if f:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                f.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ── 위치 ─────────────────────────────────────────────────────────────
@@ -123,7 +176,10 @@ def _index_put(sha1: str, doc: dict, pdf_path: str | Path | None) -> None:
         "pdf": str(pdf_path) if pdf_path else (doc.get("source_file") or ""),
         "scope": doc.get("scope") or "",
     }
-    with _lock:
+    # 프로세스가 둘 이상이면(앱 + 배치 스크립트) 서로의 행을 덮어써 요약이 실제보다
+    # 적게 남는다(실측: 정본 203개인데 요약은 90편). 스레드 잠금만으로는 못 막는다.
+    # 파일 잠금으로 **읽기→고치기→쓰기** 를 한 덩어리로 묶는다.
+    with _lock, _file_lock():
         idx = {}
         if utils.path_exists(index_path()):
             try:

@@ -338,6 +338,20 @@ def _extract(pdf: Path, cfg: dict, ctx: "_Ctx", *, out_json, on_progress,
     except Exception as e:  # noqa: BLE001
         notes.append(f"표 복원 생략: {type(e).__name__}: {e}")
 
+    # 그림을 **실제 이미지로** 잘라 JSON 옆 `<paper_id>_figs/` 에 넣고
+    # figures[].image 에 상대경로를 담는다. 이 단계가 없어 전 코퍼스의
+    # figures[].image 가 전부 None 이었다(앱이 캡션만 띄우고 그림은 못 띄웠다).
+    # tablefill 뒤에 둔다 — tables[].pdf_span 을 표 영역 장벽으로 쓴다.
+    try:
+        from . import figclip
+        d, _st = figclip.fill_document(
+            d, pdf, json_path=out_json or default_json_path(pdf))
+        if _st.get("clipped"):
+            notes.append(f"그림 추출 {_st['clipped']}장"
+                         f"({_st['bytes'] // 1024}KB)")
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"그림 추출 생략: {type(e).__name__}: {e}")
+
     # 범위 밖(한글 본문) 판정 — 억지로 뽑아 엉터리를 남기지 않는다.
     #   2단으로 조판된 한글 본문은 읽기 순서가 좌우로 섞여 '피부의 표 여 있는데'
     #   같은 뒤죽박죽이 되고, 그 문단이 제목 자리까지 올라간다(실측 26편 중 5편).

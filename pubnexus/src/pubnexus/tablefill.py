@@ -93,6 +93,7 @@ from pathlib import Path
 from typing import Any
 
 from . import utils
+from . import symfont
 from .utils import log
 
 # ── 튜닝 상수(pt). 이 코퍼스 실측으로 정했다 ────────────────────────
@@ -215,7 +216,10 @@ class _Page:
                 continue
             bl: list[dict] = []
             for ln in b.get("lines", ()):
-                txt = "".join(sp.get("text", "") for sp in ln.get("spans", ()))
+                # 기호 글꼴은 여기서 되돌린다 — 표 칸의 별점(NOS)·부등호가
+                # ASCII 로 나오는 자리다(symfont 참고).
+                txt = "".join(symfont.remap_text(sp.get("font"), sp.get("text", ""))
+                              for sp in ln.get("spans", ()))
                 if not txt.strip():
                     continue
                 d = tuple(ln.get("dir") or (1.0, 0.0))

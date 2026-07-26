@@ -299,8 +299,19 @@ def _build_refs(root) -> tuple[list[Reference], dict[str, int]]:
         # 구조 요소를 붙여 이어 'HChoi HRKim CHNa' 처럼 읽을 수 없는 문자열이 된다
         # (includeRawCitations=1 로 켜 두고 있고, 캐시 134편에서 거의 전부 존재).
         raw_el = bs.find(".//{*}note[@type='raw_reference']")
-        raw = norm_text("".join(raw_el.itertext())) if raw_el is not None else ""
-        raw = _dehyphenate(raw or norm_text("".join(bs.itertext())))[:400]
+        raw = norm_text(" ".join(t for t in raw_el.itertext()
+                                 if t and t.strip())) if raw_el is not None else ""
+        if raw:
+            raw = re.sub(r"\s+([,.;:)\]])", r"\1", raw)
+            raw = re.sub(r"([(\[])\s+", r"\1", raw)
+        if not raw:
+            # raw_reference 가 없으면 요소를 이어 붙이는데, 구분자 없이 붙이면
+            # 'KimSYJeeSMLeeSJ…' 처럼 읽을 수 없는 덩어리가 된다(실측 16건).
+            # 요소 사이에 공백을 넣고 문장부호 앞의 군더더기 공백만 정리한다.
+            raw = norm_text(" ".join(t for t in bs.itertext() if t and t.strip()))
+            raw = re.sub(r"\s+([,.;:)\]])", r"\1", raw)
+            raw = re.sub(r"([(\[])\s+", r"\1", raw)
+        raw = _dehyphenate(raw)[:400]
         order.append(key)
         parsed.append(Reference(key=key, doi=doi, pmid=pmid, title=title,
                                 year=year, journal=journal, authors=authors,

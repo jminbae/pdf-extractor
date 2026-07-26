@@ -96,6 +96,7 @@ from pathlib import Path
 import fitz
 
 from . import utils
+from . import symfont
 from .jats import _dedup, _tidy_punct
 from .schema import Document, Meta, Section, Paragraph, Figure, Table, classify_section
 from .textfix import clean_heading, clean_paragraph
@@ -211,7 +212,10 @@ def _line_text_and_cites(line, body: float):
     """한 줄의 span → (텍스트, 인용번호들). 위첨자 숫자는 본문에서 제거."""
     parts, cites = [], []
     for s in line["spans"]:
-        t = s["text"]
+        # 기호 전용 글꼴(AdvPi3·AdvPSMP4·MathematicalPi-One…)은 ASCII 코드값이
+        # 아무 의미가 없다. 글꼴 이름을 알 수 있는 자리는 여기뿐이므로
+        # 여기서 진짜 글자로 되돌린다(별점 '$'→'★', 'P \.05'→'P < .05').
+        t = symfont.remap_text(s.get("font"), s["text"])
         st = t.strip()
         is_super = bool(s.get("flags", 0) & SUPERSCRIPT) or s["size"] < body * 0.72
         if st and is_super and CITE_RE.match(st):

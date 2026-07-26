@@ -606,6 +606,23 @@ class App:
         self.push("folder", {"path": str(self.folder), "files": self.file_rows(),
                              "last": last})
         self.status("", busy=False, force=True)
+        # 요약에 적힌 경로로 못 찾은 것들은 **내용**으로 맞춰 본다. PDF 를 옮겼거나
+        # 다른 폴더에서 뽑았으면 경로가 다르기 때문이다. 목록은 이미 떴고, 확인되는
+        # 대로 점이 하나씩 초록으로 바뀐다 — 화면을 붙잡지 않는다.
+        threading.Thread(target=self._reconcile, args=(self.folder,),
+                         daemon=True).start()
+
+    def _reconcile(self, folder: Path) -> None:
+        for p in list(self.pdfs):
+            if self.folder != folder:        # 그 사이 다른 폴더를 열었다
+                return
+            if _norm(p) in self.done:
+                continue
+            try:
+                self.sha_for(p, deep=True)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.004)                # 디스크·화면에 숨 쉴 틈을 준다
 
     def scan_store(self) -> None:
         """저장소 요약을 읽어 {PDF 경로 → sha1} 지도를 만든다.
