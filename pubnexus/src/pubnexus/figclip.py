@@ -340,27 +340,38 @@ def _page_blocks(lines: list[_cap.Line], body: float, pieces: list[_Piece],
     return out
 
 
-def _columns(lines: list[_cap.Line]) -> list[tuple[float, float]]:
+def _col_split(lines: list[_cap.Line]) -> float | None:
+    """2단 조판의 경계 x. boundary.py 의 판정기를 그대로 빌려 쓴다."""
+    from . import boundary
+
+    if not lines:
+        return None
+    try:
+        return boundary._col_split([{"x0": l.x0, "x1": l.x1} for l in lines])
+    except Exception:                            # noqa: BLE001
+        return None
+
+
+def _columns(lines: list[_cap.Line], fallback: float | None = None
+             ) -> list[tuple[float, float]]:
     """이 쪽의 단(段) 가로 범위.
 
     captions.Line.col 을 그대로 쓰면 안 된다 — 그 col 은 **왼쪽 끝 군집**이라
     전폭 줄(표제·러닝헤드·전폭 캡션)이 0번 단에 섞이면서 0번 단의 범위가 지면
     전체가 된다(실측 10.3346/jkms.2010.25.6.924 2쪽: 단이 (59,535)·(123,527)·
-    (301,538) 로 나왔고, 그 바람에 오른쪽 단 캡션의 '단'이 지면 전체가 되어
-    본문 한 줄이 그림 안에 들어갔다).
+    (301,538) 로 나왔고, 그 바람에 오른쪽 단 캡션의 '단'이 지면 전체가 됐다).
 
-    단 경계는 boundary.py 가 이미 판정한다(`_col_split` — 왼쪽 끝 군집 + 좌우
-    줄 수 균형 + 걸침 줄 비율). 같은 판정기를 빌려 쓴다.
+    그림이 지면을 거의 다 채운 쪽은 본문 줄이 몇 줄 없어 단 판정이 아예 실패한다
+    (실측 같은 논문 3쪽: 그림 두 개 때문에 단이 (60,536) 한 개로 나왔고, 그래서
+    왼쪽 단 그림의 '단'이 지면 전체가 되어 오른쪽 단 본문이 그림에 들어왔다).
+    그럴 때는 **문서 전체로 잰 단 경계**(fallback)를 쓴다 — 학술지는 한 논문
+    안에서 판형을 바꾸지 않는다.
     """
-    from . import boundary
-
     if not lines:
         return []
-    rows = [{"x0": l.x0, "x1": l.x1} for l in lines]
-    try:
-        split = boundary._col_split(rows)
-    except Exception:                            # noqa: BLE001
-        split = None
+    split = _col_split(lines)
+    if split is None:
+        split = fallback
     if split is None:
         return [(min(l.x0 for l in lines), max(l.x1 for l in lines))]
     left = [l for l in lines if l.x1 <= split - 1]
@@ -369,12 +380,14 @@ def _columns(lines: list[_cap.Line]) -> list[tuple[float, float]]:
     for grp in (left, right):
         if grp:
             out.append((min(l.x0 for l in grp), max(l.x1 for l in grp)))
-    return sorted(out, key=lambda c: c[0])
+    return sorted(out, key=lambda c: c[0]) or [
+        (min(l.x0 for l in lines), max(l.x1 for l in lines))]
 
 
 def _read_page(doc, pno: int, lines: list[_cap.Line], body: float,
                decor: set[int], heads: set[str],
-               spans: list[tuple[float, float, float, float]]) -> _FigPage:
+               spans: list[tuple[float, float, float, float]],
+               split: float | None = None) -> _FigPage:
     page = doc[pno]
     pr = page.rect
     pieces = _image_pieces(page, decor) + _draw_pieces(page)
@@ -382,24 +395,33 @@ def _read_page(doc, pno: int, lines: list[_cap.Line], body: float,
     # 러닝헤드/꼬리말 띠의 조각은 아예 보지 않는다
     pg.pieces = [p for p in pieces
                  if p.rect[3] > pg.top and p.rect[1] < pg.bottom]
-    pg.cols = _columns(lines)
+    pg.cols = _columns(lines, split)
     pg.blocks = _page_blocks(lines, body, pg.pieces, pg.cols, heads)
     pg.tables = list(spans)
     return pg
 
 
 # ── 캡션이 걸친 단(段) → 가로 한계 ───────────────────────────────────
+BAND_FILL = 0.75            # 캡션이 단의 이만큼을 채워야 그 단을 '걸쳤다'고 본다
+
+
 def _band(pg: _FigPage, cap: _cap.Caption) -> tuple[float, float, float, float]:
     """(band_x0, band_x1, safe_x0, safe_x1).
 
     band 는 캡션이 실제로 걸친 단. safe 는 **옆 단과의 중간점**까지 넓힌 한계다
     — 그림이 본문 단보다 조금 넓게 조판되는 일이 흔하지만, 옆 단의 글을 물어서는
     안 된다.
+
+    단을 '걸쳤다'고 보려면 캡션이 그 단의 **4분의 3 이상**을 채워야 한다. 문턱을
+    낮게 잡으면(예전 0.35) 단 판정이 실패해 지면 전체가 한 단으로 나온 쪽에서
+    한 단짜리 캡션이 지면 전체를 자기 단이라고 주장한다. 못 미치면 **캡션 폭
+    그대로**가 band 다 — 캡션은 그림 아래에 그림 폭으로 조판되므로 이것이 가장
+    보수적이면서 정확한 근사다.
     """
     cx0, _cy0, cx1, _cy1 = cap.bbox
     covered = [c for c in pg.cols
                if (c[1] - c[0]) > 0
-               and (min(c[1], cx1) - max(c[0], cx0)) >= 0.35 * (c[1] - c[0])]
+               and (min(c[1], cx1) - max(c[0], cx0)) >= BAND_FILL * (c[1] - c[0])]
     if covered:
         bx0 = min(min(c[0] for c in covered), cx0)
         bx1 = max(max(c[1] for c in covered), cx1)
@@ -766,13 +788,16 @@ def fill_document(doc: dict, pdf_path: str | Path, *,
         by_page: dict[int, list[_cap.Line]] = {}
         for ln in lines:
             by_page.setdefault(ln.page, []).append(ln)
+        # 문서 전체로 잰 단 경계 — 그림이 지면을 채운 쪽에서 쪽 단위 판정이
+        # 실패했을 때 쓸 대체값(학술지는 한 논문 안에서 판형을 바꾸지 않는다)
+        doc_split = _col_split(lines)
         pages: dict[int, _FigPage] = {}
 
         def page_of(pno: int) -> _FigPage:
             if pno not in pages:
                 pages[pno] = _read_page(fdoc, pno, by_page.get(pno, []),
                                         body, decor, heads,
-                                        tspans.get(pno, []))
+                                        tspans.get(pno, []), doc_split)
             return pages[pno]
 
         used_names: set[str] = set()

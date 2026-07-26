@@ -65,12 +65,18 @@ _DEFAULTS: dict = {
 
 # ── 공개 API ────────────────────────────────────────────────────────
 def default_json_path(pdf_path: str | Path) -> Path:
-    """PDF 옆, 같은 이름의 .json 경로."""
-    return Path(pdf_path).with_suffix(".json")
+    """이 PDF 의 정본이 놓일 자리 — **앱 저장소** 안이다(PDF 옆이 아니다).
+
+    2026-07-26 원장 결정. PDF 폴더를 어지럽히지 않고, 읽기 전용 위치에서도
+    동작하며, ResearchMap 의 `%LOCALAPPDATA%` 저장소와 방식이 같다.
+    짝은 **파일 내용(sha1)** 으로 맺으므로 PDF 를 옮기거나 이름을 바꿔도 찾는다.
+    """
+    from . import store
+    return store.doc_path(store.file_sha1(pdf_path))
 
 
 def is_extracted(pdf_path: str | Path, out_json: str | Path | None = None) -> bool:
-    """이미 처리된 PDF 인가(정상적인 정본 JSON 이 옆에 있는가).
+    """이미 처리된 PDF 인가(정상적인 정본이 저장소에 있는가).
 
     깨진/반쪽 JSON 은 '없음'으로 본다 — 다시 처리하는 편이 안전하다.
     """
@@ -382,8 +388,18 @@ def _extract(pdf: Path, cfg: dict, ctx: "_Ctx", *, out_json, on_progress,
                           else ("ok" if meta.get("sources_ok") else "unknown"))
     d["qc"]["source_file"] = str(pdf)
 
+    # 파일 내용 지문 — 저장소가 이걸로 PDF 와 정본을 짝짓는다(경로가 아니라).
+    d["sha1"] = rec.get("sha1") or ""
+
     if out_json:
         _write_doc(Path(out_json), d)           # 원자적 쓰기(반쪽 JSON 방지)
+        # 저장소가 목록 화면용 요약도 갱신하게 한다(정본 자체는 위에서 이미 썼다).
+        try:
+            from . import store
+            if d["sha1"] and Path(out_json) == store.doc_path(d["sha1"]):
+                store._index_put(d["sha1"], d, pdf)
+        except Exception as e:  # noqa: BLE001 — 요약 실패가 추출을 무효화하지 않는다
+            notes.append(f"목록 갱신 생략: {type(e).__name__}: {e}")
 
     _emit(on_progress, "done", steps, steps, pdf.name,
           f"완료 ({d.get('source')})")

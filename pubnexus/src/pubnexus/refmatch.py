@@ -389,6 +389,75 @@ def relink_cited_refs(doc: dict, key_num: dict[str, int]) -> int:
     return n_linked
 
 
+def _positional_numbering(doc: dict, printed: list[dict]) -> bool:
+    """번호가 '나열 순서'로만 매겨졌는가 — 인용 마커의 뒷받침이 없는가.
+
+    GROBID 가 인용을 목록 항목에 이어 준 논문은 번호가 마커에서 왔으므로 믿는다.
+    하나도 못 이어 준 논문만 나열 순서로 번호를 매겼고, 그때만 아래의 보정을
+    적용한다(멀쩡한 논문을 건드리지 않기 위한 자물쇠).
+    """
+    numbered = {r.get("key") for r in printed if r.get("number")}
+    for s in doc.get("body_text") or []:
+        for p in s.get("paragraphs") or []:
+            for k in p.get("cited_keys") or []:
+                if not str(k).startswith("num:") and k in numbered:
+                    return False
+    return True
+
+
+def _max_marker(doc: dict) -> int:
+    """본문에 인쇄된 인용 번호의 최대값(합본 지면 판정용)."""
+    hi = 0
+    for s in doc.get("body_text") or []:
+        for p in s.get("paragraphs") or []:
+            for k in p.get("cited_keys") or []:
+                k = str(k)
+                if k.startswith("num:") and k[4:].isdigit():
+                    hi = max(hi, int(k[4:]))
+    return hi
+
+
+def _split_foreign(printed: list[dict], paired: set[int], n_icite: int,
+                   max_marker: int) -> tuple[list[int], list[int]] | None:
+    """합본 지면에서 **옆 논문의 참고문헌 목록**이 통째로 섞인 경우를 가려낸다.
+
+    실측(정본 97편 중 5편, 전부 JAAD/JACI research letter): 한 지면에 두 편이
+    이어 실려 GROBID 가 두 목록을 하나로 이어 붙인다. 예) 10.1016/j.jaad.2013.05.012
+    ('Green foot syndrome') 은 PDF 에 REFERENCES 표제가 **두 번** 나오고 앞의 것은
+    앞 편(Elston DM, Patient safety…)의 것이다. 나열 순서로 번호를 매기면 본문
+    [1] 이 앞 편의 1번(Elston)으로 간다 — PDF 지면의 1번은 Hall JH 다.
+
+    가려내는 근거 세 가지가 **모두** 맞을 때만 손댄다:
+      · 짝지어진 항목이 한쪽에 뭉쳐 있고 반대쪽에는 하나도 없다(두 목록의 경계)
+      · 본문이 쓰는 최대 인용번호가 그 뭉치 크기 안에 든다(목록이 본문보다 길다)
+      · 뭉치 크기가 iCite 가 말하는 참조 개수와 비슷하다
+    한국 저널처럼 iCite 재현율이 낮아 뒤쪽이 통째로 안 짝지어지는 경우와
+    구별되는 지점은 두 번째 근거다 — 그런 논문은 본문이 끝번호까지 인용한다.
+
+    반환: (남의 것 index 목록, 이 논문 것 index 목록) 또는 None.
+    """
+    L = len(printed)
+    if L < 5 or len(paired) < 3 or max_marker < 2 or n_icite < 3 or L <= max_marker:
+        return None
+    lo, hi = min(paired), max(paired)
+    # 짝지어진 항목이 놓인 구간을 이 논문 것으로 본다. 앞뒤 어느 쪽을 남의 것으로
+    # 볼지는 세 가지 모양을 순서대로 시험한다(앞뒤 둘 다 / 앞만 / 뒤만).
+    for span in ((lo, hi + 1), (lo, L), (0, hi + 1)):
+        own = list(range(*span))
+        if not own:
+            continue
+        foreign = [i for i in range(L) if i not in set(own)]
+        hit = sum(1 for i in own if i in paired)
+        if len(foreign) < 2 or hit < 3 or hit < 0.7 * len(own):
+            continue
+        if max_marker > len(own):
+            continue
+        if abs(len(own) - n_icite) > max(2, 0.4 * n_icite):
+            continue
+        return foreign, own
+    return None
+
+
 def merge(doc: dict, items: list[dict], host_doi: str | None = None) -> dict:
     """지면 목록과 iCite 목록을 합쳐 doc['references'] 를 확정한다.
 
@@ -422,8 +491,22 @@ def merge(doc: dict, items: list[dict], host_doi: str | None = None) -> dict:
             p["source"] = "parsed+icite"
             p["match"] = how
 
+    # 합본 지면에서 옆 논문 목록이 통째로 섞였는지 — 번호가 나열 순서로만 매겨진
+    # 논문에 한해 확인하고, 확실할 때만 남의 목록을 빼고 다시 1번부터 매긴다.
+    paired_idx = {pi for pi in matched_i.values()}
+    if _positional_numbering(doc, printed):
+        split = _split_foreign(printed, paired_idx, len(items), _max_marker(doc))
+        if split:
+            foreign, own = split
+            for i in foreign:
+                printed[i]["number"] = None
+                printed[i]["source"] = "foreign"
+            for n, i in enumerate(own, 1):
+                printed[i]["number"] = n
+            stat["foreign_block"] = len(foreign)
+
     for p in printed:
-        if p.get("source") != "parsed+icite":
+        if p.get("source") not in ("parsed+icite", "foreign"):
             # 짝을 못 찾았다 → 파싱한 서지값은 **믿을 수 없으니 지운다**.
             # 지면 원문(raw)만 남긴다. 번호는 지면에서 온 것이라 그대로 둔다.
             p["source"] = "parsed"
@@ -431,6 +514,11 @@ def merge(doc: dict, items: list[dict], host_doi: str | None = None) -> dict:
             p["doi"] = None
             p["pmid"] = None
             stat["unpaired_printed"] += 1
+        elif p.get("source") == "foreign":
+            p["match"] = ""
+            p["doi"] = None
+            p["pmid"] = None
+            p["title"] = ""
 
     extra: list[dict] = []
     for ii, it in enumerate(items):
@@ -449,6 +537,7 @@ def merge(doc: dict, items: list[dict], host_doi: str | None = None) -> dict:
     unnumbered = [r for r in printed if not r.get("number")]
     doc["references"] = numbered + unnumbered + extra
     stat["numbered"] = len(numbered)
+    stat.setdefault("foreign_block", 0)
     return stat
 
 
@@ -460,11 +549,14 @@ def reconcile(doc: dict, icite_rec: dict | None,
     채운다. 비우지 않는다 — 원장이 목록을 보고 싶어 한다. 그 상태는
     references_source="parsed" 로 표시된다.
     """
-    key_num = ensure_numbers(doc)
+    ensure_numbers(doc)
     items = icite_items((doc.get("meta") or {}).get("pmid") or "",
                         icite_rec or {}, detail or {})
     host = (doc.get("meta") or {}).get("doi") or doc.get("paper_id")
     stat = merge(doc, items, host if str(host).startswith("10.") else None)
+    # **합친 뒤의** 번호로 잇는다 — 합본 지면 보정이 번호를 바꿀 수 있다.
+    key_num = {r["key"]: r["number"] for r in doc.get("references") or []
+               if r.get("key") and r.get("number")}
     stat["linked_citations"] = relink_cited_refs(doc, key_num)
 
     kinds = {r.get("source") for r in doc.get("references") or []}
