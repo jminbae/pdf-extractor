@@ -71,7 +71,11 @@ def process_pdf(url: str, pdf_path: Path, cfg_grobid: dict) -> bytes | None:
 
 
 # ── TEI 파싱 ─────────────────────────────────────────────────────────
-_CITE_NUM_RE = re.compile(r"^[\s\[\(]*([\d]{1,3}(?:\s*[,\-–]\s*\d{1,3})*)[\s\]\)]*$")
+# 양끝의 구분자(쉼표·세미콜론)까지 허용해야 한다. GROBID 는 '[2,3]' 을 <ref>[2,</ref>
+# <ref>3]</ref> 두 개로 쪼개 내보내는 일이 잦은데, 앞쪽 '[2,' 이 이 패턴에 걸리지
+# 않으면 원문 그대로 남아 '[2,[3]' 같은 깨진 마커가 된다(실측 103건/15편).
+_CITE_NUM_RE = re.compile(r"^[\s\[\(,;]*([\d]{1,3}(?:\s*[,;\-–]\s*\d{1,3})*)[\s\]\),;]*$")
+_PUNCT_ONLY_RE = re.compile(r"^[\s\[\]\(\),;.\-–]*$")
 
 
 def _cite_marker(raw: str | None) -> str:
@@ -86,6 +90,8 @@ def _cite_marker(raw: str | None) -> str:
     t = (raw or "").strip()
     if not t:
         return ""
+    if _PUNCT_ONLY_RE.match(t):
+        return ""                                  # 쪼개진 마커의 구두점 조각(']' ',')
     m = _CITE_NUM_RE.match(t)
     if not m:
         return t                                   # 저자-연도식 → 손대지 않음
