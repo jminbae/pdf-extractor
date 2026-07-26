@@ -102,6 +102,13 @@ if ($LASTEXITCODE -ne 0) { throw "설치프로그램 만들기 실패 (exit $LAS
 
 $setup = "$work\PDF-Extractor-Setup.exe"
 if (-not (Test-Path $setup)) { throw "설치프로그램이 없다: $setup" }
-$mb = [math]::Round((Get-Item $setup).Length / 1MB, 1)
-"완료 — PDF-Extractor-Setup.exe ($mb MB): $setup"
-"  올리기:  gh release upload v1.0 `"$setup`" --clobber"
+
+# 결과물은 리포 폴더에 둔다 — 원장이 여기서 바로 집는다. git 에는 올리지 않는다
+# (.gitignore). 빌드는 Dropbox 밖에서 하고 결과만 옮긴다(동기화가 파일을 잠근다).
+$final = Join-Path $repo "PDF-Extractor-Setup.exe"
+Copy-Item $setup $final -Force
+
+$mb = [math]::Round((Get-Item $final).Length / 1MB, 1)
+"완료 — PDF-Extractor-Setup.exe ($mb MB)"
+"  $final"
+"  올리기:  gh release upload v1.0 `"$final`" --clobber"
