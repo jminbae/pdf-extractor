@@ -308,6 +308,8 @@ def md_to_html(md: str, chips: str = "") -> str:
         out.append(f"<p>{_inline(line)}</p>")
 
     flush_ul()
+    if chips and not put_chips:      # 절이 하나도 없는 짧은 문서
+        out.append(chips)
     return "\n".join(out)
 
 
@@ -902,6 +904,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .zbtn{width:26px;height:24px;border-radius:6px;color:var(--mut);font-size:14px;
   line-height:1}
 .zbtn:hover{background:#f2f4f7;color:var(--ink)}
+.zbtn[disabled]{opacity:.28;cursor:default;background:none}
 #pgno{font-size:11.5px;color:var(--mut);min-width:56px;text-align:center;
   font-variant-numeric:tabular-nums}
 #scroll{flex:1;overflow:auto;background:#f1f2f4;padding:16px 0 30px;
@@ -1034,7 +1037,11 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
   </div>
   <div class="split" data-s="1"></div>
   <div class="pane">
-    <div class="head"><span class="t" id="dtitle">추출 결과</span></div>
+    <div class="head">
+      <button class="zbtn" id="bback" title="이전 위치 (Alt+←, 마우스 옆 버튼)" disabled>‹</button>
+      <button class="zbtn" id="bfwd" title="다음 위치 (Alt+→, 마우스 옆 버튼)" disabled>›</button>
+      <span class="t" id="dtitle">추출 결과</span>
+    </div>
     <div id="doc"><div class="empty">왼쪽에서 논문을 고르세요</div></div>
     <div id="notes"></div>
     <div id="foot"></div>
@@ -1052,7 +1059,8 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 "use strict";
 const $=s=>document.querySelector(s), DPR=Math.min(window.devicePixelRatio||1,2);
 const S={files:[],view:[],sel:-1,key:null,pages:[],zoom:1,fitW:0,bucket:1200,
-         els:[],io:null,busy:false,ready:false};
+         els:[],io:null,busy:false,ready:false,
+         hist:[],hidx:-1,mem:{}};   /* 이동 이력 · 논문별로 읽던 자리 */
 
 /* ── 도우미 ─────────────────────────────────────────────── */
 let tmr=null;
@@ -1102,9 +1110,61 @@ $("#list").addEventListener("click",e=>{
   const r=e.target.closest(".row");if(!r)return;openPaper(+r.dataset.i);});
 $("#q").addEventListener("input",draw);
 
+/* ── 이동 이력 ───────────────────────────────────────────
+   원장은 목록을 오르내리며 원본과 대조한다. 인용을 눌러 참고문헌으로 뛰었으면
+   **읽던 자리로 돌아올 길**이 있어야 한다. 크게 튀는 이동만 쌓는다 —
+   단순 스크롤까지 쌓으면 뒤로가기가 쓸모없어진다. */
+const dbox=()=>$("#doc");
+const curPos=()=>({p:S.sel,top:dbox().scrollTop});
+function navBtns(){
+  $("#bback").disabled=S.hidx<=0;
+  $("#bfwd").disabled=S.hidx<0||S.hidx>=S.hist.length-1;}
+function histPush(pos,from){
+  /* from 을 받는 이유: 논문을 바꾼 뒤에 curPos() 를 읽으면 이미 새 논문이라
+     떠나온 자리가 통째로 덮여 뒤로가기가 제자리를 맴돈다(실제로 겪었다). */
+  if(S.hidx>=0)S.hist[S.hidx]=from||curPos();
+  S.hist=S.hist.slice(0,S.hidx+1);
+  S.hist.push(pos);S.hidx=S.hist.length-1;
+  if(S.hist.length>80){S.hist.shift();S.hidx--;}
+  navBtns();}
+async function histGo(d){
+  const n=S.hidx+d;
+  if(S.hidx<0||n<0||n>=S.hist.length)return;
+  S.hist[S.hidx]=curPos();
+  S.hidx=n;navBtns();
+  const e=S.hist[n];
+  if(e.p!==S.sel)await openPaper(e.p,{noHist:true,top:e.top});
+  else scrollDocTo(e.top);}
+function scrollDocTo(top){
+  dbox().scrollTo({top:top,behavior:"smooth"});
+  setTimeout(()=>flashAt(top),340);}         /* 어디로 왔는지 눈이 따라가게 */
+function flashAt(top){
+  const art=$("#art");if(!art)return;
+  let best=null,bd=1e9;
+  art.querySelectorAll("p,li,h1,h2,h3,h4,h5,.twrap").forEach(el=>{
+    const d=Math.abs(el.offsetTop-top-30);
+    if(d<bd){bd=d;best=el;}});
+  if(best&&bd<400){best.classList.add("hit");
+    setTimeout(()=>best.classList.remove("hit"),1300);}}
+$("#bback").onclick=()=>histGo(-1);
+$("#bfwd").onclick=()=>histGo(1);
+/* 마우스 옆 버튼(뒤로 3 / 앞으로 4) — WebView2 가 안 넘겨줄 수 있어 키보드도 둔다 */
+for(const ev of ["mousedown","auxclick"])
+  window.addEventListener(ev,e=>{if(e.button===3||e.button===4)e.preventDefault();});
+window.addEventListener("mouseup",e=>{
+  if(e.button===3){e.preventDefault();histGo(-1);}
+  else if(e.button===4){e.preventDefault();histGo(1);}});
+window.addEventListener("keydown",e=>{
+  if(!e.altKey)return;
+  if(e.key==="ArrowLeft"){e.preventDefault();histGo(-1);}
+  else if(e.key==="ArrowRight"){e.preventDefault();histGo(1);}});
+
 /* ── 논문 열기 ──────────────────────────────────────────── */
 let openSeq=0;
-async function openPaper(i){
+async function openPaper(i,opt){
+  opt=opt||{};
+  const from=(S.sel>=0)?curPos():null;                    /* 떠나는 자리 */
+  if(from&&S.sel!==i)S.mem[S.sel]=from.top;               /* 읽던 자리 기억 */
   S.sel=i;draw();
   const seq=++openSeq;
   $("#dtitle").textContent=S.files[i]?S.files[i].name:"";
@@ -1116,6 +1176,9 @@ async function openPaper(i){
   catch(e){$("#scroll").innerHTML='<div class="empty">PDF 를 열지 못했습니다</div>';return;}
   if(seq!==openSeq)return;
   buildPdf(r);renderDoc(r.doc||{});
+  const top=(opt.top!==undefined)?opt.top:(S.mem[i]||0);
+  if(top)requestAnimationFrame(()=>{dbox().scrollTop=top;flashAt(top);});
+  if(!opt.noHist)histPush({p:i,top:top},from);
 }
 function renderDoc(d){
   const box=$("#doc");
@@ -1251,6 +1314,8 @@ $("#doc").addEventListener("click",e=>{
   e.preventDefault();
   const t=document.getElementById(a.getAttribute("href").slice(1));
   if(!t)return;
+  /* 뛰기 전에 지금 자리를 이력에 남긴다 — 뒤로 눌러 돌아올 수 있게 */
+  histPush({p:S.sel,top:Math.max(0,t.offsetTop-dbox().clientHeight/2)});
   t.scrollIntoView({behavior:"smooth",block:"center"});
   t.classList.add("hit");setTimeout(()=>t.classList.remove("hit"),1400);
 });
@@ -1304,6 +1369,7 @@ window.pnx={on(m){
     g.title=m.state==="off"
       ?"논문 분석기를 켜지 못해 PDF 자체 텍스트만 씁니다 — 추출은 계속됩니다":"";
   }else if(m.kind==="folder"){
+    S.hist=[];S.hidx=-1;S.mem={};navBtns();
     setPath(m.path);setFiles(m.files);
   }else if(m.kind==="run"){
     S.busy=!!m.on;showProg(S.busy);

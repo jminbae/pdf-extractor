@@ -27,6 +27,8 @@ import copy
 import json
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import utils
@@ -127,39 +129,68 @@ def extract_folder(folder: str | Path, config: dict | None = None, *,
     log(f"[single] 폴더 처리 시작: PDF {total}개 @ {root}")
     _emit(on_progress, "start", 0, total, "", f"PDF {total}개 처리 시작")
 
-    for i, pdf in enumerate(pdfs, 1):
+    workers = _worker_count(cfg)
+    log(f"[single] 동시 처리 {workers}편")
+    lock = threading.Lock()
+    done_n = 0                       # 진행 표시용 순번(완료 순서)
+
+    def work(idx: int, pdf: Path) -> None:
+        """한 편. 예외를 밖으로 내보내지 않는다 — 한 편의 실패가 전체를 멈추지 않게."""
+        nonlocal done_n
         if _cancelled(should_cancel):
-            stats["cancelled"] = True
-            log(f"[single] 취소 요청 → {i - 1}/{total} 에서 중단")
-            _emit(on_progress, "cancelled", i - 1, total, "",
-                  f"취소됨 — {i - 1}/{total} 처리")
-            break
+            return
         dest = default_json_path(pdf)
         if not overwrite and is_extracted(pdf, dest):
-            stats["skipped"] += 1
-            log(f"  [{i}/{total}] 건너뜀(이미 처리): {pdf.name}")
-            _emit(on_progress, "skip", i, total, pdf.name,
-                  f"[{i}/{total}] 건너뜀 {pdf.name}")
-            continue
+            with lock:
+                stats["skipped"] += 1
+                done_n += 1
+                n = done_n
+            log(f"  [{n}/{total}] 건너뜀(이미 처리): {pdf.name}")
+            _emit(on_progress, "skip", n, total, pdf.name,
+                  f"[{n}/{total}] 건너뜀 {pdf.name}")
+            return
         try:
             doc = _extract(pdf, cfg, ctx, out_json=dest,
-                           on_progress=_forward(on_progress, i, total, pdf.name),
+                           on_progress=_forward(on_progress, idx, total, pdf.name),
                            use_grobid=True)
-            stats["done"] += 1
+            with lock:
+                stats["done"] += 1
+                done_n += 1
+                n = done_n
             npar = sum(len(s.get("paragraphs") or []) for s in doc.get("body_text") or [])
-            log(f"  [{i}/{total}] {doc.get('source')}: 섹션 "
+            log(f"  [{n}/{total}] {doc.get('source')}: 섹션 "
                 f"{len(doc.get('body_text') or [])} · 문단 {npar}  {pdf.name}")
-            _emit(on_progress, "file", i, total, pdf.name,
-                  f"[{i}/{total}] 완료 {pdf.name}")
+            _emit(on_progress, "file", n, total, pdf.name,
+                  f"[{n}/{total}] 완료 {pdf.name}")
         except BaseException as e:  # noqa: BLE001 — 파일별 격리
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
             reason = f"{type(e).__name__}: {e}"
-            stats["failed"] += 1
-            stats["failures"].append((pdf.name, reason))
-            log(f"  [{i}/{total}] 실패(계속 진행): {pdf.name} — {reason}")
-            _emit(on_progress, "failed", i, total, pdf.name,
-                  f"[{i}/{total}] 실패 {pdf.name}: {reason}")
+            with lock:
+                stats["failed"] += 1
+                stats["failures"].append((pdf.name, reason))
+                done_n += 1
+                n = done_n
+            log(f"  [{n}/{total}] 실패(계속 진행): {pdf.name} — {reason}")
+            _emit(on_progress, "failed", n, total, pdf.name,
+                  f"[{n}/{total}] 실패 {pdf.name}: {reason}")
+
+    if workers <= 1:
+        for i, pdf in enumerate(pdfs, 1):
+            if _cancelled(should_cancel):
+                break
+            work(i, pdf)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(work, i, p) for i, p in enumerate(pdfs, 1)]
+            for f in futs:
+                f.result()           # work 가 예외를 삼키므로 여기서 안 터진다
+
+    if _cancelled(should_cancel):
+        stats["cancelled"] = True
+        log(f"[single] 취소 요청 → {done_n}/{total} 에서 중단")
+        _emit(on_progress, "cancelled", done_n, total, "",
+              f"취소됨 — {done_n}/{total} 처리")
 
     log(f"[single] 폴더 완료: 처리 {stats['done']} · 건너뜀 {stats['skipped']} · "
         f"실패 {stats['failed']} / 전체 {total}")
@@ -391,7 +422,10 @@ def _fulltext(pdf: Path, meta: dict, rec: dict, cfg: dict, ctx: "_Ctx",
             gcfg = cfg.get("grobid") or {}
             tei = ctx.tei_cached(pdf, rec.get("sha1", ""))
             if tei is None:
-                tei = grobid_client.process_pdf(gcfg.get("url", ""), pdf, gcfg)
+                # GROBID 호출만 좁힌다 — 몰리면 서비스가 죽는다(실측).
+                # 파싱·수리·PDF 작업은 그대로 병렬로 돈다.
+                with ctx._gsem:
+                    tei = grobid_client.process_pdf(gcfg.get("url", ""), pdf, gcfg)
                 ctx.tei_store(pdf, rec.get("sha1", ""), tei)
             if tei:
                 doc = grobid_client.parse_tei(tei, meta, source_file=str(pdf))
@@ -440,6 +474,15 @@ class _Ctx:
         # 배치 중 GROBID 가 죽었을 때 되살릴 횟수. 무한정 시도하면 설치가 없는
         # PC 에서 논문마다 40초씩 멎는다.
         self._revive_budget: int = 3
+        # 동시 처리에서 여러 스레드가 이 객체를 함께 쓴다.
+        #   · _glock — 생존 확인·되살리기가 겹치지 않게(여러 스레드가 동시에
+        #     GROBID 를 띄우면 포트 충돌로 전부 실패한다. 실측으로 확인했다)
+        #   · _gsem  — GROBID 에 동시에 보내는 요청 수 제한. 몰리면 서비스가
+        #     죽는다(실측 175편 처리에 2회). 파싱·수리는 병렬로 두고
+        #     **GROBID 호출만** 좁힌다.
+        self._glock = threading.Lock()
+        self._gsem = threading.Semaphore(2)
+        self._tlock = threading.Lock()      # TEI 캐시 쓰기
 
     def grobid_ready(self) -> bool:
         """GROBID 가 쓸 수 있는 상태인가. 꺼져 있으면 **창 없이 띄우고 기다린다.**
@@ -453,6 +496,10 @@ class _Ctx:
         from . import grobid_service as gs
         g = self.cfg.get("grobid") or {}
         url = (g.get("url") or "").strip()
+        with self._glock:                   # 여러 스레드가 동시에 띄우면 포트가 충돌한다
+            return self._grobid_ready_locked(gs, g, url)
+
+    def _grobid_ready_locked(self, gs, g: dict, url: str) -> bool:
         if not url:
             if self._grobid is None:
                 self._grobid = False
@@ -648,6 +695,32 @@ def _n_paragraphs(doc) -> int:
         return sum(len(s.paragraphs) for s in doc.body_text)
     except Exception:  # noqa: BLE001
         return 0
+
+
+def _worker_count(cfg: dict) -> int:
+    """동시에 처리할 편수. **일반 사용자 PC 에서 메모리가 모자라지 않는 선**으로 잡는다.
+
+    한 편이 도는 동안 PyMuPDF 가 PDF 전체를 열고 페이지를 렌더한다. 실측으로
+    한 편이 대략 250~400MB 를 쓰므로, 넉넉히 **한 편당 0.5GB** 로 보고 **남은
+    메모리의 절반** 안에서만 늘린다. 나머지 절반은 사용자가 쓰던 프로그램 몫이다.
+
+    시간의 대부분은 API 응답 대기라 CPU 코어 수보다 조금 많아도 이득이 있지만,
+    GROBID 가 몰리면 죽으므로(실측) 위를 8 로 막는다. 설정으로 덮을 수 있게 둔다.
+    """
+    want = (cfg.get("project") or {}).get("workers")
+    if want:
+        try:
+            return max(1, int(want))
+        except (TypeError, ValueError):
+            pass
+    n = max(1, (os.cpu_count() or 4) - 1)
+    try:                                   # 있으면 실제 여유 메모리로 다시 깎는다
+        import psutil                      # noqa: PLC0415
+        free_gb = psutil.virtual_memory().available / (1024 ** 3)
+        n = min(n, max(1, int(free_gb * 0.5 / 0.5)))
+    except Exception:                      # noqa: BLE001 — 없으면 코어 수만으로
+        n = min(n, 4)
+    return max(1, min(n, 8))
 
 
 def _paper_id(current: str | None, rec: dict, pdf: Path) -> str:

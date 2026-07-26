@@ -1,4 +1,4 @@
-# PaperExtract.exe 빌드 — pywebview 화면(app.py)을 단일 실행파일로 묶는다.
+# "PDF Extractor.exe" 빌드 — pywebview 화면(app.py)을 단일 실행파일로 묶는다.
 #
 #   powershell -ExecutionPolicy Bypass -File build_exe.ps1
 #
@@ -17,7 +17,9 @@
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
-$py   = "C:\Users\배정민\pnxvenv\Scripts\python.exe"
+# 사용자 폴더 이름에 한글이 들어 있다. 스크립트 안에 한글 경로를 그대로 적으면
+# PowerShell 5.1 이 파일 인코딩을 ANSI 로 읽어 경로가 깨진다 → 환경변수로 조립한다.
+$py   = Join-Path $env:USERPROFILE "pnxvenv\Scripts\python.exe"
 $work = "C:\pnxb"
 
 if (-not (Test-Path $py)) { throw "파이썬을 찾지 못했다: $py" }
@@ -31,7 +33,7 @@ try {
     $args = @(
         "-m", "PyInstaller", "--noconfirm",
         "--onefile", "--windowed",
-        "--name", "PaperExtract",
+        "--name", "PDF Extractor",
         "--distpath", "$work\dist", "--workpath", "$work\work", "--specpath", $work,
         "--paths", "src",
         "--collect-submodules", "pubnexus",
@@ -57,8 +59,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "빌드 실패 (exit $LASTEXITCODE)" }
 } finally { Pop-Location }
 
-$out = "$work\dist\PaperExtract.exe"
+$out = "$work\dist\PDF Extractor.exe"
 if (-not (Test-Path $out)) { throw "결과물이 없다: $out" }
-Copy-Item $out (Join-Path $repo "PaperExtract.exe") -Force
+Copy-Item $out (Join-Path $repo "PDF Extractor.exe") -Force
 $mb = [math]::Round((Get-Item $out).Length / 1MB, 1)
-"완료 — PaperExtract.exe ($mb MB) → $repo"
+"완료 — PDF Extractor.exe ($mb MB) → $repo"

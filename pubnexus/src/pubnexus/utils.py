@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from datetime import datetime
@@ -160,13 +161,22 @@ class HttpClient:
             "User-Agent": f"{user_agent} (mailto:{email})" if email else user_agent,
         })
         self._last: dict[str, float] = {}   # 호스트별 마지막 요청 시각
+        # 여러 논문을 동시에 처리하면 이 객체를 여러 스레드가 함께 쓴다.
+        # 잠금이 없으면 간격 조절이 무너져 한꺼번에 몰려 나가고, NCBI 가
+        # 429(요청 과다)로 막는다. 조절 자체를 직렬화한다.
+        self._lock = threading.Lock()
 
     def _throttle(self, host: str):
-        # rate-limit 은 호스트 단위로 적용(서로 다른 API 사이엔 대기 불필요)
-        wait = self.delay - (time.monotonic() - self._last.get(host, 0.0))
+        # rate-limit 은 호스트 단위로 적용(서로 다른 API 사이엔 대기 불필요).
+        # 대기는 **잠금 밖에서** 한다 — 잠금을 쥔 채 자면 다른 호스트로 가는
+        # 요청까지 막혀 동시 처리의 이득이 사라진다.
+        with self._lock:
+            now = time.monotonic()
+            wait = self.delay - (now - self._last.get(host, 0.0))
+            # 다음 차례를 미리 예약해 둔다(내가 잘 동안 남이 끼어들지 못하게).
+            self._last[host] = now + max(wait, 0.0)
         if wait > 0:
             time.sleep(wait)
-        self._last[host] = time.monotonic()
 
     def get(self, url: str, params: dict | None = None,
             accept: str | None = None, retries: int = 3):

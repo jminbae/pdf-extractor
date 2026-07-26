@@ -28,7 +28,8 @@ from . import metadata, utils
 from .schema import (Document, Meta, Section, Paragraph, Figure, Table,
                      Reference, BACK_MATTER, classify_section, classify_path,
                      normalize_title)
-from .textfix import clean_heading, clean_paragraph, strip_running_header
+from .textfix import (clean_heading, clean_paragraph, strip_running_header,
+                      _dehyphenate)
 from .utils import norm_text, log
 
 XMLID = "{http://www.w3.org/XML/1998/namespace}id"
@@ -294,7 +295,12 @@ def _build_refs(root) -> tuple[list[Reference], dict[str, int]]:
                                       (fore.text if fore is not None else "")) if x)
             if nm.strip():
                 authors.append(norm_text(nm))
-        raw = norm_text("".join(bs.itertext()))[:400]
+        # 지면 원문. <note type="raw_reference"> 가 있으면 그걸 쓴다 — itertext 는
+        # 구조 요소를 붙여 이어 'HChoi HRKim CHNa' 처럼 읽을 수 없는 문자열이 된다
+        # (includeRawCitations=1 로 켜 두고 있고, 캐시 134편에서 거의 전부 존재).
+        raw_el = bs.find(".//{*}note[@type='raw_reference']")
+        raw = norm_text("".join(raw_el.itertext())) if raw_el is not None else ""
+        raw = _dehyphenate(raw or norm_text("".join(bs.itertext())))[:400]
         order.append(key)
         parsed.append(Reference(key=key, doi=doi, pmid=pmid, title=title,
                                 year=year, journal=journal, authors=authors,
