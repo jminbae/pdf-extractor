@@ -858,16 +858,20 @@ def _file_stem(item: dict, key: str | None, supp: bool, used: set[str]) -> str:
 # ── 본체 ─────────────────────────────────────────────────────────────
 def fill_document(doc: dict, pdf_path: str | Path, *,
                   json_path: str | Path | None = None,
+                  out_dir: str | Path | None = None,
                   dpi: int = DPI_DEFAULT, max_bytes: int = MAX_BYTES,
                   write: bool = True
                   ) -> tuple[dict, dict]:
-    """정본의 `figures[].image` 를 실제 PNG 로 채운다. (수정된 doc, 통계)
+    """정본의 `figures[].image` 를 실제 그림 파일로 채운다. (수정된 doc, 통계)
 
     입력 doc 은 건드리지 않는다(깊은 복사본을 돌려준다).
 
-    json_path: 정본 JSON 이 저장될 경로. PNG 폴더를 그 **옆**에 만들고
-        `figures[].image` 에는 그 JSON 기준 **상대경로**를 담는다.
-        주지 않으면 PDF 옆(같은 이름의 .json)을 가정한다.
+    **경로 규약은 부르는 쪽이 정한다.** `figures[].image` 에는 늘 **상대경로**가
+    들어가고(절대경로 금지 — 폴더를 옮기면 깨진다), 그 기준점만 달라진다.
+      · out_dir 을 주면      그 폴더에 넣고 image 는 **파일 이름만**(out_dir 기준).
+        앱 저장소가 정본(docs/)과 그림(figs/)을 다른 자리에 두므로 이 길을 쓴다.
+      · out_dir 이 없으면    json_path 옆 `<paper_id slug>_figs/` 에 넣고
+        image 는 **그 JSON 기준** 상대경로. json_path 도 없으면 PDF 옆을 가정한다.
     write=False 면 파일을 쓰지 않고 좌표만 통계에 담는다(검증용).
     """
     import fitz
@@ -875,9 +879,12 @@ def fill_document(doc: dict, pdf_path: str | Path, *,
     out = copy.deepcopy(doc)
     figs = out.get("figures") or []
     pdf_path = Path(pdf_path)
-    base = Path(json_path) if json_path else pdf_path.with_suffix(".json")
-    folder = _folder_name(out, pdf_path)
-    dest_dir = base.parent / folder
+    if out_dir is not None:
+        dest_dir, folder = Path(out_dir), ""
+    else:
+        base = Path(json_path) if json_path else pdf_path.with_suffix(".json")
+        folder = _folder_name(out, pdf_path)
+        dest_dir = base.parent / folder
 
     stats: dict[str, Any] = {
         "paper_id": out.get("paper_id"), "pdf": str(pdf_path),
@@ -1025,7 +1032,7 @@ def fill_document(doc: dict, pdf_path: str | Path, *,
                 nbytes = len(data)
                 keep.add(name)
                 made[p["stem"]] = (name, nbytes, real_dpi)
-            rel = f"{folder}/{name}"
+            rel = f"{folder}/{name}" if folder else name
             p["item"]["image"] = rel
             stats["clipped"] += 1
             stats["bytes"] += nbytes

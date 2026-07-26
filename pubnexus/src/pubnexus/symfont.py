@@ -1,4 +1,4 @@
-"""기호 전용 글꼴의 글자를 진짜 유니코드로 되돌린다.
+r"""기호 전용 글꼴의 글자를 진짜 유니코드로 되돌린다.
 
 증상: `10.1002/jso.23438` Table III(Newcastle–Ottawa Scale)의 별점이 전부
 `$` 로 나온다. PDF 텍스트층이 실제로 `$` 를 담고 있기 때문이다 —
@@ -122,6 +122,22 @@ AdvPSSym
   TeX_CM_Maths_Italic '<'      (`P < 0.001`)
   SegoeUISymbol      '®'
 이들은 CHAR_MAP 에 없으므로 이 모듈을 통과해도 원문 그대로 나온다.
+
+── 확인했으나 **일부러 넣지 않은 것**(미상) ─────────────────────────
+같은 이름·같은 코드인데 논문마다 그림이 달라 (글꼴,코드)만으로는 못 가른다.
+전수 렌더로 확인한 사실이므로 추측이 아니다. 넣으면 절반이 틀린다.
+  AdvPSSym U+0001 (전수 50, 30편) — **© 이기도 ® 이기도 하다**
+      `\x01 2012 by the American Academy of Dermatology` = ©
+      `Antera 3D\x01 (Miravex, England)` = ®  ← 같은 코드, 다른 그림
+  AdvPSSym U+0002 (전수 8, 2편) — 위와 같은 이유
+  AdvP4C4E74 U+0001·U+0002·U+0003 (전수 727+93+231, 25편)
+      한 코드에 ·, —, ±, ≥, *, ● 이 뒤섞인다. 논문마다 글꼴 프로그램이
+      제각각이다(43편에 43종). 이름이 같아도 배치가 같지 않다.
+  AdvP4C4E51·AdvP4C4E59·AdvP4C4E5E·AdvPSMP1·AdvSPSASORT·AdvT001·AdvT042
+      같은 이유(문서마다 다른 서브셋 인코딩).
+  *HCI-Tulip / *HCI-Tulip,Bold — 한글 논문 하나의 본문 글꼴이 통째로 깨져
+      U+0001·U+000F… 로 나온다(438자). 기호 몇 개가 아니라 본문 전체라
+      이 표로 다룰 문제가 아니다. 별도 조사가 필요하다.
 
 ── 적용 지점 ────────────────────────────────────────────────────────
 글꼴을 알 수 있는 곳, 즉 PyMuPDF span 을 직접 다루는 곳에서만 쓴다.
@@ -278,6 +294,31 @@ def saw_typeset_evidence() -> bool:
     게이트 판정에 OR 로 넣어 쓴다(모듈 상단 '적용 지점' 및 위 주석 참고).
     """
     return any((f, old) in TYPESET_EVIDENCE for (f, old, _new) in _stats)
+
+
+def pdf_typeset_evidence(doc) -> bool:
+    """열린 PyMuPDF 문서에 ASCII 조판 사고의 **글꼴 증거**가 있는가.
+
+    전역 상태에 기대지 않는다. 게이트를 판정하는 쪽이 PDF 를 갖고 있으면
+    이 함수를 쓰는 편이 `reset_stats()` 짝 맞추기보다 안전하다.
+    """
+    for pno in range(doc.page_count):
+        try:
+            raw = doc[pno].get_text("dict")
+        except Exception:                      # noqa: BLE001
+            continue
+        for b in raw.get("blocks", ()):
+            if b.get("type") != 0:
+                continue
+            for ln in b.get("lines", ()):
+                for sp in ln.get("spans", ()):
+                    f = normalize_font(sp.get("font"))
+                    if f not in CHAR_MAP:
+                        continue
+                    for ch in sp.get("text", ""):
+                        if (f, ch) in TYPESET_EVIDENCE:
+                            return True
+    return False
 
 
 def remap_char(font: str | None, ch: str) -> str:
