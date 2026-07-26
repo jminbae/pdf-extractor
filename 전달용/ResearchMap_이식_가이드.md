@@ -2,6 +2,7 @@
 
 작성 2026-07-26 · 대상: ResearchMap 개발자
 원본 저장소: https://github.com/jminbae/pdf-extractor (공개)
+제품 요구사항은 저장소 루트의 **PRD.md** — 무엇을 왜 만드는지, 무엇이 되면 완성인지.
 
 이 문서 하나로 **PDF Extractor 의 추출 파이프라인을 ResearchMap 안에서 그대로
 재현**할 수 있게 쓴다. 코드는 저장소에 있으니 여기서는 **왜 그렇게 되어 있는지**,
