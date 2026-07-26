@@ -78,6 +78,37 @@ Wingdings-Regular
   'z' U+007A → '●' U+25CF   전수 1. 문맥 highlights 상자의 주황 원형 불릿.
       2025-12-R-NRDP Vitiligo2.pdf p1
 
+── 2차 발견: Elsevier/JAAD 계열 ──────────────────────────────────────
+이름으로 기호 글꼴을 찾으면 놓친다. **내용**(제어문자·사설영역이 섞였는가,
+알파벳 비율이 낮은가)으로 다시 훑어 아래를 찾았다. 앞의 것들보다 양이 많다.
+
+AdvPSMP4 (JAAD 본문의 비교기호 — 임상적으로 가장 위험했다)
+  '\' U+005C → '<'   전수 227, **24편**. `P \ .05` → `P < .05`,
+      `age \18 y` → `age <18 y`, `(\5%)` → `(<5%)`
+      2013-04-O-JAAD Mohs micrographic surgery… p2 외 23편
+  '[' U+005B → '>'   전수 61, **17편**. `P [ .05` → `P > .05`,
+      `BT [2 mm` → `BT >2 mm`, `Age [ 50 y` → `Age > 50 y`
+  ※ 세로 조판 표머리에서는 글자가 90° 돌아 '∨'·'∧' 로 보이지만 같은 글자다.
+
+AdvP7DA6  ※ AdvPi3 와 **정반대다** — 여기 '$' 는 별이 아니라 '≥' 다
+  '$' U+0024 → '≥'   전수 82, **22편**. `age $ 18 y` → `age ≥ 18 y`,
+      `($75% repigmentation)` → `(≥75% …)`, `$ 2 LNs` → `≥ 2 LNs`
+  '#' U+0023 → '≤'   전수 19, 6편. `Age # 60 y` → `≤ 60 y`,
+      `BT #2 mm` → `BT ≤2 mm`, `(#200 kU/L)` → `(≤200 kU/L)`
+  'b' U+0062 → 'β'   전수 22, 2편. `b-catenin` → `β-catenin`, `TGF-b1` → `TGF-β1`
+
+AdvPSMPi6
+  'd' U+0064 → '•'   전수 42, **16편**. JAAD CAPSULE SUMMARY 의 글머리표.
+      `d Extramammary Paget disease is` → `• Extramammary …`
+      ※ 같은 자리를 바르게 뽑는 논문에서 이 글머리표가 U+2022 로 나온다 —
+        그래서 '●'(U+25CF) 가 아니라 '•'(U+2022) 로 맞춘다.
+  'j' U+006A → '■'   전수 12, 1편. 미배정 권·호 자리표시.
+      `VOLUME jj, NUMBER j` → `VOLUME ■■, NUMBER ■`
+
+AdvPSSym
+  'ª' U+00AA → '©'   전수 14, **11편**. 전부 저작권 줄.
+      `ª 2015 by the American Academy of Dermatology, Inc.` → `© 2015 …`
+
 ── 건드리지 않는 것(렌더해서 '이미 맞다'고 확인한 글꼴) ──────────────
   EuclidSymbol       '<' '>' '≥' '±' '=' 'α' 'β' '+'  ← 전부 글자 그대로
                      (`< 0%, 1–49%`, `CD8⁺ T cells`, `≥50%, ≥75%`)
@@ -106,7 +137,8 @@ import re
 from collections import Counter
 
 __all__ = ["normalize_font", "is_mapped_font", "remap_char", "remap_text",
-           "CHAR_MAP", "reset_stats", "get_stats"]
+           "span_text", "CHAR_MAP", "reset_stats", "get_stats",
+           "TYPESET_EVIDENCE", "saw_typeset_evidence", "damaged_spans"]
 
 
 # ── 확정 매핑 ────────────────────────────────────────────────────────
@@ -216,6 +248,36 @@ def reset_stats() -> None:
 
 def get_stats() -> dict[tuple[str, str, str], int]:
     return dict(_stats)
+
+
+# ── textfix 게이트와의 관계 (중요) ───────────────────────────────────
+# textfix 는 '조판 사고 서명'(_MOJI_SIGNS: '\50%'·'$75%'·'948C'…)이 보일 때만
+# ASCII 계열 치환을 연다. 그런데 이 모듈이 PDF 를 읽는 단계에서 그 글자들을
+# 미리 고쳐 버리면 **서명이 사라져 게이트가 닫히고**, 같은 문서의 다른 손상
+# (¼→=, AE→±, e→−)이 수리되지 않는다. 실측: 205편 중 18편에서 게이트가 닫혔고
+# '[95%'→'>95%', '#12'→'≤12' 수리 5건을 잃었다.
+#
+# 그래서 아래 집합을 둔다. 이 (글꼴, 원글자) 를 고쳤다는 것은 그 문서가
+# **ASCII 조판 사고를 겪었다는 글꼴 수준의 증거**다(문자열 어림보다 강하다).
+# 게이트 판정에 OR 로 넣으면 손실이 사라진다(실측: 나빠진 자리 0).
+#
+# 기호(★·©·▼·•·ε)만 고친 문서는 **넣으면 안 된다** — 그런 문서에서 게이트를
+# 열면 진짜 달러가 망가진다(실측: '0190-9622/$36.00' → '≥36.00',
+# '3.3 oz, $26' → '≥26'). 조판 사고 글자만 증거로 삼는 이유다.
+TYPESET_EVIDENCE: frozenset[tuple[str, str]] = frozenset({
+    ("AdvPSMP4", "\\"), ("AdvPSMP4", "["),
+    ("AdvP7DA6", "$"), ("AdvP7DA6", "#"),
+    ("AdvPi1", "5"), ("AdvPi1", "4"), ("AdvPi1", "8"),
+})
+
+
+def saw_typeset_evidence() -> bool:
+    """마지막 `reset_stats()` 이후 ASCII 조판 사고 글자를 고친 적이 있는가.
+
+    문서 하나를 읽기 전에 `reset_stats()` 를 부르고, 다 읽은 뒤 이 함수를
+    게이트 판정에 OR 로 넣어 쓴다(모듈 상단 '적용 지점' 및 위 주석 참고).
+    """
+    return any((f, old) in TYPESET_EVIDENCE for (f, old, _new) in _stats)
 
 
 def remap_char(font: str | None, ch: str) -> str:

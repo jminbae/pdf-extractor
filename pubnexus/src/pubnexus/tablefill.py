@@ -337,7 +337,9 @@ def _visible_words(page) -> list[tuple]:
                     buf, prev_x1 = [], None
                     continue
                 for ch in chars:
-                    c = ch.get("c", "")
+                    # 글자 단위에서도 기호 글꼴을 되돌린다. symfont 의 치환은
+                    # 반드시 1:1 이라 아래 bbox 대응이 그대로 유지된다.
+                    c = symfont.remap_char(sp.get("font"), ch.get("c", ""))
                     bb = ch.get("bbox")
                     if bb is None:
                         continue
