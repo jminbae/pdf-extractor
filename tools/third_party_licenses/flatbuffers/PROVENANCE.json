@@ -1,0 +1,93 @@
+{
+  "name": "flatbuffers",
+  "version": "25.12.19",
+  "source_commit": "7e163021e59cca4f8e1e35a7c828b5c6b7915953",
+  "source_tag": "v25.12.19",
+  "license_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/LICENSE",
+  "license_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "license_bytes": 11358,
+  "notice_file": "No root NOTICE file in official tag directory listing",
+  "installed_source_files": [
+    {
+      "path": "flatbuffers/__init__.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/__init__.py",
+      "sha256": "bc966ba9938e4ca74134c6bf89329403a5891bf73f373286a455ce7b5220b62c",
+      "upstream_sha256": "bc966ba9938e4ca74134c6bf89329403a5891bf73f373286a455ce7b5220b62c",
+      "bytes": 751,
+      "exact": true
+    },
+    {
+      "path": "flatbuffers/_version.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/_version.py",
+      "sha256": "b24df5adb6160ec7a827123d610d5f611f8c3314404f2aac9ed28012fec3ee92",
+      "upstream_sha256": "b24df5adb6160ec7a827123d610d5f611f8c3314404f2aac9ed28012fec3ee92",
+      "bytes": 696,
+      "exact": true
+    },
+    {
+      "path": "flatbuffers/builder.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/builder.py",
+      "sha256": "1eb1b9289f6b6ac8924eb30679ab6449d0ecedf5d5e5fcbff76ec3b206a4a780",
+      "upstream_sha256": "1eb1b9289f6b6ac8924eb30679ab6449d0ecedf5d5e5fcbff76ec3b206a4a780",
+      "bytes": 24567,
+      "exact": true
+    },
+    {
+      "path": "flatbuffers/compat.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/compat.py",
+      "sha256": "8a1052a560c248bfaf80b4b266d72ef0b5f7648df0cfd2e1b6a22d6361906608",
+      "upstream_sha256": "8a1052a560c248bfaf80b4b266d72ef0b5f7648df0cfd2e1b6a22d6361906608",
+      "bytes": 2373,
+      "exact": true
+    },
+    {
+      "path": "flatbuffers/encode.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/encode.py",
+      "sha256": "d8eaf79a05910242625a0f868186ac0d4e33207a505375b4e9f9888706f3e6e3",
+      "upstream_sha256": "d8eaf79a05910242625a0f868186ac0d4e33207a505375b4e9f9888706f3e6e3",
+      "bytes": 1550,
+      "exact": true
+    },
+    {
+      "path": "flatbuffers/flexbuffers.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/flexbuffers.py",
+      "sha256": "c85f16af82e8f1625bfa98fd34d6886312f0ce51c7c93ae833488ef1fc83c1b5",
+      "upstream_sha256": "c85f16af82e8f1625bfa98fd34d6886312f0ce51c7c93ae833488ef1fc83c1b5",
+      "bytes": 44454,
+      "exact": true
+    },
+    {
+      "path": "flatbuffers/number_types.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/number_types.py",
+      "sha256": "8a33b441c262bb19507a0a0139e774bfd9b40ddcd36475b1a5305952acec5870",
+      "upstream_sha256": "8a33b441c262bb19507a0a0139e774bfd9b40ddcd36475b1a5305952acec5870",
+      "bytes": 3762,
+      "exact": true
+    },
+    {
+      "path": "flatbuffers/packer.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/packer.py",
+      "sha256": "2cd5b29bc620151a878dc3de1a9618de29c21961fa5e76e440ab403ed14455ab",
+      "upstream_sha256": "2cd5b29bc620151a878dc3de1a9618de29c21961fa5e76e440ab403ed14455ab",
+      "bytes": 1164,
+      "exact": true
+    },
+    {
+      "path": "flatbuffers/table.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/table.py",
+      "sha256": "7226139aafc2cc0b98a5bdca0159e5ef933ce2278285f6f22a77be7451f3c305",
+      "upstream_sha256": "7226139aafc2cc0b98a5bdca0159e5ef933ce2278285f6f22a77be7451f3c305",
+      "bytes": 4818,
+      "exact": true
+    },
+    {
+      "path": "flatbuffers/util.py",
+      "source_url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/python/flatbuffers/util.py",
+      "sha256": "991550d55a07a7430930db514d4195cc02f03784ff0be535e2d31b8fdf69cb60",
+      "upstream_sha256": "991550d55a07a7430930db514d4195cc02f03784ff0be535e2d31b8fdf69cb60",
+      "bytes": 1608,
+      "exact": true
+    }
+  ],
+  "all_installed_python_sources_match": true
+}

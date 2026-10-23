@@ -8,6 +8,21 @@ from pubnexus.general_pdf import ExtractionCancelled
 
 
 class PDFPipelineTests(support.AppExportTests):
+    def test_native_recovery_removes_stale_sdk_text_assets_and_identity(self):
+        from pubnexus.general_pdf import ensure_fulltext
+        from pubnexus import render
+        source = self.source()
+        old = dict(self.extracted(source), source='pdf_sdk', sdk_markdown='STALE SDK BODY',
+                   sdk_blocks=[{'id': 'obsolete'}], sdk_assets=[{'image': 'obsolete.png'}],
+                   sdk_engine='old-sdk', pdf_conversion_engine='old-adapter')
+        recovered, report = ensure_fulltext(old, source)
+        self.assertEqual(recovered['source'], 'pdf_general')
+        self.assertNotIn('sdk_markdown', recovered)
+        self.assertNotIn('sdk_assets', recovered)
+        self.assertNotIn('pdf_conversion_engine', recovered)
+        self.assertNotIn('STALE SDK BODY', render.to_markdown(recovered))
+        self.assertEqual(old['sdk_markdown'], 'STALE SDK BODY')
+
     def test_healthy_paper_never_enters_general_sdk(self):
         doc = dict(self.extracted(self.source()), source='grobid')
         with patch.object(pdf_markdown, 'available', side_effect=AssertionError('Paper owns its body')):

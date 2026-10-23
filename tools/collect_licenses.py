@@ -78,13 +78,50 @@ def collect(toc, destination, repo, version, distributions=None):
             shutil.copyfile(notice.with_name('PROVENANCE.md'), folder / 'PROVENANCE.md')
             notices.append({'path': target.relative_to(destination).as_posix(),
                             'sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
+        metadata_only = False
+        if not notices and name == 'flatbuffers' and dist.version == '25.12.19':
+            origin = repo / 'tools/third_party_licenses/flatbuffers'
+            provenance = json.loads((origin / 'PROVENANCE.json').read_text(encoding='utf-8'))
+            expected = {row['path']: row['sha256'] for row in provenance['installed_source_files']}
+            installed = {Path(file).as_posix() for file in files
+                         if Path(file).as_posix().startswith('flatbuffers/') and str(file).endswith('.py')}
+            if (set(expected) != installed or len(expected) != 10 or
+                    hashlib.sha256((origin / 'LICENSE').read_bytes()).hexdigest() !=
+                    'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30'):
+                raise ValueError('flatbuffers upstream source/notice set mismatch')
+            for file, digest in expected.items():
+                if hashlib.sha256(Path(dist.locate_file(file)).read_bytes()).hexdigest() != digest:
+                    raise ValueError('flatbuffers upstream source hash mismatch: ' + file)
+            target = folder / 'upstream-LICENSE.txt'
+            shutil.copyfile(origin / 'LICENSE', target)
+            shutil.copyfile(origin / 'PROVENANCE.json', folder / 'PROVENANCE.json')
+            notices.append({'path': target.relative_to(destination).as_posix(),
+                            'sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
+        if (not notices and name.replace('-', '_').lower() in ('pymupdf4llm', 'pymupdf_layout')
+                and dist.version == '2.0' and files
+                and all('.dist-info/' in Path(file).as_posix() for file in files)
+                and 'This is an empty package' in (dist.read_text('METADATA') or '')):
+            # These exact upstream compatibility distributions contain metadata
+            # only. The executable 4llm/layout code belongs to pymupdf 2.0 and
+            # its full AGPL notices are collected separately, not invented here.
+            target = folder / 'METADATA-ONLY.txt'
+            target.write_text(
+                f'{name} 2.0 is an empty upstream compatibility distribution.\n'
+                'Its complete installed RECORD contains no executable code or model data.\n'
+                'The actual layout/4llm implementation is distributed by pymupdf 2.0.\n'
+                'See its COPYING, full AGPL-3.0 notice and exact source links in BUILDING.md.\n'
+                'Upstream package metadata is preserved as METADATA.txt in this folder.\n', encoding='utf-8')
+            notices.append({'path': target.relative_to(destination).as_posix(),
+                            'sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
+            metadata_only = True
         for file in files:
             if str(file).endswith(".dist-info/METADATA"):
                 shutil.copyfile(dist.locate_file(file), folder / "METADATA.txt")
                 break
         records.append({"name": name, "version": dist.version,
                         "project_urls": dist.metadata.get_all("Project-URL") or [],
-                        "home_page": dist.metadata.get("Home-page", ""), "notices": notices})
+                        "home_page": dist.metadata.get("Home-page", ""), "notices": notices,
+                        "metadata_only_compatibility": metadata_only})
     records.sort(key=lambda row: row["name"].casefold())
     missing = [row["name"] for row in records if not row["notices"]]
     if missing:

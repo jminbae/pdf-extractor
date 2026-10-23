@@ -21,12 +21,15 @@ if (-not $OutputRoot.StartsWith($projectCache.TrimEnd('\') + '\', [StringCompari
 }
 if (-not $SdkPython) { $SdkPython = Join-Path $projectCache 'engines\pymupdf4llm-runtime\Scripts\python.exe' }
 if (-not (Test-Path -LiteralPath $SdkPython)) { throw 'The private PyMuPDF 2.0 SDK runtime is missing' }
-$probeCode = "import json,sysconfig; from importlib.metadata import version; print(json.dumps({'sdk':version('pymupdf'),'pyinstaller':version('pyinstaller'),'site':sysconfig.get_path('purelib')}))"
+$probeCode = "import json,sysconfig; from importlib.metadata import version; print(json.dumps({'sdk':version('pymupdf'),'pyinstaller':version('pyinstaller'),'kiwi':version('kiwipiepy'),'kiwi_model':version('kiwipiepy_model'),'markdown_it':version('markdown-it-py'),'site':sysconfig.get_path('purelib')}))"
 $probe = & $SdkPython -I -B -c $probeCode
 if ($LASTEXITCODE -ne 0) { throw 'Install the pinned PyInstaller build dependency in the private SDK runtime first' }
 $sdk = ($probe | Select-Object -Last 1) | ConvertFrom-Json
 if ($sdk.sdk -ne '2.0') { throw 'This worker build requires the verified PyMuPDF 2.0 SDK' }
 if ($sdk.pyinstaller -ne '6.21.0') { throw 'This worker build requires PyInstaller 6.21.0' }
+if ($sdk.kiwi -ne '0.24.1' -or $sdk.kiwi_model -ne '0.24.0' -or $sdk.markdown_it -ne '4.2.0') {
+    throw 'This worker build requires the pinned Kiwi and Markdown parser versions'
+}
 $entry = Join-Path $PSScriptRoot 'pdf_markdown_worker.py'
 $child = Join-Path $repo 'pubnexus\src\pubnexus\pdf_markdown_child.py'
 $agpl = Join-Path $PSScriptRoot 'pdf_engine_licenses\AGPL-3.0.txt'
@@ -34,6 +37,11 @@ foreach ($required in @($entry, $child, $agpl)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Required worker source/license missing: $required" }
 }
 $childSourceHash = (Get-FileHash -LiteralPath $child -Algorithm SHA256).Hash.ToLowerInvariant()
+$adapterSources = @{}
+foreach ($relative in @('tools/pdf_markdown_worker.py', 'pubnexus/src/pubnexus/pdf_markdown_child.py',
+                        'pubnexus/src/pubnexus/korean_boundaries.py', 'pubnexus/src/pubnexus/pdf_table_spans.py')) {
+    $adapterSources[$relative] = (Get-FileHash -LiteralPath (Join-Path $repo $relative) -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 $appVer = (& $SdkPython -I -B -c "import runpy,sys; print(runpy.run_path(sys.argv[1])['VERSION'])" (Join-Path $repo 'pubnexus\src\pubnexus\version.py')).Trim()
 if ($LASTEXITCODE -ne 0 -or $appVer -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid application version' }
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
@@ -119,14 +127,35 @@ foreach ($package in @('pymupdf', 'pymupdf4llm')) {
     }
 }
 if ($models.Count -eq 0) { throw 'No SDK layout ONNX resources were found' }
+$kiwiModels = @()
+$kiwiRoot = Join-Path $site 'kiwipiepy_model'
+foreach ($model in Get-ChildItem -LiteralPath $kiwiRoot -File -Recurse) {
+    if ($model.Extension -in @('.py', '.pyc')) { continue }
+    $relative = $model.FullName.Substring($kiwiRoot.Length).TrimStart('\')
+    $target = Join-Path $bundle ("_internal\kiwipiepy_model\$relative")
+    if (-not (Test-Path -LiteralPath $target)) { throw "Missing bundled Kiwi model: $relative" }
+    $sha = (Get-FileHash -LiteralPath $model.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha) {
+        throw "Bundled Kiwi model hash mismatch: $relative"
+    }
+    $kiwiModels += @{ name=("kiwipiepy_model/$relative".Replace('\', '/')); bytes=$model.Length; sha256=$sha }
+}
+if ($kiwiModels.Count -eq 0) { throw 'No local Kiwi model resources were bundled' }
 if (-not (Test-Path -LiteralPath (Join-Path $bundle '_internal\onnxruntime\capi\onnxruntime_pybind11_state.pyd'))) {
     throw 'ONNX Runtime native binding is missing'
 }
 if ((Get-FileHash -LiteralPath $child -Algorithm SHA256).Hash.ToLowerInvariant() -ne $childSourceHash) {
     throw 'The worker child source changed during the build; rebuild after it is frozen'
 }
+foreach ($relative in $adapterSources.Keys) {
+    if ((Get-FileHash -LiteralPath (Join-Path $repo $relative) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $adapterSources[$relative]) {
+        throw "Worker adapter source changed during build: $relative"
+    }
+}
 $manifest = @{ sdk_version=$sdk.sdk; pyinstaller_version=$sdk.pyinstaller; onedir=$true;
     executable='pdf-markdown-worker.exe'; executable_sha256=(Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant();
-    child_source_sha256=$childSourceHash; models=$models }
+    child_source_sha256=$childSourceHash; models=$models; kiwi_models=$kiwiModels;
+    kiwi_version=$sdk.kiwi; kiwi_model_version=$sdk.kiwi_model; markdown_it_version=$sdk.markdown_it;
+    adapter_sources=$adapterSources }
 [IO.File]::WriteAllText((Join-Path $bundle 'build-manifest.json'), ($manifest | ConvertTo-Json -Depth 8), [Text.Encoding]::UTF8)
 Write-Host "PDF SDK worker built: $executable"

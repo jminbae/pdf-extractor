@@ -1364,10 +1364,12 @@ class App:
                     labels = {'native': '원문 확인', 'table': '표 추출', 'images': '이미지 보존',
                               'ocr': '문자 인식', 'docling': '표 구조 보완',
                               'docling_tables': '표 구조 보완', 'pdf_sdk': '문서 구조 추출',
-                              'sdk_layout': '문서 구조 추출', 'sdk_complete': '문서 구조 추출 완료', 'done': '쪽 처리'}
+                              'sdk_layout': '문서 구조 추출', 'sdk_complete': '문서 구조 추출 완료',
+                              'sdk_assets': '원본 그림 보존',
+                              'sdk_recovery': '누락된 쪽 재추출', 'done': '쪽 처리'}
                     labels['sdk_ocr'] = '문자 인식'
                     low, high = ((5, 50) if stage in ('native', 'ocr') else
-                                 (85, 97) if stage in ('pdf_sdk', 'sdk_layout', 'sdk_complete', 'sdk_ocr') else
+                                 (85, 97) if stage in ('pdf_sdk', 'sdk_layout', 'sdk_complete', 'sdk_ocr', 'sdk_recovery', 'sdk_assets') else
                                  (85, 95) if stage in ('docling', 'docling_tables') else (50, 85))
                     measured = low + (high - low) * max(0, min(page / max(pages, 1), 1))
                     self.prog(i, total, p.name, f'{labels.get(stage, stage)} · {page}/{pages}쪽', 0, times,

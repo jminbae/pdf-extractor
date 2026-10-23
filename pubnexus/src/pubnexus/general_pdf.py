@@ -800,6 +800,13 @@ def ensure_fulltext(doc_dict: dict, pdf_path: str | Path, *, cancel=None, progre
         report["warnings"].append("논문 경계 밖 원문은 합치지 않았습니다 — 미대표 페이지 검수 필요")
     elif fallback_required:
         if sections or not _body_text(out).strip():
+            # A native recovery owns its new body and assets. In particular,
+            # an older SDK cache must not keep a renderer-priority Markdown
+            # string or image offsets after changing to pdf_general.
+            for key in list(out):
+                if key.startswith('sdk_') or key in ('pdf_conversion_engine',
+                        'pdf_conversion_attempt', 'native_validation'):
+                    out.pop(key)
             out["body_text"] = sections
             out["previous_source"] = out.get("previous_source") or out.get("source")
             out["source"] = "pdf_general"

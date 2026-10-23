@@ -23,7 +23,7 @@ and provenance. It does not modify installed upstream library code.
 - Main environment: `tools/requirements-main.lock`.
 - Isolated PDF worker: `tools/requirements-pdf-worker.lock`.
 - PyInstaller 6.21.0. Runtime versions are verified by the worker build script.
-- Main PyMuPDF 1.28.0 and worker PyMuPDF 2.0 are deliberately separate.
+- Main PyMuPDF 1.28.2 and worker PyMuPDF 2.0 are deliberately separate.
 - rHWP: upstream [v0.8.7](https://github.com/edwardkim/rhwp/tree/v0.8.7),
   commit `1a76570e833917d15817415a53c09ad61ab3203f`, MIT notice included.
 - OCR language data: official Tesseract `eng` and `kor`; the installation's
@@ -58,12 +58,15 @@ upstream wheel packaging defect is documented under
 
 ## AGPL upstream sources
 
-- [PyMuPDF 1.28.0 source](https://github.com/pymupdf/PyMuPDF/tree/1.28.0)
-- [PyMuPDF 2.0 source](https://github.com/pymupdf/PyMuPDF/tree/b8904b27efa0c4e2258f0e46ab4498a6173ffa22)
-- [MuPDF upstream source](https://github.com/ArtifexSoftware/mupdf)
+- [Main PyMuPDF 1.28.2 exact build source](https://github.com/pymupdf/PyMuPDF/tree/12786d12b2962a1d77fd13b103162eddf749644c)
+- [Main MuPDF 1.28.2 source archive](https://mupdf.com/downloads/archive/mupdf-1.28.2-source.tar.gz)
+- [Worker PyMuPDF 2.0 exact build source](https://github.com/pymupdf/PyMuPDF/tree/7db0ab090698d49de637046786c8f85f29d89fd2)
+- [Worker MuPDF 1.28.5 source archive](https://mupdf.com/downloads/archive/mupdf-1.28.5-source.tar.gz)
 
-The installed main SDK reports MuPDF 1.29.0; the isolated worker reports
-MuPDF 1.28.5. The distributed dependency metadata, upstream source references and
+The installed main SDK reports MuPDF 1.28.2; the isolated worker reports
+MuPDF 1.28.5. These are the actual upstream build provenance, rather than an
+assumption that package version and bundled C-library version always match.
+The distributed dependency metadata, upstream source references and
 full AGPL texts are retained in both license bundles. No commercial entitlement
 is asserted.
 

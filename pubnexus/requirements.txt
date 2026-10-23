@@ -1,6 +1,6 @@
 # PubNexus — 파이프라인 의존성
 # 0~4단계 (인벤토리·메타데이터·XML/GROBID 파싱·정규화·QC)
-PyMuPDF==1.28.0      # 기존 논문/OCR 호환; 공식 MD 엔진 2.0은 별도 worker로 동봉
+PyMuPDF==1.28.2      # 기존 논문/OCR 호환; 공식 MD 엔진 2.0은 별도 worker로 동봉
 requests>=2.31       # API 호출
 lxml>=5.0            # JATS/TEI XML 파싱
 PyYAML>=6.0          # 설정
