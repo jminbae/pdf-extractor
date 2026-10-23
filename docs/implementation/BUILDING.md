@@ -52,9 +52,12 @@ powershell -ExecutionPolicy Bypass -File build_exe.ps1 -Python <main-python.exe>
 The installer and checksum remain in the configured project cache. The main
 application is built as `onedir`; the SDK runs as a separately frozen process.
 `tools/collect_licenses.py` reads actual PyInstaller Analysis files, includes all
-selected distribution notices and rejects missing notices. The one pinned
-upstream wheel packaging defect is documented under
-`tools/third_party_licenses/proxy_tools/PROVENANCE.md` and checked by source hash.
+selected distribution notices and rejects missing notices. Pinned upstream
+packaging exceptions are documented under
+`tools/third_party_licenses/proxy_tools/PROVENANCE.md` and
+`tools/third_party_licenses/flatbuffers/PROVENANCE.json`, and checked by source
+hash. Two empty PyMuPDF compatibility distributions retain their metadata and
+an explicit no-code explanation; the executable code's AGPL notices are separate.
 
 ## AGPL upstream sources
 

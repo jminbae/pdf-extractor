@@ -1,5 +1,18 @@
 # 문서 추출기 구현 진행 기록
 
+## 최신 — 2026-10-24, 1.2.2 검증 완료·공개/설치 준비 중
+
+이 절과 [1.2.2 검증 기록](./2026-10-24-release-verification.md)이 아래 1.2.1 기록보다 우선합니다. **아직 설치·공개 배포 완료 상태가 아닙니다.**
+
+- 소스 동결 commit `63fe7c2dd4ebf1ac9c23629fbad06417de116ff5`, 버전 **1.2.2**. Git 표준 object/pack 경로로 저장을 복구했으며 이전 1.2.1의 미커밋 상태 안내는 과거 기록입니다.
+- 최종 전체 **242 tests PASS / 92.482초**, 실제 1.2.2 EXE native/scan 기능 검증 모두 PASS. scan은 SDK 로컬 OCR·부분 완료/인식 안내를 확인했습니다. frozen worker 품질 slice도 알려진 분절0·병합HTML·그림3개·원본불변 PASS입니다. 근거는 DevCache의 `test-1.2.2-final.log`, `frozen-1.2.2-final-native/receipt.json`, `frozen-1.2.2-final-scan/receipt.json`, `frozen-1.2.2-sdk-quality/receipt.json`입니다. hidden 스크린샷은 timeout으로 미저장, 기능 PASS와 구분합니다.
+- 일반 PDF는 공식 SDK2.0, 정상 논문/메인1.28.2는 별도 유지합니다. 한글은 공개 Kiwi0.24.1+native 물리줄/어휘 증거로 좁게 보정하고 원 SDK raw·수정 범위·여러 source 위치를 보존합니다. 대표 p51/p52 proof에서 `통 해`·`보이 지`·`멜라닌색 소가` 잔여0, 내부9수정/쪽1연결/그림·캡션4개 동일, `보호하며 일반적으로` 반례 보존을 확인했습니다. 이는 전체396쪽 완료 수치가 아닙니다.
+- 공식 표 refine/HTML span·기호/수치 검증, 실제 배경16쪽 판별, OCR 재시도와 원본 이미지/300dpi, 실패 시 옛 SDK MD를 버리는 캐시 복구를 반영했습니다. 독립 검수에서 한글 최종 소스 `293b5a…4c0f`의 미해결 P1/P2는 없습니다. 전체 의미 정확도나 OCR 무오류를 뜻하지 않습니다.
+- installer 빌드 exit0: Setup **243,034,665 bytes**, SHA256 `7301324632eec9a0b3376ab7a371c7f467c4b636ea96cb999f964b8c61927add`, 인접 checksum 일치. App SHA `68f2eba82a0189cddcc344248b85c054081c65e818cfb193dc372ef4f85401be`, worker SHA `5c189361e2e5ab211f095aebd944eacafd283b47d1b64545b549db21009301cc`입니다. 실제 설치/게시 전 로컬 검토용 산출물입니다.
+- 실제 책 v4 실행·독립검수 PASS: **396쪽/454.647초/254,813문자/1,934블록/그림186/표18**. 텍스트368·백지13·배경11·쪽번호4, `sdk_empty`/`ocr_required`/`ocr_empty`0. 공식복구 제목13쪽 동일, 표본coverage0.999·전체쪽 본문 미대표0(전체 정확도 점수 아님). 한글 공백1,148수정·쪽30연결, 알려진3분절 대상본문0. 원본·기존185파일·소스4개 불변. 이미지 전부300dpi SDK crop으로150dpi대비 약2배(반올림 최대2px), 원본JPEG재사용0이며 그 기능은 합성 회귀에서만 입증했습니다. OCR/교정 안내로 `partial`을 유지합니다.
+- 최종 책 후보 MD SHA `6878bed61a231e362e3819032a31ced0f658e8a21e44468e41f4d93c2b4dfe4f`, 경로는 DevCache의 `pymupdf4llm-benchmark-20261023/whole-396-v4-quality/bundle`입니다. 실제 사용자 MD를 덮어쓰지 않았습니다. canonical/MD/그림/export/manifest·185파일·소스4개 독립 재해시 PASS, 미해결 P1/P2 없음. 모델·고지는 main32/worker21패키지, ONNX17/Kiwi9 파일SHA 독립 승인. **남은 절차:** 실제 공개/설치 후 확인이며 아직 완료로 기록하지 않습니다.
+- **후속:** 확정 artifact/checksum·wholebook QA 기록 → 소스/tag/installer/checksum 공개 → 게시 bytes 대조 → 실제 설치 후 버전/기능 확인. 사용자 원본·기존 Documents 결과·이전 release 백업은 보존합니다.
+
 ## 최종 — 2026-10-23, 공개 SDK 우선 구현 1.2.1
 
 이 절과 [최종 검증](./2026-10-23-sdk-final.md)이 아래 중간 기록보다 우선합니다.
