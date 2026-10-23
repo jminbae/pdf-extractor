@@ -15,11 +15,14 @@
 #     넣지 않는다.
 # 무겁고 안 쓰는 것들은 뺀다 — 넣으면 exe 가 수백 MB 로 붇는다.
 
+[CmdletBinding()]
+param([string]$Python)
+
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 # 사용자 폴더 이름에 한글이 들어 있다. 스크립트 안에 한글 경로를 그대로 적으면
 # PowerShell 5.1 이 파일 인코딩을 ANSI 로 읽어 경로가 깨진다 → 환경변수로 조립한다.
-$py   = Join-Path $env:USERPROFILE "pnxvenv\Scripts\python.exe"
+$py = if ($Python) { $Python } else { Join-Path $env:USERPROFILE "pnxvenv\Scripts\python.exe" }
 # 빌드·배포 산출물은 이 기기의 cache_root 안에 둔다. 기존 결과는 이동하지 않는다.
 $pathsFile = Join-Path $env:USERPROFILE ".ai-workspace\paths.md"
 if (-not (Test-Path -LiteralPath $pathsFile)) { throw "기기 경로 설정이 없다: $pathsFile" }
@@ -126,6 +129,12 @@ try {
 
 $app = "$work\dist\PDF Extractor\PDF Extractor.exe"
 if (-not (Test-Path $app)) { throw "결과물이 없다: $app" }
+
+# Preserve each bundled distribution's actual copyright and complete license.
+& $py -B (Join-Path $repo 'tools\collect_licenses.py') `
+    --toc (Join-Path $work 'work\PDF Extractor\Analysis-00.toc') `
+    --destination (Join-Path (Split-Path $app) 'licenses') --repo $repo --version $appVer
+if ($LASTEXITCODE -ne 0) { throw 'Main dependency license collection failed' }
 
 # ── 설치프로그램으로 묶는다 ─────────────────────────────────────────────
 # 리포에는 exe 를 두지 않는다. 배포는 Releases 의 설치프로그램 하나로 한다

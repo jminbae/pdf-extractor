@@ -34,6 +34,8 @@ foreach ($required in @($entry, $child, $agpl)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Required worker source/license missing: $required" }
 }
 $childSourceHash = (Get-FileHash -LiteralPath $child -Algorithm SHA256).Hash.ToLowerInvariant()
+$appVer = (& $SdkPython -I -B -c "import runpy,sys; print(runpy.run_path(sys.argv[1])['VERSION'])" (Join-Path $repo 'pubnexus\src\pubnexus\version.py')).Trim()
+if ($LASTEXITCODE -ne 0 -or $appVer -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid application version' }
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 $buildArgs = @('-I', '-B', '-m', 'PyInstaller', '--noconfirm', '--onedir', '--console',
     '--name', 'pdf-markdown-worker', '--distpath', (Join-Path $OutputRoot 'dist'),
@@ -41,6 +43,8 @@ $buildArgs = @('-I', '-B', '-m', 'PyInstaller', '--noconfirm', '--onedir', '--co
     '--paths', (Join-Path $repo 'pubnexus\src'),
     '--collect-all', 'pymupdf', '--collect-all', 'pymupdf4llm',
     '--collect-all', 'onnxruntime', '--collect-all', 'numpy',
+    '--collect-all', 'kiwipiepy', '--collect-all', 'kiwipiepy_model',
+    '--collect-all', 'markdown_it', '--hidden-import', '_kiwipiepy',
     '--copy-metadata', 'pymupdf', '--copy-metadata', 'pymupdf4llm',
     '--copy-metadata', 'pymupdf-layout', '--copy-metadata', 'onnxruntime',
     '--copy-metadata', 'numpy', '--copy-metadata', 'psutil',
@@ -94,6 +98,10 @@ See AGPL-3.0.txt, PyMuPDF-COPYING.txt, package METADATA and dependency license n
 ONNX models and native dependencies are copied from the installed verified SDK; no models are downloaded at runtime.
 '@
 [IO.File]::WriteAllText((Join-Path $licenses 'NOTICE.txt'), $notice, [Text.Encoding]::UTF8)
+& $SdkPython -I -B (Join-Path $PSScriptRoot 'collect_licenses.py') `
+    --toc (Join-Path $OutputRoot 'work\pdf-markdown-worker\Analysis-00.toc') `
+    --destination (Join-Path $licenses 'dependencies') --repo $repo --version $appVer
+if ($LASTEXITCODE -ne 0) { throw 'PDF worker dependency license collection failed' }
 
 # Verify each shipped upstream layout model, rather than assuming collect-all found it.
 $models = @()
