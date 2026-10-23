@@ -54,6 +54,8 @@ class PDFMarkdownTests(unittest.TestCase):
         self.assertIn("Second page marker 4278", markdown)
         self.assertEqual(result["references"], [])
         self.assertEqual(result["extraction_report"]["engine"]["version"], "2.0")
+        self.assertIn("korean_refinement", result["extraction_report"])
+        self.assertEqual(result["sdk_markdown_raw"], markdown)
         self.assertEqual(len(result["source_map"]["pages"]), 2)
         self.assertTrue(result["sdk_blocks"])
         for block in result["sdk_blocks"]:
@@ -62,6 +64,38 @@ class PDFMarkdownTests(unittest.TestCase):
             self.assertEqual(len(block["source"]["bbox"]), 4)
         self.assertTrue(progress)
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
+
+    def test_refinement_raw_basis_and_cross_page_source_locations_survive_canonical(self):
+        from pubnexus.pdf_markdown import _canonical
+        pages = [{"page": n, "status": "text_extracted", "ocr_performed": False,
+                  "sdk_to_source": [1, 0, 0, 1, 0, 0] if n == 1 else [0, -1, 1, 0, 0, 400]}
+                 for n in (1, 2)]
+        locations = [{"page": n, "sdk_bbox": [10, 20, 30, 40], "raw_pos": [0, 4],
+                      "block_index": 0, "corrected_local_pos": [0, 4] if n == 1 else [4, 8]} for n in (1, 2)]
+        record = {"version": "2.0", "markdown": "joined\n\n", "markdown_raw": "join ed\n\n",
+            "chunks_raw": [{"text": "join ed\n\n"}], "korean_input_markdown": "join ed\n\n",
+            "korean_input_chunks": [{"text": "join ed\n\n"}], "metadata": {}, "pages": pages,
+            "chunks": [{"metadata": {"page_number": 1}, "text": "joined\n\n", "page_boxes": [
+                {"index": 0, "class": "text", "bbox": [10, 20, 30, 40], "pos": [0, 8],
+                 "pos_raw": [0, 4], "korean_source_locations": locations}]},
+                {"metadata": {"page_number": 2}, "text": "", "page_boxes": []}],
+            "korean_refinement": {"status": "partial", "warnings": ["검증 필요"], "edits": [],
+                                   "cross_page_joins": [{"left": locations[0], "right": locations[1]}]},
+            "table_refinements": [{"page": 1, "method": "PyMuPDF.Table.to_html"}],
+            "options": {}, "image_formats": ["png", "png"], "image_assets": {}}
+        result = _canonical(record, self.base / "original.pdf", "a"*64, self.base / "assets", self.base, None)
+        self.assertEqual(result["sdk_markdown_raw"], record["markdown_raw"])
+        self.assertEqual(result["sdk_chunks_raw"], record["chunks_raw"])
+        self.assertEqual(result["sdk_korean_input_markdown"], record["korean_input_markdown"])
+        self.assertEqual(result["extraction_report"]["table_refinements"], record["table_refinements"])
+        block = result["sdk_blocks"][0]
+        self.assertEqual(block["source"]["locations"][0]["bbox"], [10, 20, 30, 40])
+        self.assertEqual(block["source"]["locations"][1]["bbox"], [20, 370, 40, 390])
+        self.assertEqual([p["page"] for p in block["source"]["locations"]], [1, 2])
+        self.assertEqual(block["source"]["locations"][1]["corrected_local_pos"], [4, 8])
+        self.assertEqual(block["source"]["locations"][1]["corrected_offset_basis"], "block_text")
+        self.assertEqual(result["sdk_markdown"][block["start"]:block["end"]], block["text"])
+        self.assertEqual(result["source_map"]["offset_basis"], "sdk_markdown_refined")
 
     def test_sdk_generated_image_destination_ranges_are_exact_and_assets_are_relative(self):
         from pubnexus.pdf_markdown import available, convert
@@ -75,6 +109,44 @@ class PDFMarkdownTests(unittest.TestCase):
             self.assertFalse(Path(asset["image"]).is_absolute())
             self.assertTrue((self.base / "assets" / asset["image"]).is_file())
             self.assertTrue(any(figure["image"] == asset["image"] for figure in result["figures"]))
+
+    def test_sdk_empty_text_pages_retry_public_options_and_numeric_page_stays_excluded(self):
+        from pubnexus.pdf_markdown import available, convert, engine_id
+        if not available():
+            self.skipTest("별도 SDK가 없습니다.")
+        source = self.base / "short-titles.pdf"
+        with fitz.open() as pdf:
+            page = pdf.new_page(width=400, height=500)
+            page.insert_text((45, 450), "Chapter title marker 9284")
+            page = pdf.new_page(width=400, height=500)
+            page.insert_text((230, 50), "Author title marker 6157", fontsize=8)
+            page.insert_text((195, 475), "2")
+            page = pdf.new_page(width=400, height=500)
+            page.insert_text((195, 475), "3")
+            page = pdf.new_page(width=400, height=500)
+            page.insert_text((180, 450), "2026")
+            pdf.save(source)
+        result = convert(source, self.base / "assets")
+        self.assertIn("Chapter title marker 9284", result["sdk_markdown"])
+        self.assertIn("Author title marker 6157", result["sdk_markdown"])
+        self.assertIn("2026", result["sdk_markdown"])
+        self.assertNotIn("**3**", result["sdk_markdown"])
+        self.assertNotIn("**2**", result["sdk_markdown"])
+        self.assertEqual(engine_id(), "pymupdf-2.0-adapter-3")
+        pages = result["extraction_report"]["pages"]
+        self.assertEqual(pages[2]["status"], "pagination_only")
+        self.assertFalse(pages[2]["blank_verified"])
+        self.assertFalse(pages[2]["ocr_performed"])
+        recovery = result["extraction_report"]["recovery_per_page"]
+        self.assertEqual([page["page"] for page in recovery], [1, 2, 4])
+        for page in recovery:
+            self.assertEqual(page["before_sha256"], hashlib.sha256(b"").hexdigest())
+            self.assertNotEqual(page["after_sha256"], page["before_sha256"])
+            self.assertTrue(page["selected_options"]["header"])
+        self.assertTrue(recovery[0]["selected_options"]["footer"])
+        self.assertFalse(recovery[1]["selected_options"]["footer"])
+        for block in result["sdk_blocks"]:
+            self.assertEqual(result["sdk_markdown"][block["start"]:block["end"]], block["text"])
 
     def test_page_chunk_aggregation_is_identical_to_the_public_sdk_combined_markdown(self):
         from pubnexus.pdf_markdown import available, convert
@@ -90,13 +162,13 @@ class PDFMarkdownTests(unittest.TestCase):
         reference = self.base / "reference"
         reference.mkdir()
         shutil.copyfile(path, reference / "document.pdf")
-        prefix = "images/" + hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        prefix = result["extraction_report"]["engine"]["options"]["image_path"]
         (reference / prefix).mkdir(parents=True)
         # Independent public SDK combined mode, deliberately no application adapter.
         script = ("import pymupdf,sys;from pathlib import Path;"
                   "doc=pymupdf.open('document.pdf');"
                   "md=doc.to_markdown(header=False,footer=False,page_separators=False,"
-                  "write_images=True,image_path=sys.argv[1],use_ocr=False,page_chunks=False);"
+                  "write_images=True,image_path=sys.argv[1],dpi=300,use_ocr=False,page_chunks=False);"
                   "Path('expected.md').write_text(md,encoding='utf-8')")
         subprocess.run([runtime, "-I", "-B", "-c", script, prefix], cwd=reference, check=True,
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -177,6 +249,158 @@ class PDFMarkdownTests(unittest.TestCase):
         self.assertEqual(report["pages"][1]["status"], "blank")
         self.assertFalse(report["pages"][1]["ocr_performed"])
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
+
+    def test_uniform_vector_background_and_off_trim_marks_are_verified_without_fake_ocr(self):
+        from pubnexus.pdf_markdown import available, convert
+        if not available():
+            self.skipTest("별도 SDK가 없습니다.")
+        source = self.base / "backgrounds.pdf"
+        with fitz.open() as pdf:
+            page = pdf.new_page(width=400, height=500)
+            page.draw_rect(page.rect, color=None, fill=(.88, .93, .92))
+            # Printer marks can have a combined bbox enclosing the page while every segment is outside it.
+            shape = page.new_shape()
+            shape.draw_line((-10, -10), (410, -10))
+            shape.draw_line((-10, 510), (410, 510))
+            shape.finish(color=(0, 0, 0))
+            shape.commit()
+            page = pdf.new_page(width=400, height=500)
+            page.draw_rect(fitz.Rect(399.9995, -2, 405, 502), color=None, fill=(.3, .6, .5))
+            pdf.save(source)
+        result = convert(source, self.base / "assets")
+        pages = result["extraction_report"]["pages"]
+        self.assertEqual([p["status"] for p in pages], ["background_only", "blank"])
+        self.assertTrue(all(p["background_verification"]["interior_color_count"] == 1 for p in pages))
+        self.assertTrue(all(not p["ocr_performed"] for p in pages))
+        self.assertEqual(result["extraction_report"]["status"], "complete")
+
+    def test_unselected_rectangle_outline_text_gets_official_ocr_and_single_line_is_kept(self):
+        from pubnexus.pdf_markdown import available, convert
+        from pubnexus.local_ocr import discover
+        if not available() or discover() is None:
+            self.skipTest("별도 SDK와 검증된 모델이 필요합니다.")
+        bitmap = Image.new("1", (470, 90), 1)
+        ImageDraw.Draw(bitmap).text((8, 12), "FORCE OCR 7391", fill=0,
+            font=ImageFont.truetype(r"C:\Windows\Fonts\arialbd.ttf", 48))
+        source = self.base / "rectangle-outline-scan.pdf"
+        with fitz.open() as pdf:
+            page = pdf.new_page(width=600, height=600)
+            shape = page.new_shape()
+            for y in range(bitmap.height):
+                start = None
+                for x in range(bitmap.width + 1):
+                    black = x < bitmap.width and bitmap.getpixel((x, y)) == 0
+                    if black and start is None:
+                        start = x
+                    elif not black and start is not None:
+                        shape.draw_rect(fitz.Rect(60+start, 200+y, 60+x, 201+y))
+                        start = None
+            shape.finish(color=None, fill=(0, 0, 0))
+            shape.commit()
+            self.assertEqual(page.get_text(), "")
+            self.assertEqual(page.get_image_info(), [])
+            pdf.save(source)
+        before = hashlib.sha256(source.read_bytes()).hexdigest()
+        result = convert(source, self.base / "assets")
+        self.assertIn("7391", result["sdk_markdown"])
+        page = result["extraction_report"]["pages"][0]
+        self.assertTrue(page["ocr_performed"])
+        self.assertEqual(page["ocr_selection"], "forced_after_sdk_skip")
+        self.assertEqual(page["status"], "ocr_extracted")
+        self.assertFalse(page["background_verified"])
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
+
+    def test_exact_embedded_jpeg_is_reused_and_vector_crop_uses_300dpi_without_old_asset_overwrite(self):
+        from pubnexus.pdf_markdown import available, convert
+        if not available():
+            self.skipTest("별도 SDK가 없습니다.")
+        gradient = Image.linear_gradient("L").resize((1600, 1200))
+        image = Image.merge("RGB", (gradient, gradient.transpose(Image.Transpose.FLIP_LEFT_RIGHT),
+                                    Image.new("L", gradient.size, 140)))
+        ImageDraw.Draw(image).ellipse((250, 200, 1050, 1000), fill=(190, 80, 45))
+        encoded = io.BytesIO()
+        image.save(encoded, "JPEG", quality=97, subsampling=0)
+        original = encoded.getvalue()
+        source = self.base / "native-photo.pdf"
+        with fitz.open() as pdf:
+            page = pdf.new_page(width=400, height=500)
+            page.insert_text((35, 80), "An ordinary body paragraph before the calibration image.")
+            page.insert_image(fitz.Rect(40, 150, 360, 390), stream=original)
+            pdf.save(source)
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+        old = self.base / "assets" / "images" / digest / "document.pdf-0001-01.png"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"previous-150dpi-cache-must-stay")
+        result = convert(source, self.base / "assets")
+        preserved = [figure for figure in result["figures"] if figure.get("asset_info", {}).get("method") == "embedded_original"]
+        self.assertEqual(len(preserved), 1)
+        self.assertEqual((self.base / "assets" / preserved[0]["image"]).read_bytes(), original)
+        self.assertTrue(preserved[0]["image"].endswith(".jpeg"))
+        self.assertIn("/sdk-v3/", preserved[0]["image"])
+        if result["extraction_report"]["engine"]["options"]["use_ocr"]:
+            self.assertTrue(result["extraction_report"]["pages"][0]["ocr_performed"],
+                            "Original bytes must also survive a real mixed-page OCR callback")
+        self.assertEqual(old.read_bytes(), b"previous-150dpi-cache-must-stay")
+        vector = convert(self.fixture("vector.pdf"), self.base / "vector-assets")
+        self.assertTrue(vector["figures"])
+        for figure in vector["figures"]:
+            info = figure["asset_info"]
+            self.assertEqual(info["method"], "sdk_crop")
+            self.assertEqual(info["dpi"], 300)
+            with Image.open(self.base / "vector-assets" / figure["image"]) as rendered:
+                self.assertGreater(rendered.width, 650)
+
+    def test_pdf_opacity_is_not_lost_when_considering_embedded_original_image(self):
+        from pubnexus.pdf_markdown_child import _native_image
+        encoded = io.BytesIO()
+        photo = Image.linear_gradient("L").resize((800, 600)).convert("RGB")
+        ImageDraw.Draw(photo).ellipse((100, 100, 600, 500), fill=(190, 80, 45))
+        photo.save(encoded, "JPEG", quality=95)
+        source = self.base / "transparent-photo.pdf"
+        with fitz.open() as pdf:
+            page = pdf.new_page(width=400, height=500)
+            page.insert_text((35, 80), "An ordinary body paragraph before the transparent photo.")
+            page.insert_image(fitz.Rect(40, 150, 360, 390), stream=encoded.getvalue())
+            alpha = pdf.get_new_xref()
+            pdf.update_object(alpha, "<< /ca 0.35 /CA 0.35 >>")
+            resources = int(pdf.xref_get_key(page.xref, "Resources")[1].split()[0])
+            pdf.xref_set_key(resources, "ExtGState", f"<< /Faded {alpha} 0 R >>")
+            stream = page.get_contents()[-1]
+            pdf.update_stream(stream, b"q\n/Faded gs\n" + pdf.xref_stream(stream) + b"\nQ")
+            pdf.save(source)
+        before = hashlib.sha256(source.read_bytes()).hexdigest()
+        with fitz.open(source) as pdf:
+            page = pdf[0]
+            box = {"bbox": [40, 150, 360, 390]}
+            self.assertIsNone(_native_image(pdf, page, box, fitz))
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
+
+    def test_clipped_photo_keeps_sdk_crop_and_does_not_reveal_hidden_original_pixels(self):
+        from pubnexus.pdf_markdown import available, convert
+        if not available():
+            self.skipTest("별도 SDK가 없습니다.")
+        photo = Image.linear_gradient("L").resize((1600, 1200)).convert("RGB")
+        ImageDraw.Draw(photo).ellipse((250, 200, 1050, 1000), fill=(190, 80, 45))
+        encoded = io.BytesIO()
+        photo.save(encoded, "JPEG", quality=97, subsampling=0)
+        source = self.base / "clipped-photo.pdf"
+        with fitz.open() as pdf:
+            page = pdf.new_page(width=400, height=500)
+            page.insert_text((35, 80), "An ordinary body paragraph before a clipped calibration image.")
+            page.insert_image(fitz.Rect(40, 150, 360, 390), stream=encoded.getvalue())
+            stream = page.get_contents()[-1]
+            pdf.update_stream(stream, b"q\n40 110 320 240 re\n160 180 80 80 re\nW* n\n"
+                              + pdf.xref_stream(stream) + b"\nQ")
+            pdf.save(source)
+        before = hashlib.sha256(source.read_bytes()).hexdigest()
+        result = convert(source, self.base / "assets")
+        self.assertTrue(result["figures"])
+        self.assertTrue(all(f["asset_info"]["method"] == "sdk_crop" for f in result["figures"]))
+        self.assertTrue(all(f["asset_info"]["dpi"] == 300 for f in result["figures"]))
+        with Image.open(self.base / "assets" / result["figures"][0]["image"]) as crop:
+            pixel = crop.convert("RGB").getpixel((crop.width // 2, crop.height // 2))
+            self.assertGreaterEqual(min(pixel), 250, "The clipped centre must remain hidden/white")
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
 
     def test_missing_engine_encrypted_pdf_and_oversized_render_have_explicit_errors(self):
         from pubnexus.pdf_markdown import PDFMarkdownError, available, convert

@@ -1,5 +1,31 @@
 # 문서 추출기 구현 진행 기록
 
+## 최종 — 2026-10-23, 공개 SDK 우선 구현 1.2.1
+
+이 절과 [최종 검증](./2026-10-23-sdk-final.md)이 아래 중간 기록보다 우선합니다.
+
+- 공개 SDK 우선 원칙을 제품에 적용했습니다. 자체 reading_flow는 제거, 일반 PDF는 PyMuPDF2.0 공식 Markdown API/공식 좌표·문자범위 사용, 정상 논문 기존 경로 유지. SDK가 제외한 빈 쪽은 공개 옵션 재시도로 원본 chunk만 교체합니다. engine identity **pymupdf-2.0-adapter-2**.
+- **최종 전체218 tests PASS(103.569초)**. 실제 SDK9/파이프라인11 독립 승인. 최종 메인 EXE native/scan 실제 WebView2 smoke 둘 PASS. scan은 누락 guard가 native OCR 본문을 보존한 partial 경로이며 SDK 완전 성공과 구분합니다. hidden 캡처는 저장되지 않았으므로 새 스크린샷 성공을 주장하지 않습니다.
+- 실제396쪽 최종397.178초, 제목13개 복구, 나머지383쪽 SDK MD 완전 동일/그림186개 SHA 동일/표18개 유지/1964 SDK블록/254422문자. SDK구간 누락0, 숫자4쪽 pagination_only, sdk_empty0. p19 추가 쪽번호 없음. 원본 PDF·기존 canonical·실제 MD1+그림183고유파일(184참조) 불변. 전체/산출물 독립 최종 승인, P1/P2없음.
+- 최종 책 후보: `D:\DevCache\260725 PDF 추출\pymupdf4llm-benchmark-20261023\whole-396-v3-sdk-recovery\bundle\내지-백반증 바이블-3교.md`. 근거 receipt/recovery-verification/quality-and-export/canonical은 같은 상위 폴더입니다.
+- **남은 한계:** 한글 줄 경계 공백 및 `멜라닌색`/`소가` 쪽 경계 분리는 남습니다. Kiwi 오결합 반례로 자동 교정을 넣지 않았습니다. 별도16쪽 SDK OCR 미선택 때문에 책은 partial입니다. native probe0.999를 전체 정확도로 표현하지 않습니다. 그림은 SDK150dpi crop이며 원본 이미지 바이트 동일성을 뜻하지 않습니다.
+- 최종 review installer **1.2.1**, 156040364 bytes: `D:\DevCache\260725 PDF 추출\PDF-Extractor-Setup.exe`, SHA256 **f35da76526b2fe5f6dd9bbd0cb30941ad14c691dbb8c4f455f8f8a1345678d6a**, 인접 sha256 일치. App SHA1a536ea2c8331c0b88b3c5f029d7155c3a10a6bf656b5e2295e98e0d79ab4e85. 번들 worker61f559d9ed36f7d767d6b85914512abdf76e26060576a2a1a497d3fc6d8ffe7f, ONNX17개 SHA/AGPL고지 검증.
+- 설치/공개 릴리스 수행 없음. 이전 후보는 releases/1.2.1-before-empty-page-rescue 및 releases/1.2.0에 보존했습니다. 최초 commit e083a8a에 구현 전체가 있습니다. SDK 재시도·최종 문서 후속 add는 .git/objects/99/... Permission denied로 실패했습니다. 재시도/ACL 변경은 하지 않았습니다. 최종 변경 소스·patch·hashmanifest 백업: D:\DevCache\260725 PDF 추출\source-backup\20261023-211324-1.2.1-final
+
+## 최신 상태 — 2026-10-23 20:55 KST 무렵
+
+아래 이전 중간 기록보다 이 절과 ENGINE_POLICY.md가 우선합니다.
+
+- 사용자 확정 원칙: 공개 방법/검증된 SDK를 먼저 찾고 실제 문서로 비교한 후 적용합니다. 직접 문단·읽기 순서 알고리즘을 확대하지 않습니다. `reading_flow.py`와 그 테스트는 DevCache/rejected-source에 SHA 보존 후 제품에서 제거했습니다.
+- 일반 PDF는 공식 PyMuPDF 2.0 `Document.to_markdown`을 별도 frozen worker로 연결했습니다. 정상 GROBID/JATS 논문 경로와 메인 PyMuPDF 1.28은 유지합니다. SDK MD/공식 좌표·문자범위가 정본이며 markdown-it-py로 표시합니다. export는 정확한 SDK 이미지 URL span만 상대 자산 주소로 바꿉니다.
+- 원본 보기/검색은 추출 없이 가능합니다. 목록의 진행 게이지·색/상태·실제 저장 후 MD 버튼 활성화, 원문 더블클릭, 요약 경고와 상세 기록을 구현/독립 검수했습니다.
+- 최종 전체 시험 **217 PASS, 64.017초**. root pipeline11/SDK 실제8/frozen worker·모델17개 SHA 독립 승인. 실제 메인 EXE native/scan 두 WebView2 smoke 모두 PASS, TEMP 원본 불변/정리 확인. receipts: DevCache/frozen-1.2.1-sdk-native 및 frozen-1.2.1-sdk-scan.
+- 1.2.1 review installer 빌드 완료(실제 설치/배포 없음): `D:\DevCache\260725 PDF 추출\PDF-Extractor-Setup.exe`, 156055871 bytes, SHA256 `87ded0b8bfb9e702e95466bb3d0a5d985097f16b48d46fbe4d2e447c9203b6ea`. App SHA `52b60ca7d08678d8f211e62befe4aa85bd2c3aa767d8dc694ba6e39bd7098731`, worker SHA `a0b598031bae9cc8fb3fa584e1670660180dd2477fc0e33658b0c4fa8c639421`.
+- 실제396쪽 SDK 기본 결과 431.98초, 254154문자, 1951 SDK블록, 상대 그림186/186, 표18. DevCache/pymupdf4llm-benchmark-20261023/whole-396-v2-sdk-ocr/bundle에만 저장했습니다. 원본 PDF·기존 캐시·실제 Documents MD1개/그림183고유파일(184개 참조) 모두 hash/size/mtime 불변입니다.
+- **기본 결과는 partial**: SDK가 짧은 제목13쪽을 header/footer로 오인하여 제외했고 숫자만4쪽도 SDK empty입니다. 별도16개 textless 장식 쪽은 SDK가 OCR 대상으로 선택하지 않았습니다. 실제 OCR callback은 mixed26쪽에서만 수행됐습니다. 기존 native 표본 검사0.998은 정확도 점수가 아니며 제목13개 유실을 보증하지 못합니다. 한글 `멜라닌색`/`소가` 경계도 미해결입니다. Kiwi.glue 실제 반례가 있어 기본 자동 교정은 넣지 않았습니다.
+- 추가 확인: SDK empty17쪽에 공식 옵션 재시도를 적용한 진단에서 p19는 headerTrue/footerFalse, 나머지12제목은 headerTrue/footerTrue로 모두 복원됐습니다. 직접 MD 수정 없이 공식 chunk를 교체하는 좁은 보완을 office worker가 구현 중입니다. 숫자본문을 임의 제외하지 않고 공식 footer/쪽번호 일치 근거를 요구합니다. engine identity는 adapter-2, 재빌드/최종회귀/whole-v3 검증이 이어집니다. 새 일반 레이아웃 알고리즘을 만들지 않습니다.
+- 코드 commit `e083a8a252c88f0a2e679ab74a316d654659e8ec` 생성 성공, `git fsck --connectivity-only` exit0(기존 dangling만). 이전 Git object 쓰기 실패는 현재 커밋을 막지 않았습니다. docs/research는 아직 untracked입니다.
+
 ## 최우선 방향 변경 — 공개 표준·기성 엔진 우선
 
 사용자는 “이미 있는 걸 이용해야지 왜 다 코딩하느냐”, 이어 “항상 오픈된 방법·이미 검증된 표준 방법을 먼저 찾아 적용하고 우리 특이적인 부분만 우리 방법”이라고 명시했습니다. **직접 PDF 문단/읽기순서 복원 알고리즘을 확대하는 접근은 중단합니다.** 아래 `reading_flow` 구현은 비교 자료이며 production으로 확정하면 안 됩니다.

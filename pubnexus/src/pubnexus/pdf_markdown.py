@@ -33,7 +33,7 @@ class PDFMarkdownError(RuntimeError):
 
 
 def engine_id():
-    return "pymupdf-2.0-adapter-1"
+    return "pymupdf-2.0-adapter-3"
 
 
 def _command():
@@ -151,6 +151,10 @@ def _canonical(record, path, digest, asset_dir, work, cancel):
                         meta=Meta(title=record.get("metadata", {}).get("title") or path.stem)).to_dict()
     document.update(scope="general_pdf", sdk_engine="pymupdf-2.0", sdk_markdown=markdown,
                     sdk_blocks=[], asset_base=str(asset_dir))
+    for raw_key, canonical_key in (("markdown_raw", "sdk_markdown_raw"), ("chunks_raw", "sdk_chunks_raw"),
+        ("korean_input_markdown", "sdk_korean_input_markdown"), ("korean_input_chunks", "sdk_korean_input_chunks")):
+        if raw_key in record:
+            document[canonical_key] = record[raw_key]
     offset, figures, tables, blocks, sections, assets, asset_spans = 0, [], [], [], [], {}, []
     for page_number, (chunk, page) in enumerate(zip(chunks, pages), 1):
         _check(cancel)
@@ -168,10 +172,29 @@ def _canonical(record, path, digest, asset_dir, work, cancel):
             identifier = f"sdk-p{page_number:06d}-b{box['index']:06d}"
             source = {"page": page_number, "block_id": identifier,
                       "bbox": _bbox(bounds, page["sdk_to_source"]), "method": "pymupdf-2.0"}
+            if box.get("korean_source_locations"):
+                locations = []
+                for location in box["korean_source_locations"]:
+                    number = location["page"]
+                    if not isinstance(number, int) or not 1 <= number <= len(pages):
+                        raise PDFMarkdownError("보정 원문 위치의 페이지가 잘못되었습니다.", "invalid_output")
+                    mapped = {"page": number,
+                        "bbox": _bbox(location["sdk_bbox"], pages[number-1]["sdk_to_source"]),
+                        "block_id": f"sdk-p{number:06d}-b{location['block_index']:06d}",
+                        "raw_pos": location["raw_pos"], "raw_offset_basis": "sdk_korean_input_chunks"}
+                    if "corrected_local_pos" in location:
+                        left, right = location["corrected_local_pos"]
+                        if not 0 <= left <= right <= end-start:
+                            raise PDFMarkdownError("보정 원문 위치의 문자 범위가 잘못되었습니다.", "invalid_output")
+                        mapped.update(corrected_local_pos=[left, right], corrected_offset_basis="block_text")
+                    locations.append(mapped)
+                source["locations"] = locations
             text = chunk["text"][start:end]
             block = {"id": identifier, "start": offset + start, "end": offset + end,
                      "kind": box["class"], "text": text, "source": source,
                      "sdk_bbox": bounds, "sdk_pos": [start, end]}
+            if "pos_raw" in box:
+                block.update(sdk_pos_raw=box["pos_raw"], sdk_pos_raw_basis="sdk_korean_input_chunks")
             blocks.append(block)
             page_ids.append(identifier)
             paragraphs.append({"id": identifier, "text": text, "source": source,
@@ -180,7 +203,10 @@ def _canonical(record, path, digest, asset_dir, work, cancel):
                 tables.append({"id": identifier, "caption": "", "markdown": text, "source": source})
             if box["class"] not in ("picture", "formula"):
                 continue
-            generated = f"images/{digest[:16]}/document.pdf-{page_number:04d}-{box['index']:02d}.png"
+            image_format = record["image_formats"][page_number-1]
+            if image_format not in ("png", "jpeg"):
+                raise PDFMarkdownError("SDK 이미지 형식이 올바르지 않습니다.", "invalid_output")
+            generated = f"images/{digest[:16]}/sdk-v3/document.pdf-{page_number:04d}-{box['index']:02d}.{image_format}"
             match = re.match(r"\n!\[\]\(([^)]+)\)\n", text)
             if (work / generated).is_file():
                 if not match or match.group(1) != generated:
@@ -196,7 +222,8 @@ def _canonical(record, path, digest, asset_dir, work, cancel):
                 asset_spans.append({"image": relative, "start": offset + start + match.start(1),
                                     "end": offset + start + match.end(1)})
                 figures.append({"id": identifier + f"-image-{len(figures):04d}", "caption": "",
-                                "image": relative, "source": source})
+                                "image": relative, "source": source,
+                                "asset_info": record["image_assets"].get(relative, {"method": "sdk_crop", "dpi": 300})})
         page["block_ids"] = page_ids
         sections.append({"path": [f"Page {page_number}"], "section_type": "other", "paragraphs": paragraphs})
         offset += len(chunk["text"])
@@ -231,6 +258,7 @@ def _canonical(record, path, digest, asset_dir, work, cancel):
                 temporary.unlink(missing_ok=True)
     document.update(body_text=sections, tables=tables, figures=figures, sdk_blocks=blocks, sdk_assets=asset_spans)
     document["source_map"] = {"schema_version": "1.0", "coordinate_space": "pymupdf_unrotated_points",
+                              "offset_basis": "sdk_markdown_refined" if "markdown_raw" in record else "sdk_markdown",
                               "offset_unit": "unicode_codepoint", "engine": "PyMuPDF", "engine_version": "2.0",
                               "source_sha256": digest, "pages": pages,
                               "blocks": [{"id": b["id"], **b["source"], "start": b["start"], "end": b["end"]} for b in blocks]}
@@ -243,8 +271,21 @@ def _canonical(record, path, digest, asset_dir, work, cancel):
     ocr_performed = any(p["ocr_performed"] for p in pages)
     if ocr_performed:
         warnings.append("SDK에서 로컬 Tesseract OCR을 실행했습니다 — 원문 대조 필요")
+    recovery = record.get("recovery_per_page") or []
+    recovered = [page["page"] for page in recovery if page.get("selected_options")]
+    if recovered:
+        warnings.append(f"SDK 공개 옵션 재시도로 {len(recovered)}쪽의 제외된 원문을 복원했습니다 — 원문 대조 필요")
+    warnings.extend(record.get("korean_refinement", {}).get("warnings", []))
+    if record.get("table_refinement_warnings"):
+        warnings.append("일부 표의 병합 셀 확인이 끝나지 않았습니다 — SDK 표와 원본 대조 필요")
     document["extraction_report"] = {"version": 1, "status": "partial" if warnings else "complete", "pages": pages,
         "warnings": warnings, "used_fallback": False, "asset_base": str(asset_dir), "ocr_performed": ocr_performed,
+        "recovery_per_page": recovery,
+        "ocr_recovery_per_page": record.get("ocr_recovery_per_page") or [],
+        "image_format_retries": record.get("image_format_retries") or [],
+        "table_refinements": record.get("table_refinements") or [],
+        "table_refinement_warnings": record.get("table_refinement_warnings") or [],
+        "korean_refinement": record.get("korean_refinement") or {},
         "engine": {"name": "PyMuPDF Document.to_markdown", "version": "2.0", "identity": engine_id(),
                    "options": record["options"], "network": record.get("network")},
         "source_map_status": "sdk_page_boxes", "source_sha256": digest}
