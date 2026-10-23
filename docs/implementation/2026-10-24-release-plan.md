@@ -1,23 +1,19 @@
-# 1.2.2 completion and deployment
+# 1.2.2 수정 완료·배포 기록
 
-User authorization: resolve remaining issues and deploy. Existing source PDFs,
-user Markdown/assets and earlier project-generated folders remain untouched.
+사용자 승인 범위는 남은 문제 해결 후 배포입니다. 사용자 원본 PDF와 이전 프로젝트 생성 폴더는 보존했습니다. 이전 결과·복구 파일189개를 DevCache에 백업하고 반영 직전188자료 SHA를 확인한 뒤 검증된 새 책 MD·자산·canonical/index를 의도적으로 반영했습니다. 기존 결과 전체가 현재도 불변이라는 의미는 아닙니다.
 
-- [x] Verify rules, local paths, current source, remote repository and releases.
-- [x] Identify all 16 previously unselected textless pages as decorative blank
-  dividers using actual source renders and native content inspection.
-- [x] Ship verified blank classification/OCR retry and 300dpi/native-image path.
-- [x] Ship narrowly validated Kiwi physical-line/page-boundary recovery, with
-  normal-word false-join counterexamples and raw/source-location provenance.
-- [x] Reuse public PyMuPDF table refinement and HTML export for merged cells;
-  require cell position, text, punctuation and numeric boundary preservation.
-- [x] Run all regressions, actual frozen worker/main and isolated 396-page book.
-- [x] Fix dependency notice collection and exact-version source/build links.
-- [x] Commit source with a complete in-repository Git object database; preserve
-  old objects/ACLs and use standard temporary object-store/pack operations only.
-- [ ] Build 1.2.2 installer, publish source/tag/installer/checksum, verify the
-  published bytes and update contract, install and verify the deployed version.
+- [x] 공통 규칙·기기 경로·현재 소스·원격 저장소·공개 릴리스를 확인했습니다.
+- [x] 이전 SDK OCR 미선택16쪽을 실제 렌더·native 구조로 백지/장식 배경임을 확인했습니다.
+- [x] 검증한 빈 쪽 분류·공식 OCR 재시도·300dpi/원본 이미지 경로를 적용했습니다. 실제 책 그림186개는 모두300dpi crop이며 원본 JPEG 재사용은 합성 회귀에서만 확인했습니다.
+- [x] 공개 Kiwi와 원문 물리줄/어휘 증거에 한정한 한글 경계 보완, 정상 어절 오결합 반례, raw·원본 위치를 검증했습니다.
+- [x] 공식 PyMuPDF 표 refine/HTML을 재사용하고 셀 행열·문자·기호·숫자와 병합 span 보존을 검사했습니다.
+- [x] 전체242회귀, 실제 frozen worker/main, 격리한396쪽 책과 독립 검수를 통과했습니다.
+- [x] 의존성 원문 고지·모델SHA·정확 버전의 소스/빌드 연결을 확인했습니다.
+- [x] 기존 Git 객체·ACL을 보존하고 표준 object-store/pack 경로로 소스를 커밋했습니다. 코드 동결은63fe7c2, 공개tag commit은f475545입니다.
+- [x] 1.2.2 Setup·소스·tag·checksum을 게시하고 게시 bytes를 다시 내려받아 SHA를 대조했습니다. 현재 사용자 설치 후 실제 설치본 기능과 GitHub 최신버전1.2.2 확인을 통과했습니다.
+- [x] 검증한 새 책 MD·그림186개를 실제 Documents 결과에 반영하고 원본 PDF 불변을 확인했습니다.
+- [x] 정상 설치 앱의 실제 창과 실제 책 열기를 확인했습니다. MD SHA·준비됨·refresh=false, HTML그림186·표18·가짜Page제목0을 확인하고 보이는 앱을 열어 두었습니다.
 
-Do not turn partial OCR diagnostics into a claim of perfect recognition. Actual
-results, timings, checksums and remaining input limitations belong in the final
-verification record and HANDOFF, not a universal completeness claim.
+[공개 v1.2.2](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.2), [검증·배포 영수증](./2026-10-24-release-verification.md), [HANDOFF](./HANDOFF.md)에 실제 수치·해시·복구 경로를 기록했습니다.
+
+설치·정상 창 종합/설치본 native/실제 책 열기의 영수증3개는 검증 기록에 연결했습니다. 이 PC는 UAC=0의 관리자 토큰이므로 실제 비승격 자동 설치를 검증한 것은 아니며 정책·계정·ACL은 바꾸지 않았습니다. 스크린샷 성공·전쪽 육안 확인을 주장하지 않습니다. OCR과 모델 교정 안내·partial 상태는 유지하고 모든 의미·문자·복잡 구조의 완전한 복구를 주장하지 않습니다.

@@ -1,10 +1,39 @@
-# 1.2.2 검증 기록 — 배포 전
+# 1.2.2 검증·배포 기록
+
+## 최신 — 공개 배포·개인용 설치·책 결과 반영 완료
+
+[v1.2.2 공개 릴리스](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.2)를 게시했습니다. tag commit은 **`f47554563a9b6e2a0638df2d9b75c7035f2fc1e4`**, 기능 코드 동결은 **`63fe7c2dd4ebf1ac9c23629fbad06417de116ff5`**입니다. 이 절이 아래 배포 전 기록의 미게시·미설치 상태보다 우선합니다.
+
+로컬 증거의 기준 폴더는 `D:\DevCache\260725 PDF 추출`입니다.
+
+| 실제 수행 | 결과·근거 |
+| --- | --- |
+| 소스·설치본·checksum 공개 | 세 자산을 게시 후 다시 내려받아 SHA256 일치 확인, `releases/1.2.2/published-verification.json`의 `ok=true` |
+| 기존 시스템 설치 제거 | 표준 제거 프로그램 exit0, `uninstall-1.2.2-system.log`; 사용자 데이터 삭제 규칙·정책·ACL을 추가하지 않음 |
+| 현재 사용자 설치 | 게시된 Setup을 `/CURRENTUSER`와 명시 경로로 설치 exit0, `install-1.2.2-user.log`에 비관리 설치 모드·HKCU·성공 기록 |
+| 설치 경로·버전 | `C:\Users\Bae\AppData\Local\Programs\PDF Extractor\PDF Extractor.exe`, HKCU1.2.2·기존 HKLM 설치 항목 없음 |
+| 설치된 EXE 기능 | `frozen-1.2.2-installed-native/receipt.json`의 `ok=true`; PDF/CSV·JS bridge·자동 저장·설정1.2.2·PNG 대조·합성 원본 불변 PASS |
+| 실제 GitHub 업데이트 확인 | 설치본의 수동 확인 `up_to_date`, 현재/공개 버전1.2.2; 숨김 QA의 `install_supported=false`는 자동 설치를 막는 정상 동작 |
+| 실제 책 결과 반영 | `book-promotion-1.2.2.json`의 `ok=true`, 실제 Documents MD SHA와 SDK 그림186개 확인, 원본 PDF 불변 |
+| 정상 설치 앱 실행·실제 책 열기 | PID28424의 실제 창 `문서 추출기` 확인, 앱 localhost `/files`·`/open`으로 실제 책 MD SHA 일치·준비됨/refresh=false·HTML 그림186/표18·가짜 Page 제목0 확인 |
+
+설치 후 증거는 [설치·등록·정상 창 종합 영수증](<D:/DevCache/260725 PDF 추출/installed-1.2.2-verification.json>), [설치본 native 기능 영수증](<D:/DevCache/260725 PDF 추출/frozen-1.2.2-installed-native/receipt.json>), [정상 앱 실제 책 열기 영수증](<D:/DevCache/260725 PDF 추출/installed-book-open-1.2.2.json>)입니다. 독립 검수관은 실제 MD/manifest 그림186개·원본 PDF·백업189개·HKCU·ACL·실제 실행 파일 SHA를 다시 확인하고 미해결 P1/P2 없음으로 승인했습니다. 정상 앱은 사용자가 볼 수 있게 열어 두었습니다.
+
+게시된 `PDF-Extractor-Setup.exe`는 **243,034,665 bytes**, SHA256 **`7301324632eec9a0b3376ab7a371c7f467c4b636ea96cb999f964b8c61927add`**입니다. 게시 소스 ZIP `PDF-Extractor-v1.2.2-source.zip`은 960,435 bytes·145 entries, SHA256 `f2ec09849cd339c55f90abf1da90eb807fb25b54abbb1fb3e972ab498289a614`입니다. checksum 파일 자체 SHA256은 `deca69469b5d1ae641a10a7ded8f150689d25f82dfc445008e540ea7b4eeb1d3`이며 내용의 installer 해시도 일치합니다. 설치된 App SHA256은 아래 빌드 App과 같은 `68f2eba82a0189cddcc344248b85c054081c65e818cfb193dc372ef4f85401be`입니다.
+
+책 결과는 `C:\Users\Bae\Documents\문서 추출기\내지-백반증 바이블-3교.md`에 반영했고 SHA256은 **`6878bed61a231e362e3819032a31ced0f658e8a21e44468e41f4d93c2b4dfe4f`**입니다. SDK 그림186개·canonical·출력 index를 함께 갱신했으며 문서 상태는 OCR/교정 안내를 포함한 `partial`, MD는 준비된 상태입니다.
+
+이전 결과와 복구 자료 **189개 파일**은 `D:\DevCache\260725 PDF 추출\deployment-backup-1.2.2`에 보존했습니다(`receipt.json`, `ok=true`). 반영 직전 보호 자료188개를 원래 SHA와 대조한 뒤 캐시·MD·자산·UI/index를 의도적으로 갱신했습니다. 따라서 아래의 185개 불변은 **v4 후보 검증 단계의 사실**이며, 현재 기존 결과 전체가 그대로라는 뜻이 아닙니다. 사용자 원본 PDF는 이 반영 후에도 동일 SHA를 유지합니다.
+
+이 기기는 `EnableLUA=0`이며 실제 Explorer와 검증 프로세스가 관리자 High 토큰입니다. 정책·계정·ACL은 변경하지 않았습니다. `/CURRENTUSER`의 HKCU/사용자 경로 설치는 확인했지만 **실제 비승격 환경의 자동 설치를 실측한 것은 아닙니다.** 설치된 EXE 영수증의 숨김 스크린샷은 `saved=false`입니다. 정상 창의 존재와 실제 앱의 책 열기는 위 Win32/API 영수증으로 확인했으며, 스크린샷 성공이나 모든 페이지의 육안 검수를 수행했다고 주장하지 않습니다.
+
+## 배포 전 검증 기록 — 게시·설치 이전 시점
 
 기준 소스는 `63fe7c2dd4ebf1ac9c23629fbad06417de116ff5`, 앱 버전은 **1.2.2**입니다. 빌드·실제 EXE native/scan 기능 검증·전체 책 v4와 번들 모델/고지의 독립 최종 검수를 마쳤으며 미해결 P1/P2는 없습니다. **이 기록 시점에는 설치·GitHub 게시·배포 후 업데이트 검증을 아직 수행하지 않았습니다.** 이전 [1.2.1 검증](./2026-10-23-sdk-final.md)은 보존된 과거 결과입니다.
 
 이 기기의 증거 기준 폴더는 `D:\DevCache\260725 PDF 추출`입니다. 아래 상대 증거 경로는 이 폴더를 기준으로 합니다. 사용자 원본과 기존 Documents 결과에는 쓰지 않고 후보·로그·빌드만 DevCache에 저장합니다.
 
-## 현재 판정
+## 배포 전 판정
 
 | 항목 | 확인 상태 | 근거 |
 | --- | --- | --- |
@@ -14,7 +43,7 @@
 | 실제 frozen SDK worker 품질 slice | **PASS, 25.344초**: 알려진 분절 잔여0, 한글6수정/쪽1연결, 그림3개·병합 HTML표 유지, 원본 불변 | `frozen-1.2.2-sdk-quality/receipt.json` |
 | 실제 책 396쪽 v4 | **실행·독립 검수 PASS, 454.647초**; 인식/교정 확인 안내로 산출물 상태는 `partial` | `pymupdf4llm-benchmark-20261023/whole-396-v4-quality/final-quality-verification.json` |
 | installer·번들 | **exit0**, 243,034,665 bytes, 인접 checksum 일치; 실제 모델/고지 독립 검수 승인 | `build-1.2.2-final.log`, 아래 artifact 표 |
-| 설치·공개 배포·게시물 다운로드 대조 | **미수행** | 완료 후 별도 영수증 필요 |
+| 설치·공개 배포·게시물 다운로드 대조 | 이 단계에서는 미수행; 이후 결과는 맨 위 최신 절 참조 | `releases/1.2.2/published-verification.json` |
 
 native/scan EXE 영수증의 숨김 WebView 스크린샷은 `Page.captureScreenshot` timeout으로 `saved=false`입니다. 기능 검증 성공을 스크린샷 저장 성공으로 표현하지 않습니다. 원본 `<img>` eager 전환은 검증 하네스에서만 사용했습니다. scan PASS는 합성 입력의 인식·저장·안내 계약을 확인한 것이며 모든 OCR 문자의 정확도를 뜻하지 않습니다.
 
@@ -87,9 +116,9 @@ OCR 수행·SDK 옵션 복구·모델 공백 보정 안내 때문에 최종 문�
 
 번들 `build-manifest.json`에는 SDK2.0, PyInstaller6.21.0, Kiwi0.24.1/모델0.24.0, 어댑터 소스 SHA, SDK ONNX17개와 Kiwi 파일9개의 SHA를 기록합니다. Kiwi 코드와 모델은 각각 Apache-2.0 LICENSE/NOTICE를 수집하며 모델 출처 고지를 코드 라이선스로 대신하지 않습니다. PyMuPDF AGPL 전문과 의존성 고지도 수집했습니다. 최종 메인 `dist/PDF Extractor/licenses/manifest.json`의 **32패키지**, worker `licenses/dependencies/manifest.json`의 **21패키지**, 실제 ONNX17개·Kiwi9개 파일 SHA와 고지 포함은 독립 검수 승인을 받았습니다. 이전 사전 probe의 worker16패키지 수를 최종 번들 수로 사용하지 않습니다.
 
-## 최종 갱신란
+## 배포 전 artifact 기록
 
-현재 빌드 파일은 아래와 같습니다. SHA256은 실제 로컬 파일에서 계산했고 Setup의 인접 `PDF-Extractor-Setup.exe.sha256`과 일치합니다. 아직 게시·설치한 파일이 아닙니다.
+배포 전 확정한 빌드 파일은 아래와 같습니다. SHA256은 실제 로컬 파일에서 계산했고 Setup의 인접 `PDF-Extractor-Setup.exe.sha256`과 일치했습니다. 이후 같은 bytes를 게시·설치한 결과는 맨 위 최신 절에 기록했습니다.
 
 | artifact | 크기·SHA256 |
 | --- | --- |
@@ -105,7 +134,7 @@ OCR 수행·SDK 옵션 복구·모델 공백 보정 안내 때문에 최종 문�
 | installer 크기·SHA256·인접 checksum 일치 | 실제 파일 계산·독립 검수 완료 |
 | App/worker SHA·실제 번들 모델/고지 대조 | SHA 대조 및 모델/고지 독립 승인 |
 | 실제 EXE scan·최종 기능 검증 | native/scan/frozen 품질 slice PASS, 위 영수증 참조 |
-| 소스/tag/installer/checksum 공개와 게시 bytes 대조 | 미수행 |
-| 실제 설치 후 버전·업데이트·기능 확인 | 미수행 |
+| 소스/tag/installer/checksum 공개와 게시 bytes 대조 | 이후 완료, 맨 위 공개 자산 영수증 참조 |
+| 실제 설치 후 버전·업데이트·기능 확인 | 이후 설치본 기능·실제 GitHub 확인 PASS, 정상 창·실제 책 열기까지 확인; 맨 위 영수증3개 참조 |
 
 의미·맞춤법·수식·모든 복잡 표의 완전 복구를 보장하지 않습니다. Kiwi의 두 API 합의는 의미 보존의 독립 증명이 아니므로 교정 provenance와 원본 대조 안내를 유지합니다. 새 입력의 모호한 경계·OCR 오인식·비지원 구조는 원문을 보존하고 확인이 필요한 상태로 남깁니다.

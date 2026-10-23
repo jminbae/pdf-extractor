@@ -1,6 +1,16 @@
 # 문서 추출기 구현 진행 기록
 
-## 최신 — 2026-10-24, 1.2.2 검증 완료·공개/설치 준비 중
+## 최신 — 2026-10-24, 1.2.2 공개·설치·책 결과 반영 완료
+
+이 절과 [최종 검증·배포 기록](./2026-10-24-release-verification.md)이 아래 배포 전 상태보다 우선합니다.
+
+- [v1.2.2 릴리스](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.2) 게시 완료. tag `f47554563a9b6e2a0638df2d9b75c7035f2fc1e4`, 코드 동결 `63fe7c2`입니다. 게시된 소스 ZIP·Setup·checksum을 다시 내려받아 SHA 일치 PASS(`releases/1.2.2/published-verification.json`). Setup243,034,665 bytes/SHA `7301324632eec9a0b3376ab7a371c7f467c4b636ea96cb999f964b8c61927add`입니다.
+- 표준 시스템 설치 제거 exit0 → `/CURRENTUSER`·`C:\Users\Bae\AppData\Local\Programs\PDF Extractor` 설치 exit0, HKLM 설치 항목 없음/HKCU1.2.2 확인. 설치본 App SHA `68f2eba82a0189cddcc344248b85c054081c65e818cfb193dc372ef4f85401be` 일치. 실제 설치본 PDF/CSV·bridge·저장·설정·원본 대조 및 실제 GitHub `up_to_date/1.2.2` PASS(`frozen-1.2.2-installed-native/receipt.json`). hidden QA의 설치 차단·스크린샷 미저장은 정상 제한으로 구분합니다.
+- 검증한 책 MD를 실제 Documents에 반영했습니다. SHA `6878bed61a231e362e3819032a31ced0f658e8a21e44468e41f4d93c2b4dfe4f`, SDK그림186개, `book-promotion-1.2.2.json ok=true`, 원본 PDF 불변. 이전189파일은 DevCache/deployment-backup-1.2.2에 백업했고 반영 직전188자료 SHA를 확인했습니다. 그 뒤 캐시·MD·자산·UI/index는 의도적으로 갱신했으므로 아래185파일 불변은 후보 검증 시점에 한정합니다.
+- 정상 설치 앱 PID28424의 실제 창 `문서 추출기`와 `/files`·`/open`의 실제 책 열기를 확인했습니다. MD SHA 일치·준비됨/refresh=false·HTML그림186/표18/가짜Page제목0 PASS, 보이는 앱을 열어 두었습니다. 근거3개: DevCache의 `installed-1.2.2-verification.json`, `frozen-1.2.2-installed-native/receipt.json`, `installed-book-open-1.2.2.json`. 실제 MD/manifest186·원본PDF·backup189·HKCU·ACL·파일SHA 독립 최종 승인, 미해결 P1/P2 없음.
+- 전체242 PASS/396쪽454.647초/그림186·표18/알려진3분절 해소 및 독립 검수 결과는 아래와 최종 문서에 있습니다. OCR/모델 교정 확인 안내·`partial` 상태는 유지합니다. 이 PC는 UAC=0/관리자 High 토큰이므로 실제 비승격 자동 설치 실측은 아닙니다. 정책·계정·ACL 변경 없음. 정상 창/API 결과 확인이며 스크린샷 성공이나 전쪽 육안 검수를 뜻하지 않습니다.
+
+## 배포 전 최종 QA — 2026-10-24, 1.2.2
 
 이 절과 [1.2.2 검증 기록](./2026-10-24-release-verification.md)이 아래 1.2.1 기록보다 우선합니다. **아직 설치·공개 배포 완료 상태가 아닙니다.**
 
