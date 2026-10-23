@@ -1,11 +1,15 @@
 # PubNexus — 파이프라인 의존성
 # 0~4단계 (인벤토리·메타데이터·XML/GROBID 파싱·정규화·QC)
-PyMuPDF>=1.24        # PDF 텍스트/메타데이터 추출
+PyMuPDF==1.28.0      # 기존 논문/OCR 호환; 공식 MD 엔진 2.0은 별도 worker로 동봉
 requests>=2.31       # API 호출
 lxml>=5.0            # JATS/TEI XML 파싱
 PyYAML>=6.0          # 설정
 rapidfuzz>=3.0       # 제목 퍼지 매칭 / 중복 판정
 tqdm>=4.66           # 진행 표시
+python-docx==1.2.0   # Word native 구조
+python-pptx==1.0.2   # PowerPoint native 구조
+openpyxl==3.1.5      # Excel native 셀/수식
+markdown-it-py==4.2.0 # Markdown 구문/로컬 이미지
 
 numpy>=1.26          # 청킹/검색 벡터 연산 (flat 인덱스 폴백에도 필요)
 

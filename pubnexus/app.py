@@ -1,4 +1,4 @@
-"""논문 PDF 구조화 검수 도구 — pywebview + HTML 판.
+"""문서를 휴대 가능한 Markdown과 상대 이미지로 자동 저장하는 읽기 전용 도구.
 
     [폴더 열기]  경로            GROBID ●        [이 논문만] [전부 추출] [중지]
     ┌────────┬──────────────────────┬──────────────────────────┐
@@ -18,13 +18,12 @@ app_gui.py(tkinter)의 후속이다. 기존 파일은 지우지 않는다 — �
     문자열로 들어 있다(PyInstaller onefile 로 그대로 묶인다).
   · 무거운 일(폴더 스캔·추출·PDF 렌더)은 전부 워커 스레드다. pywebview 는
     js_api 호출마다 스레드를 새로 파므로 화면이 얼지 않는다.
-  · 추출 결과는 **PDF 와 같은 폴더에 DOI 이름(utils.slug)** 으로 저장한다.
-    확정 설계다 — 제목이 교정돼도 이름이 안 바뀌고, 같은 논문이 파일명만
-    다르게 두 벌 있어도 한 JSON 으로 모인다.
+  · 정본 JSON은 앱 저장소에, MD·상대 자산은 설정한 폴더에 자동 저장한다.
 """
 from __future__ import annotations
 
 import html as _html
+import hashlib
 import json
 import os
 import re
@@ -62,6 +61,9 @@ _setup_console()
 from pubnexus import utils  # noqa: E402
 
 GROBID_WARMUP_SEC = 180          # 콜드 기동 40~50초. 느린 디스크를 감안해 넉넉히.
+EXTERNAL_DOCUMENT_EXTENSIONS = {'.rtf', '.ipynb', '.xls', '.msg'}
+DOCUMENT_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.xlsx', '.csv', '.tsv', '.txt', '.md',
+                       '.html', '.htm', '.hwp', '.hwpx', '.epub', '.odt', '.ods', '.odp', '.eml', '.mbox'} | EXTERNAL_DOCUMENT_EXTENSIONS
 
 # single.py 가 올려보내는 단계 이름 → 사람 말. 0%·100% 에 멈춰 보이지 않게 한다.
 _STAGE = {
@@ -346,7 +348,29 @@ def figure_html(cap: str, img: str, sha1: str) -> str:
     return "".join(out)
 
 
-def md_to_html(md: str, chips: str = "", sha1: str = "") -> str:
+def _safe_table(fragment: str) -> str:
+    """Preserve merged cells; never execute document HTML, styles, or URLs."""
+    from lxml import etree, html
+    if len(fragment) > 4_000_000:
+        return '<p>표가 너무 커서 화면 표시를 생략했습니다. MD 파일에서 확인하세요.</p>'
+    root = html.fragment_fromstring(fragment, create_parent='div')
+    allowed = {'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption', 'br', 'p', 'b', 'strong', 'em', 'i', 'sub', 'sup'}
+    for element in list(root.iterdescendants()):
+        if not isinstance(element.tag, str) or element.tag.lower() in {'script', 'style', 'iframe', 'object', 'embed'}:
+            element.drop_tree()
+            continue
+        if element.tag.lower() not in allowed:
+            element.drop_tag()
+            continue
+        span_attrs = {k: v for k, v in element.attrib.items() if k in {'rowspan', 'colspan'}
+                      and element.tag.lower() in {'td', 'th'} and v.isdigit() and 1 <= int(v) <= 1000}
+        element.attrib.clear()
+        element.attrib.update(span_attrs)
+    return ''.join(etree.tostring(child, encoding='unicode', method='html') for child in root)
+
+
+def md_to_html(md: str, chips: str = "", sha1: str = "", *, source_markers: bool = False,
+               asset_index: int | None = None) -> str:
     """to_markdown() 결과를 읽기 화면용 HTML 로.
 
     앞머리(제목·서지·저자)는 본문과 다른 대접을 한다. pub_types 줄은 **버린다** —
@@ -362,6 +386,7 @@ def md_to_html(md: str, chips: str = "", sha1: str = "") -> str:
     put_chips = False        # 키워드 칩을 앞머리에 한 번만
     in_refs = False          # 참고문헌 절: 항목마다 #ref-N 앵커를 붙인다
     ul: list[str] = []
+    in_block = False
 
     def _li(x: str) -> str:
         """참고문헌 항목이면 '15.' 을 읽어 id=ref-15 를 달아준다.
@@ -386,8 +411,53 @@ def md_to_html(md: str, chips: str = "", sha1: str = "") -> str:
         line = raw.strip()
         i += 1
 
+        marker = re.fullmatch(r'<!--pnx-block:([0-9a-f]+)-->', line) if source_markers else None
+        if marker:
+            flush_ul()
+            try:
+                block_id = bytes.fromhex(marker.group(1)).decode('utf-8')
+            except (ValueError, UnicodeError):
+                block_id = ''
+            if block_id:
+                if in_block:
+                    out.append('</div>')
+                out.append(f'<div class="document-block" data-block-id="{_html.escape(block_id, quote=True)}">')
+                in_block = True
+                continue
+        if source_markers and line == '<!--pnx-end-->':
+            flush_ul()
+            if in_block:
+                out.append('</div>')
+                in_block = False
+            continue
+
         if not line:
             flush_ul()
+            continue
+        if line.lower().startswith('<table'):
+            flush_ul()
+            fragment = [raw]
+            fragment_bytes = len(raw.encode('utf-8'))
+            ended = '</table>' in raw.lower()
+            while not ended and i < n:
+                fragment_bytes += len(lines[i].encode('utf-8')) + 1
+                if fragment_bytes > 4_000_000 or len(fragment) >= 100000:
+                    out.append('<p>표가 너무 커서 화면 표시를 생략했습니다. MD 파일에서 확인하세요.</p>')
+                    # Skip the rest without retaining a second large copy.
+                    while i < n and '</table>' not in lines[i].lower():
+                        i += 1
+                    i = min(n, i + 1)
+                    fragment = []
+                    break
+                fragment.append(lines[i])
+                ended = '</table>' in lines[i].lower()
+                i += 1
+            if not fragment:
+                continue
+            try:
+                out.append(_safe_table('\n'.join(fragment)))
+            except (ValueError, TypeError):
+                out.append('<p>' + _html.escape('\n'.join(fragment)) + '</p>')
             continue
         if set(line) <= {"-", "─", "—"} and len(line) >= 3:
             continue                                   # 문서 맨 위 --- 찌꺼기
@@ -422,8 +492,12 @@ def md_to_html(md: str, chips: str = "", sha1: str = "") -> str:
 
         img = _IMG_LINE_RE.match(line)          # ![캡션](fig1.png) → 진짜 그림
         if img:
-            out.append(figure_html(img.group(1).strip(), img.group(2).strip(),
-                                   sha1))
+            if asset_index is None:
+                out.append(figure_html(img.group(1).strip(), img.group(2).strip(), sha1))
+            else:
+                caption = _html.escape(img.group(1), quote=True)
+                url = '/asset?' + urllib.parse.urlencode({'p': asset_index, 'f': img.group(2)})
+                out.append(f'<figure><img loading="lazy" src="{_html.escape(url, quote=True)}" alt="{caption}"><figcaption>{caption}</figcaption></figure>')
             continue
 
         if line.startswith(">"):
@@ -475,9 +549,24 @@ def md_to_html(md: str, chips: str = "", sha1: str = "") -> str:
         out.append(f"<p>{_inline(line)}</p>")
 
     flush_ul()
+    if in_block:
+        out.append('</div>')
     if chips and not put_chips:      # 절이 하나도 없는 짧은 문서
         out.append(chips)
     return "\n".join(out)
+
+
+def sdk_to_html(md: str, blocks=(), sha1: str = '', *, asset_index: int | None = None) -> str:
+    from pubnexus.markdown_view import to_html
+
+    def asset_url(destination):
+        if asset_index is not None:
+            return ('/asset?' + urllib.parse.urlencode({'p': asset_index, 'f': destination}), None)
+        path = fig_path(sha1, destination)
+        if path is None:
+            return None
+        return ('/fig?' + urllib.parse.urlencode({'s': sha1, 'f': destination}), _img_size(path))
+    return to_html(md, blocks, asset_url=asset_url, safe_table=_safe_table)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -489,18 +578,31 @@ class PageRenderer:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._docs: OrderedDict[int, tuple[Path, object]] = OrderedDict()
+        self._docs: OrderedDict[int, tuple[Path, object, tuple[int, int]]] = OrderedDict()
         self._imgs: OrderedDict[tuple, bytes] = OrderedDict()
         self._seq = 0
+
+    def _retire(self, key: int) -> None:
+        entry = self._docs.pop(key, None)
+        if entry:
+            entry[1].close()
+        for cached in list(self._imgs):
+            if cached[0] == key:
+                self._imgs.pop(cached, None)
 
     def open(self, path: Path) -> dict:
         """문서를 열고 {key, pages:[[w,h],…]} 를 돌려준다."""
         import fitz
+        path = Path(path).resolve()
         with self._lock:
-            for k, (p, d) in self._docs.items():
+            stat = path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns)
+            for k, (p, d, previous) in list(self._docs.items()):
                 if p == path:
-                    self._docs.move_to_end(k)
-                    return {"key": k, "pages": self._sizes(d)}
+                    if previous == signature:
+                        self._docs.move_to_end(k)
+                        return {"key": k, "pages": self._sizes(d)}
+                    self._retire(k)
             try:
                 doc = fitz.open(str(path))
             except Exception:
@@ -509,13 +611,9 @@ class PageRenderer:
                     doc = fitz.open(stream=f.read(), filetype="pdf")
             self._seq += 1
             k = self._seq
-            self._docs[k] = (path, doc)
+            self._docs[k] = (path, doc, signature)
             while len(self._docs) > self.MAX_DOCS:
-                _, (_, old) = self._docs.popitem(last=False)
-                try:
-                    old.close()
-                except Exception:
-                    pass
+                self._retire(next(iter(self._docs)))
             return {"key": k, "pages": self._sizes(doc)}
 
     @staticmethod
@@ -529,13 +627,21 @@ class PageRenderer:
     def png(self, key: int, idx: int, width: int) -> bytes | None:
         ck = (key, idx, width)
         with self._lock:
+            ent = self._docs.get(key)
+            if ent is None:
+                return None
+            try:
+                stat = ent[0].stat()
+                current = (stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                current = None
+            if current != ent[2]:
+                self._retire(key)
+                return None
             hit = self._imgs.get(ck)
             if hit is not None:
                 self._imgs.move_to_end(ck)
                 return hit
-            ent = self._docs.get(key)
-            if ent is None:
-                return None
             self._docs.move_to_end(key)
             doc = ent[1]
             if idx < 0 or idx >= doc.page_count:
@@ -552,7 +658,7 @@ class PageRenderer:
 
     def close_all(self) -> None:
         with self._lock:
-            for _, (_, d) in self._docs.items():
+            for _, (_, d, _) in self._docs.items():
                 try:
                     d.close()
                 except Exception:
@@ -631,7 +737,7 @@ class Grobid:
             utils.log("[app] 분석 엔진 없이 진행 — PyMuPDF 폴백")
         self._set("ok" if ok else "off")
 
-    def wait(self, seconds: float) -> bool:
+    def wait(self, seconds: float, cancel=None) -> bool:
         """켜졌거나 못 켰다는 **결판**이 날 때까지 기다린다.
 
         정해진 초만 기다리고 넘어가면, 첫 실행에서 엔진을 내려받는 중인 PC 는
@@ -642,8 +748,12 @@ class Grobid:
             return True
         deadline = time.time() + seconds
         while True:
-            if self.settled.wait(max(0.0, deadline - time.time())):
+            if cancel and cancel():
+                return False
+            if self.settled.wait(min(.2, max(0.0, deadline - time.time()))):
                 return self.state == "ok"
+            if time.time() < deadline:
+                continue
             if self.state != "installing":
                 return False                # 기동만 기다리던 것이면 약속대로 끝낸다
             deadline = time.time() + seconds  # 내려받는 중이면 더 준다
@@ -654,6 +764,16 @@ class Grobid:
 # ══════════════════════════════════════════════════════════════════════
 class App:
     def __init__(self) -> None:
+        from pubnexus.settings import Preferences
+        self.preferences = Preferences()
+        self.output_dir = self.preferences.output_dir
+        self._operation_lock = threading.RLock()
+        self._updater = None
+        self._update_worker = None
+        self._install_requested = False
+        self._closing = False
+        self._hidden = False
+        self._update_applied = False
         self.window = None
         try:
             self.cfg = utils.load_config()
@@ -665,6 +785,12 @@ class App:
         # 정본은 PDF 옆이 아니라 앱 저장소에 있다(store.py). 짝은 내용 지문(sha1).
         self.done: dict[str, str] = {}           # 정규화한 PDF 경로 → sha1
         self.found: dict[str, str] = {}          # 열어 보고 확인한 것(경로가 바뀐 PDF)
+        self.exported: dict[str, dict] = {}      # 실제 MD·자산 저장을 확인한 결과
+        self.export_errors: dict[str, str] = {}
+        self._comparison_cache: OrderedDict = OrderedDict()
+        persisted = self.ui_load().get('exports') or {}
+        if isinstance(persisted, dict):
+            self.exported = {str(k): v for k, v in persisted.items() if isinstance(v, dict)}
         self.renderer = PageRenderer()
         self.cancel = threading.Event()
         self.worker: threading.Thread | None = None
@@ -675,6 +801,103 @@ class App:
             (self.cfg.get("grobid") or {}).get("url", ""),
             notify=lambda st, sec: self.push("grobid", {"state": st, "sec": sec}))
         self._last_push = 0.0
+        self._active_path: Path | None = None
+        self._pending_paths: set[str] = set()
+        self._file_progress: dict[str, dict] = {}
+        self._warning_cache: dict[tuple, list[str]] = {}
+        self._legacy_reports: dict[tuple, dict] = {}
+
+    def extraction_busy(self) -> bool:
+        return bool(self.worker and self.worker.is_alive())
+
+    def change_output_dir(self, directory: Path | None) -> dict:
+        with self._operation_lock:
+            if self.extraction_busy() or self._closing:
+                raise RuntimeError('추출을 마치거나 중지한 뒤 저장 폴더를 바꾸세요.')
+            self.output_dir = self.preferences.set_output_dir(directory)
+            state = self.settings_state()
+        self.push('settings', state)
+        return state
+
+    def settings_state(self) -> dict:
+        from pubnexus.version import VERSION
+        return {'ok': True, 'output_dir': str(self.output_dir),
+                'auto_update': self.preferences.auto_update, 'current_version': VERSION,
+                'update': self._updater.snapshot() if self._updater else
+                    {'status': 'idle', 'message': '업데이트를 확인할 수 있습니다.'}}
+
+    def _get_updater(self):
+        with self._operation_lock:
+            if self._updater is None:
+                from pubnexus.updater import UpdateManager
+                self._updater = UpdateManager(notify=lambda state: self.push('update', state))
+            return self._updater
+
+    def check_update_async(self) -> dict:
+        with self._operation_lock:
+            if self._closing:
+                return {'ok': False, 'why': '앱을 종료하는 중입니다.'}
+            if self._update_worker and self._update_worker.is_alive():
+                return {'ok': True, 'update': self._get_updater().snapshot()}
+            manager = self._get_updater()
+            def check():
+                try:
+                    manager.check_and_download()
+                except Exception as error:
+                    utils.log(f'업데이트 확인 실패: {error}')
+                    self.push('update', {'status': 'error', 'message': '업데이트를 확인하지 못했습니다. 다시 시도할 수 있습니다.'})
+            self._update_worker = threading.Thread(target=check, daemon=True)
+            self._update_worker.start()
+            return {'ok': True, 'update': manager.snapshot()}
+
+    def start_auto_update(self, *, hidden: bool = False) -> None:
+        if getattr(sys, 'frozen', False) and not hidden and self.preferences.auto_update:
+            self.check_update_async()
+
+    def request_close(self) -> bool:
+        with self._operation_lock:
+            busy = self.extraction_busy() or (self.tr_worker and self.tr_worker.is_alive())
+            if not busy:
+                self._closing = True
+        if busy:
+            # closing runs on the GUI thread; evaluating JS there would wait on itself.
+            threading.Thread(target=self.push, args=('notice', {
+                'text': '추출을 마치거나 중지한 뒤 앱을 닫으세요.'}), daemon=True).start()
+        return not busy
+
+    def request_install_update(self) -> dict:
+        with self._operation_lock:
+            if self.extraction_busy() or self._closing or (self.tr_worker and self.tr_worker.is_alive()):
+                return {'ok': False, 'why': '추출을 마치거나 중지한 뒤 업데이트하세요.'}
+            if not getattr(sys, 'frozen', False):
+                return {'ok': False, 'why': '설치된 Windows 앱에서 업데이트를 설치할 수 있습니다.'}
+            if self._get_updater().snapshot().get('status') != 'ready':
+                return {'ok': False, 'why': '먼저 업데이트를 확인하고 다운로드하세요.'}
+            self._install_requested = True
+            self._closing = True
+        # WinForms destroy synchronously invokes the GUI closing callback.
+        # Never hold the bridge thread's lock while waiting for that callback.
+        self.push('update', {'status': 'installing', 'message': '앱을 닫고 업데이트합니다. 설치 후 다시 열립니다.'})
+        try:
+            self.window.destroy()
+        except Exception as error:
+            with self._operation_lock:
+                self._install_requested = False
+                self._closing = False
+            return {'ok': False, 'why': str(error)}
+        return {'ok': True}
+
+    def apply_update_on_exit(self) -> dict | None:
+        with self._operation_lock:
+            if (self._update_applied or not self._closing or self.extraction_busy()
+                    or not self._updater or not (self._install_requested or self.preferences.auto_update)
+                    or self._updater.snapshot().get('status') != 'ready'):
+                return None
+            result = self._updater.install(restart=self._install_requested)
+            self._update_applied = bool(result.get('ok'))
+            if not result.get('ok'):
+                utils.log('업데이트 설치를 시작하지 못했습니다: ' + str(result.get('why') or result.get('message') or '다음 실행에서 다시 확인합니다.'))
+            return result
 
     # ── JS 쪽으로 밀어넣기 ──────────────────────────────────────────
     def push(self, kind: str, payload: dict) -> None:
@@ -717,17 +940,63 @@ class App:
             pass
 
     # ── 폴더 ────────────────────────────────────────────────────────
+    def folder_files(self, folder: Path) -> list[Path]:
+        folder = Path(folder).resolve()
+        output = self.output_dir.resolve()
+        return sorted((p.resolve() for p in folder.rglob("*")
+                       if p.is_file() and p.suffix.lower() in DOCUMENT_EXTENSIONS
+                       and not p.resolve().is_relative_to(output)
+                       and not any(part.casefold() == "markdown"
+                                   for part in p.relative_to(folder).parts[:-1])),
+                      key=lambda p: (p.name.casefold(), str(p).casefold()))
+
+    def add_files(self, paths: list[Path]) -> None:
+        if self.worker and self.worker.is_alive():
+            raise RuntimeError("추출을 마치거나 중지한 뒤 파일을 추가하세요.")
+        known = {_norm(p) for p in self.pdfs}
+        for raw in paths:
+            p = Path(raw).resolve()
+            if p.is_file() and p.suffix.lower() in DOCUMENT_EXTENSIONS and _norm(p) not in known:
+                self.pdfs.append(p)
+                known.add(_norm(p))
+        if self.pdfs and self.folder is None:
+            self.folder = self.pdfs[0].parent
+        self.scan_store()
+        self.push("folder", {"path": str(self.folder or ""), "files": self.file_rows(),
+                             "output_dir": str(self.output_dir)})
+
+    def add_dropped_files(self, event: dict) -> dict:
+        """Use WebView2's native file-drop paths; never guess from a file name."""
+        if self.worker and self.worker.is_alive():
+            return {"ok": False, "why": "추출을 마치거나 중지한 뒤 파일을 추가하세요."}
+        paths = []
+        try:
+            for item in (event.get('dataTransfer') or {}).get('files') or []:
+                raw = item.get('pywebviewFullPath')
+                if not isinstance(raw, str) or not Path(raw).is_absolute():
+                    continue
+                path = Path(raw)
+                paths.extend(self.folder_files(path) if path.is_dir() else [path])
+            if not paths:
+                return {"ok": False, "why": "파일 경로를 받지 못했습니다. 파일 추가를 사용하세요."}
+            before = len(self.pdfs)
+            self.add_files(paths)
+            return {"ok": True, "n": len(self.pdfs) - before}
+        except (OSError, RuntimeError, ValueError) as error:
+            return {"ok": False, "why": str(error)}
+
     def set_folder(self, folder: Path) -> None:
+        if self.worker and self.worker.is_alive():
+            raise RuntimeError("추출을 마치거나 중지한 뒤 폴더를 바꾸세요.")
         self.folder = Path(folder)
         self.status(f"{self.folder.name} 훑는 중…", busy=True, force=True)
-        self.pdfs = sorted((p for p in self.folder.rglob("*.pdf") if p.is_file()),
-                           key=lambda p: p.name.lower())
+        self.pdfs = self.folder_files(self.folder)
         self.scan_store()
         ui = self.ui_load()
         last = ui.get("paper") if _norm(ui.get("folder") or "") == _norm(self.folder) else None
         self.ui_save(folder=str(self.folder))
         self.push("folder", {"path": str(self.folder), "files": self.file_rows(),
-                             "last": last})
+                             "last": last, "output_dir": str(self.output_dir)})
         self.status("", busy=False, force=True)
         # 요약에 적힌 경로로 못 찾은 것들은 **내용**으로 맞춰 본다. PDF 를 옮겼거나
         # 다른 폴더에서 뽑았으면 경로가 다르기 때문이다. 목록은 이미 떴고, 확인되는
@@ -770,7 +1039,7 @@ class App:
         """이 PDF 의 정본 지문. deep=True 면 내용까지 읽어 확인한다."""
         from pubnexus import store
         hit = self.done.get(_norm(pdf))
-        if hit:
+        if hit and not deep:
             return hit
         if not deep:
             return None
@@ -781,25 +1050,111 @@ class App:
         if store.has(sha):               # 옮겼거나 이름이 바뀐 PDF — 내용으로 찾았다
             self.found[_norm(pdf)] = sha
             self.done[_norm(pdf)] = sha
-            self.push("mark", {"name": pdf.name})
+            self.push("cached", {"name": pdf.name, "path": str(pdf)})
             return sha
+        self.done.pop(_norm(pdf), None)
+        self.found.pop(_norm(pdf), None)
         return None
 
     def file_rows(self) -> list[dict]:
-        return [{"name": p.name, "done": _norm(p) in self.done}
-                for p in self.pdfs]
+        rows = []
+        for p in self.pdfs:
+            key = _norm(p)
+            output = self.exported.get(key) or {}
+            saved = bool(output.get("markdown") and Path(output["markdown"]).is_file())
+            try:
+                stat = p.stat()
+                current = (stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                current = None
+            changed = bool(saved and current != tuple(output.get("source_stat") or ()))
+            saved = saved and not changed
+            error = self.export_errors.get(key)
+            needs_refresh = False
+            if saved and p.suffix.lower() == '.pdf':
+                from pubnexus import pdf_markdown
+                source_type = output.get('source_type') or self._legacy_report(output).get('source')
+                identity = output.get('pdf_conversion_engine')
+                if source_type == 'pdf_general':
+                    identity = output.get('pdf_conversion_attempt') or identity
+                needs_refresh = (source_type in ('pdf_general', 'pdf_sdk') and pdf_markdown.available()
+                                 and identity != pdf_markdown.engine_id())
+            state = "failed" if error else ("changed" if changed else (output.get("status", "complete") if saved else "ready"))
+            progress = self._file_progress.get(key) or {}
+            active = self._active_path is not None and _norm(self._active_path) == key
+            waiting = key in self._pending_paths
+            if active:
+                state = 'running'
+            elif waiting:
+                state = 'ready'
+            elif progress.get('status') == 'paused' and not error:
+                state = 'paused'
+            elif needs_refresh and not error:
+                state = 'ready'
+            ready = bool(saved and not error and not active and not waiting and not needs_refresh and state in ('complete', 'partial'))
+            warnings = self._display_warnings(output)
+            if needs_refresh:
+                warnings = ['본문·그림 배치 방식이 개선됐습니다. 선택 추출로 MD를 다시 저장하세요.'] + warnings
+            rows.append({"name": p.name, "path": str(p), "done": ready, 'md_ready': ready,
+                         'needs_refresh': needs_refresh,
+                         "cached": key in self.done, "status": state,
+                         "size_bytes": current[0] if current else 0,
+                         "pages": progress.get('progress_pages') or output.get("pages"),
+                         'progress_pct': 100 if ready else (0 if needs_refresh and not active else progress.get('progress_pct', 0)),
+                         'progress_stage': '다시 저장 필요' if needs_refresh and not active else progress.get('progress_stage', ''),
+                         'progress_page': progress.get('progress_page'), 'progress_pages': progress.get('progress_pages'),
+                         "warnings": warnings,
+                         'warning_details': output.get('warning_details', output.get('warnings', [])),
+                         "unit_count": output.get('unit_count'), "unit_label": output.get('unit_label', ''),
+                         "markdown": output.get("markdown", ""), "assets": output.get('assets', ''), "error": error or ""})
+        return rows
+
+    def _legacy_report(self, output: dict) -> dict:
+        from pubnexus import store
+        sha = output.get('source_sha1') or ''
+        if not re.fullmatch(r'[0-9a-f]{40}', sha):
+            return {}
+        key = (sha, output.get('markdown_sha256'))
+        if key not in self._legacy_reports:
+            doc = store.load(sha) or {}
+            self._legacy_reports[key] = {'source': doc.get('source'),
+                                         'pages': (doc.get('extraction_report') or {}).get('pages') or []}
+        return self._legacy_reports[key]
+
+    def _display_warnings(self, output: dict) -> list[str]:
+        from pubnexus.warning_summary import summarize_warnings
+        raw = output.get('warning_details', output.get('warnings', []))
+        context = output.get('warning_context')
+        if context is not None or not raw or not output.get('source_sha1'):
+            return summarize_warnings(raw, context)
+        key = (output['source_sha1'], output.get('markdown_sha256'), tuple(map(str, raw)))
+        if key not in self._warning_cache:
+            # Old exports lack page-level display context. Read their canonical report once.
+            self._warning_cache[key] = summarize_warnings(raw, self._legacy_report(output).get('pages'))
+        return self._warning_cache[key]
 
     # ── 문서 한 편 ──────────────────────────────────────────────────
-    def paper(self, i: int) -> dict:
+    def source_view(self, i: int) -> dict:
+        """Read the original preview without touching extraction, results or queue."""
         if not (0 <= i < len(self.pdfs)):
             return {"error": "없는 항목"}
         pdf = self.pdfs[i]
         res: dict = {"name": pdf.name, "path": str(pdf)}
         try:
-            res.update(self.renderer.open(pdf))
+            from pubnexus.preview import preview_path
+            original_view = preview_path(pdf)
+            res.update(self.renderer.open(original_view.path))
+            res.update(source_converted=original_view.converted, source_engine=original_view.engine)
         except Exception as e:  # noqa: BLE001
             res["pdf_error"] = f"{type(e).__name__}: {e}"
             res["pages"] = []
+        return res
+
+    def paper(self, i: int) -> dict:
+        res = self.source_view(i)
+        if res.get('error'):
+            return res
+        pdf = self.pdfs[i]
         res["doc"] = self.doc_view(pdf)
         if not res["doc"].get("extracted"):
             res["doc"]["queued"] = self.bump(pdf)
@@ -832,7 +1187,8 @@ class App:
         # render 는 body_text 만 보므로 여기서만 맞춰 끼운다 — 파일은 안 건드린다.
         if not d.get("body_text") and d.get("sections"):
             d = dict(d, body_text=d["sections"])
-        from pubnexus import render
+        from pubnexus import render, comparison
+        d = comparison.attach(d, pdf)
         # 번역은 **정본 단계에서 갈아 끼운다** — 그 뒤 렌더·화면 코드가 하나뿐이어야
         # 어긋나지 않는다. 아직 안 된 문단은 원문 그대로라, 번역 중에도 읽을 수 있다.
         view, tr_done, tr_total = d, 0, 0
@@ -843,7 +1199,19 @@ class App:
             tr_done = sum(1 for k in cache if k)
             view = tr.apply(d, cache)
         md = render.to_markdown(view)
-        html = md_to_html(md, chips_html(d.get("meta") or {}), sha)
+        if isinstance(view.get('sdk_markdown'), str):
+            html = sdk_to_html(md, view.get('sdk_blocks') or [], sha)
+        else:
+            html = md_to_html(render.to_markdown(view, source_markers=True),
+                              chips_html(d.get("meta") or {}), sha, source_markers=True)
+        output = self.exported.get(_norm(pdf)) or {}
+        previous_source = bool(output and output.get('source_sha1') != sha)
+        saved = None if previous_source else self.saved_markdown(pdf)
+        if saved:
+            md, externally_changed = saved
+            if externally_changed:
+                index = next((i for i, p in enumerate(self.pdfs) if p == pdf), None)
+                html = sdk_to_html(md, asset_index=index)
 
         secs = d.get("body_text") or []
         npar = sum(len(s.get("paragraphs") or []) for s in secs)
@@ -859,39 +1227,115 @@ class App:
                  f"참고문헌 {len(d.get('references') or [])}"]
         notes = [x for x in ((d.get("qc") or {}).get("notes") or [])
                  if not _is_stat_note(str(x))]
-        if nchar < 500:
+        notes.extend((d.get('extraction_report') or {}).get('warnings') or [])
+        note_details = list(dict.fromkeys(map(str, notes)))
+        from pubnexus.warning_summary import summarize_warnings
+        notes = summarize_warnings(notes, (d.get('extraction_report') or {}).get('pages'))
+        if previous_source:
+            notes.insert(0, '원본이 변경되어 이전 MD는 그대로 보존했습니다. 현재 원본을 다시 추출하세요.')
+        if saved and saved[1]:
+            notes.insert(0, '저장된 MD가 외부에서 변경되어 원본 위치 연결을 껐습니다.')
+        if nchar < 500 and not d.get('tables') and (d.get('extraction_report') or {}).get('status') != 'complete':
             notes.insert(0, f"본문이 {nchar}자뿐 — 스캔본이거나 추출 실패일 수 있다")
         return {
             "extracted": True, "html": html,
-            "info": " · ".join(bits), "notes": notes,
+            "info": " · ".join(bits), "notes": notes, 'note_details': note_details,
             "paper_id": str(d.get("paper_id") or ""),
             "json": str(store.doc_path(sha)), "sha1": sha,
             "thin": nchar < 500,
             "lang": lang, "tr_done": tr_done, "tr_total": tr_total,
+            "markdown": (self.exported.get(_norm(pdf)) or {}).get("markdown", ""),
+            "export_error": self.export_errors.get(_norm(pdf), ""),
+            "md_text": md,
         }
 
-    # ── 추출 ────────────────────────────────────────────────────────
-    def start(self, targets: list[Path]) -> None:
-        if self.worker and self.worker.is_alive():
-            return
-        self.cancel.clear()
-        self.worker = threading.Thread(target=self._work, args=(targets,),
-                                       daemon=True)
-        self.worker.start()
+    def saved_markdown(self, source: Path):
+        output = self.exported.get(_norm(source)) or {}
+        path = output.get('markdown')
+        if not path or not utils.path_exists(Path(path)):
+            return None
+        with open(utils.long_path(Path(path)), 'rb') as stream:
+            data = stream.read()
+        changed = hashlib.sha256(data).hexdigest() != output.get('markdown_sha256')
+        return data.decode('utf-8-sig', errors='replace'), changed
 
-    def _work(self, targets: list[Path]) -> None:
-        from pubnexus import single
+    def comparison_doc(self, index: int) -> tuple[dict, Path]:
+        from pubnexus import store, comparison
+        from pubnexus.preview import preview_path, renderer_identity
+        if type(index) is not int or not 0 <= index < len(self.pdfs):
+            raise ValueError('문서를 선택하세요.')
+        source = self.pdfs[index]
+        source_stat = source.stat()
+        output = self.exported.get(_norm(source)) or {}
+        md_path = Path(output['markdown']) if output.get('markdown') else None
+        md_stat = md_path.stat() if md_path and md_path.is_file() else None
+        cache_key = (_norm(source), source_stat.st_size, source_stat.st_mtime_ns,
+                     md_stat.st_size if md_stat else None, md_stat.st_mtime_ns if md_stat else None,
+                     output.get('source_sha1'), renderer_identity(source))
+        hit = self._comparison_cache.get(cache_key)
+        display_stat = hit[2].stat() if hit and hit[2].is_file() else None
+        if hit and display_stat and hit[3] == (display_stat.st_size, display_stat.st_mtime_ns):
+            self._comparison_cache.move_to_end(cache_key)
+            return hit[0], hit[2]
+        sha = self.sha_for(source, deep=True)
+        doc = store.load(sha) if sha else None
+        if not doc:
+            raise ValueError('먼저 문서를 추출하세요.')
+        if output and output.get('source_sha1') != sha:
+            raise ValueError('원본이 변경되어 이전 결과의 위치 연결을 중지했습니다. 다시 추출하세요.')
+        saved = self.saved_markdown(source)
+        if saved and saved[1]:
+            raise ValueError('저장된 MD가 외부에서 변경되어 위치 연결을 껐습니다.')
+        if not doc.get('body_text') and doc.get('sections'):
+            doc = dict(doc, body_text=doc['sections'])
+        try:
+            display_source = preview_path(source).path
+        except RuntimeError:
+            display_source = source
+        doc = comparison.attach(doc, display_source)
+        display_stat = display_source.stat()
+        self._comparison_cache[cache_key] = (doc, comparison.document_map(doc, display_source), display_source,
+                                             (display_stat.st_size, display_stat.st_mtime_ns))
+        while len(self._comparison_cache) > 4:
+            self._comparison_cache.popitem(last=False)
+        return doc, display_source
+
+    def document_map(self, index: int) -> dict:
+        from pubnexus import comparison
+        try:
+            doc, source = self.comparison_doc(index)
+            hit = next((value for value in self._comparison_cache.values() if value[0] is doc), None)
+            return hit[1] if hit else comparison.document_map(doc, source)
+        except (ValueError, OSError) as error:
+            return {'blocks': [], 'pages': [], 'error': str(error)}
+
+    # ── 추출 ────────────────────────────────────────────────────────
+    def start(self, targets: list[Path], force: bool = False) -> None:
+        with self._operation_lock:
+            if self.extraction_busy() or self._closing:
+                return
+            self.cancel.clear()
+            self.worker = threading.Thread(target=self._work, args=(targets, force),
+                                           daemon=True)
+            self.worker.start()
+
+    def _work(self, targets: list[Path], force: bool = False) -> None:
+        from pubnexus import single, store, export, comparison
+        from pubnexus.general_pdf import ExtractionCancelled
         total = len(targets)
+        if not total:
+            return
+        self._pending_paths = {_norm(path) for path in targets}
+        for path in targets:
+            self._file_progress[_norm(path)] = {'progress_pct': 0, 'progress_stage': '대기'}
         self.push("run", {"on": True, "total": total})
         fails: list[tuple[str, str]] = []
         times: list[float] = []
         i = 0
+        saved_count = 0
+        partial_count = 0
+        warmup_attempted = False
         try:
-            if self.grobid.state in ("starting", "installing", "unknown"):
-                msg = ("논문 분석기 설치 중(처음 한 번)"
-                       if self.grobid.state == "installing" else "논문 분석기 준비 중")
-                self.prog(1, total, targets[0].name, msg, 0.0)
-                self.grobid.wait(GROBID_WARMUP_SEC)
             cfg = utils.load_config()
             # 처리 순서를 통에 담아 둔다. 원장이 목록 뒤쪽 논문을 클릭하면
             # paper() 가 그 논문을 맨 앞으로 당긴다(WorkQueue.bump).
@@ -903,6 +1347,7 @@ class App:
                 if item is None:
                     break
                 p = item[1]
+                self._active_path = p
                 i += 1
                 t0 = time.time()
                 self.prog(i, total, p.name, "준비", 0.0, times)
@@ -911,23 +1356,131 @@ class App:
                     steps = max(ev.get("total") or 5, 1)
                     self.prog(_i, total, _n, _STAGE.get(ev.get("stage") or "",
                                                         ev.get("message") or ""),
-                              (ev.get("done") or 0) / steps, times)
+                              (ev.get("done") or 0) / steps, times, path=p,
+                              file_pct={'probe': 1, 'doi': 2, 'metadata': 4, 'fulltext': 5,
+                                        'assemble': 94, 'done': 95}.get(ev.get('stage'), 5))
+
+                def page_progress(page, pages, stage):
+                    labels = {'native': '원문 확인', 'table': '표 추출', 'images': '이미지 보존',
+                              'ocr': '문자 인식', 'docling': '표 구조 보완',
+                              'docling_tables': '표 구조 보완', 'pdf_sdk': '문서 구조 추출',
+                              'sdk_layout': '문서 구조 추출', 'sdk_complete': '문서 구조 추출 완료', 'done': '쪽 처리'}
+                    labels['sdk_ocr'] = '문자 인식'
+                    low, high = ((5, 50) if stage in ('native', 'ocr') else
+                                 (85, 97) if stage in ('pdf_sdk', 'sdk_layout', 'sdk_complete', 'sdk_ocr') else
+                                 (85, 95) if stage in ('docling', 'docling_tables') else (50, 85))
+                    measured = low + (high - low) * max(0, min(page / max(pages, 1), 1))
+                    self.prog(i, total, p.name, f'{labels.get(stage, stage)} · {page}/{pages}쪽', 0, times,
+                              path=p, file_pct=measured, page=page, pages=pages)
 
                 try:
-                    # 정본은 앱 저장소에 들어간다(PDF 옆이 아니다). 자리와 목록
-                    # 요약 갱신은 파이프라인이 맡는다 — 여기서 경로를 짓지 않는다.
-                    dest = single.default_json_path(p)
-                    doc = single.extract_one(p, cfg, out_json=dest,
-                                             on_progress=prog)
+                    # 정본 캐시와 휴대용 MD는 별개다. 캐시만 있는 입력도 저장한다.
+                    sha = store.file_sha1(p)
+                    source_stat = p.stat()
+                    signature = (source_stat.st_size, source_stat.st_mtime_ns)
+                    doc = None if force else store.load(sha)
+                    if doc is not None:
+                        from pubnexus.general_pdf import ensure_fulltext
+                        if not doc.get("body_text") and doc.get("sections"):
+                            doc = dict(doc, body_text=doc["sections"])
+                        if p.suffix.lower() == '.pdf':
+                            from pubnexus.pdf_pipeline import current
+                            if not current(doc):
+                                doc, _ = ensure_fulltext(doc, p, cancel=self.cancel.is_set, progress=page_progress)
+                        doc["sha1"] = sha
+                        store.save(sha, doc, p)
+                    elif p.suffix.lower() != '.pdf':
+                        if p.suffix.lower() in EXTERNAL_DOCUMENT_EXTENSIONS:
+                            from pubnexus.external_documents import extract_document
+                        else:
+                            from pubnexus.documents import extract_document
+                        self.prog(i, total, p.name, '문서 구조 추출', .1, times)
+                        doc = extract_document(p, cancel=self.cancel.is_set)
+                    else:
+                        if not warmup_attempted and self.grobid.state in ("starting", "installing", "unknown"):
+                            self.prog(i, total, p.name, "논문 분석기 준비 중", 0.0, times)
+                            self.grobid.ensure_async()
+                            self.grobid.wait(GROBID_WARMUP_SEC, cancel=self.cancel.is_set)
+                            warmup_attempted = True
+                        if self.cancel.is_set():
+                            raise ExtractionCancelled('중지했습니다.')
+                        doc = single.extract_one(p, cfg, out_json=store.doc_path(sha),
+                                                 on_progress=prog, cancel=self.cancel.is_set,
+                                                 on_fulltext_progress=page_progress)
+                    extraction_status = (doc.get("extraction_report") or {}).get("status")
+                    if extraction_status == "failed":
+                        raise RuntimeError("원본 내용을 확인하지 못했습니다. 본문을 확인한 뒤 다시 추출하세요.")
+                    if p.suffix.lower() == '.pdf':
+                        from pubnexus.pdf_pipeline import upgrade_general
+                        doc = upgrade_general(doc, p, cancel=self.cancel.is_set, progress=page_progress)
+                    if p.suffix.lower() == '.pdf' and doc.get('source') != 'pdf_sdk':
+                        from pubnexus.docling_tables import enhance_document
+                        doc = enhance_document(doc, p, cancel=self.cancel.is_set, progress=page_progress)
+                        if (doc.get('extraction_report') or {}).get('status') == 'failed':
+                            raise RuntimeError('표 보완 중 원본 확인에 실패했습니다. 결과를 저장하지 않았습니다.')
+                    current_stat = p.stat()
+                    if signature != (current_stat.st_size, current_stat.st_mtime_ns):
+                        raise RuntimeError("처리 중 원본이 변경됐습니다. 변경된 문서를 다시 추출하세요.")
+                    if self.cancel.is_set():
+                        break
+                    doc = comparison.attach(doc, p)
+                    store.save(sha, doc, p)
+                    for cached_key in list(self._comparison_cache):
+                        if cached_key[0] == _norm(p):
+                            self._comparison_cache.pop(cached_key, None)
+                    self.prog(i, total, p.name, "MD와 이미지 저장", .98, times)
+                    result = export.export_document(doc, p, output_dir=self.output_dir,
+                                                    asset_base=(doc.get('extraction_report') or {}).get('asset_base'))
+                    after_export = p.stat()
+                    if signature != (after_export.st_size, after_export.st_mtime_ns):
+                        raise RuntimeError('저장 중 원본이 변경됐습니다. 저장된 이전 버전 MD를 보존했으며 다시 추출해야 합니다.')
                     sha = str(doc.get("sha1") or "")
                     if sha:
                         self.found[_norm(p)] = sha
                         self.done[_norm(p)] = sha
-                    self.push("mark", {"name": p.name})   # 목록에 즉시 ✓
+                    partial = (doc.get("extraction_report") or {}).get("status") == "partial"
+                    units = (doc.get('source_map') or {}).get('units') or []
+                    unit_kind = ('slide' if p.suffix.lower() in {'.pptx', '.odp'} else
+                                 'sheet' if p.suffix.lower() in {'.xlsx', '.ods'} else None)
+                    output = {"markdown": str(result.markdown_path),
+                              "markdown_sha256": hashlib.sha256(result.markdown_path.read_bytes()).hexdigest(),
+                              "assets": str(result.assets_dir),
+                              "source_stat": signature, "source_sha1": sha,
+                              "pages": len((doc.get("source_map") or {}).get("pages") or []) or None,
+                              "unit_count": sum(u.get('kind') == unit_kind for u in units) if unit_kind else None,
+                              "unit_label": {'slide': '슬라이드', 'sheet': '시트'}.get(unit_kind, ''),
+                              "warnings": (doc.get("extraction_report") or {}).get("warnings") or [],
+                              'warning_details': (doc.get('extraction_report') or {}).get('warnings') or [],
+                              'warning_context': [{k: page.get(k) for k in ('page', 'status', 'ocr_performed')}
+                                                  for page in (doc.get('extraction_report') or {}).get('pages') or []
+                                                  if page.get('ocr_performed') or page.get('status') not in ('text_extracted',)],
+                              'pdf_conversion_engine': doc.get('pdf_conversion_engine') or doc.get('sdk_engine'),
+                              'pdf_conversion_attempt': doc.get('pdf_conversion_attempt'),
+                              'source_type': doc.get('source'),
+                              "status": "partial" if partial else "complete"}
+                    output['warnings'] = self._display_warnings(output)
+                    self.exported[_norm(p)] = output
+                    self.ui_save(exports=self.exported)
+                    self.export_errors.pop(_norm(p), None)
+                    saved_count += 1
+                    partial_count += int(partial)
+                    self._pending_paths.discard(_norm(p))
+                    self._active_path = None
+                    self._file_progress[_norm(p)] = {'progress_pct': 100, 'progress_stage': '저장 완료'}
+                    self.push("mark", {"name": p.name, "path": str(p), 'md_ready': True, **output})
+                except ExtractionCancelled:
+                    self.cancel.set()
+                    break
                 except Exception as e:  # noqa: BLE001 — 파일별 격리
+                    self.export_errors[_norm(p)] = f"{type(e).__name__}: {e}"
                     fails.append((p.name, f"{type(e).__name__}: {e}"))
                     utils.log(f"[app] 실패 {p.name}: {type(e).__name__}: {e}")
                 finally:
+                    self._pending_paths.discard(_norm(p))
+                    if self._active_path == p:
+                        self._active_path = None
+                    if self.cancel.is_set() and _norm(p) not in self.export_errors:
+                        self._file_progress.setdefault(_norm(p), {})['status'] = 'paused'
                     q.finish(p)
                 times.append(time.time() - t0)
         except Exception as e:  # noqa: BLE001
@@ -936,21 +1489,34 @@ class App:
         finally:
             self.queue = None
             stopped = self.cancel.is_set()
+            self._active_path = None
+            if stopped:
+                for key in self._pending_paths:
+                    self._file_progress.setdefault(key, {})['status'] = 'paused'
+            self._pending_paths.clear()
             self.scan_store()
             self.push("run", {
                 "on": False, "files": self.file_rows(), "stopped": stopped,
-                "done": max(i - (1 if stopped else 0), 0) - len(fails),
+                "done": saved_count, "partial": partial_count,
                 "total": total, "nfail": len(fails),
                 "fails": [{"name": n, "why": w} for n, w in fails[:30]]})
 
     def prog(self, i: int, total: int, name: str, stage: str, sub: float,
-             times: list[float] | None = None) -> None:
+             times: list[float] | None = None, *, path: Path | None = None,
+             file_pct: float | None = None, page: int | None = None, pages: int | None = None) -> None:
         """진행 표시 한 번. 남은 시간은 **믿을 만할 때만** 보낸다.
 
         틀린 예측은 없느니만 못하다 — 다섯 편 넘게 처리해 실측이 쌓인 뒤에,
         그것도 중앙값으로만 낸다(어쩌다 오래 걸린 한 편에 끌려가지 않게).
         """
         now = time.time()
+        path = path or self._active_path
+        previous = self._file_progress.get(_norm(path), {}) if path else {}
+        measured = max(previous.get('progress_pct', 0), min(99, max(0, file_pct if file_pct is not None else sub * 95)))
+        progress = {'progress_pct': measured, 'progress_stage': stage,
+                    'progress_page': page, 'progress_pages': pages or previous.get('progress_pages')}
+        if path:
+            self._file_progress[_norm(path)] = progress
         if now - self._last_push < 0.12:
             return
         self._last_push = now
@@ -960,7 +1526,9 @@ class App:
             med = s[len(s) // 2]
             eta = int(med * (total - i + 1))
         self.push("prog", {"i": i, "total": total, "name": name, "stage": stage,
-                           "pct": 100.0 * (i - 1 + min(max(sub, 0.0), 1.0)) / max(total, 1),
+                           'path': str(path) if path else '', 'file_pct': measured,
+                           'page': page, 'pages': progress['progress_pages'],
+                           "pct": 100.0 * (i - 1 + measured / 100) / max(total, 1),
                            "eta": eta})
 
 
@@ -1009,9 +1577,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
             elif u.path == "/files":
                 self._json({"path": str(self.app.folder or ""),
-                            "files": self.app.file_rows()})
+                            "files": self.app.file_rows(), "output_dir": str(self.app.output_dir)})
             elif u.path == "/open":
-                self._json(self.app.paper(int(q.get("p", ["-1"])[0])))
+                index = int(q.get('p', ['-1'])[0])
+                self._json(self.app.source_view(index) if q.get('mode', [''])[0] == 'source' else self.app.paper(index))
+            elif u.path == "/document-map":
+                self._json(self.app.document_map(int(q.get('p', ['-1'])[0])))
             elif u.path == "/page":
                 data = self.app.renderer.png(int(q["k"][0]), int(q["i"][0]),
                                              int(q["w"][0]))
@@ -1021,6 +1592,24 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(data, "image/png", cache="max-age=600")
             elif u.path == "/fig":
                 self._fig(q.get("s", [""])[0], q.get("f", [""])[0])
+            elif u.path == '/asset':
+                index = int(q.get('p', ['-1'])[0])
+                if not 0 <= index < len(self.app.pdfs):
+                    self.send_error(404)
+                    return
+                output = self.app.exported.get(_norm(self.app.pdfs[index])) or {}
+                markdown = output.get('markdown')
+                if not markdown or not Path(markdown).is_file():
+                    self.send_error(404)
+                    return
+                base = Path(markdown).parent.resolve()
+                assets_root = (base / 'assets').resolve()
+                asset = (base / q.get('f', [''])[0]).resolve()
+                # Only image files beneath the chosen result's assets folder.
+                if not assets_root.is_relative_to(base) or not asset.is_relative_to(assets_root) or asset.suffix.lower() not in self._IMG:
+                    self.send_error(404)
+                    return
+                self._send(asset.read_bytes(), self._IMG[asset.suffix.lower()])
             else:
                 self.send_error(404)
         except Exception:  # noqa: BLE001
@@ -1050,15 +1639,71 @@ class Api:
     def __init__(self, app: App) -> None:
         self._app = app
 
+    def settings(self) -> dict:
+        return self._app.settings_state()
+
+    def choose_output_folder(self) -> dict:
+        import webview
+        a = self._app
+        if a.extraction_busy() or a._closing:
+            return {'ok': False, 'why': '추출을 마치거나 중지한 뒤 저장 폴더를 바꾸세요.'}
+        try:
+            result = a.window.create_file_dialog(webview.FOLDER_DIALOG, directory=str(a.output_dir))
+            if not result:
+                return {'ok': False, 'cancelled': True}
+            return a.change_output_dir(Path(result[0]))
+        except (OSError, ValueError, RuntimeError) as error:
+            return {'ok': False, 'why': str(error)}
+
+    def reset_output_folder(self) -> dict:
+        try:
+            return self._app.change_output_dir(None)
+        except (OSError, ValueError, RuntimeError) as error:
+            return {'ok': False, 'why': str(error)}
+
+    def set_auto_update(self, enabled: bool) -> dict:
+        try:
+            self._app.preferences.set_auto_update(enabled)
+            state = self._app.settings_state()
+            self._app.push('settings', state)
+            if enabled:
+                self._app.start_auto_update(hidden=self._app._hidden)
+            return state
+        except (OSError, ValueError) as error:
+            return {'ok': False, 'why': str(error)}
+
+    def check_update(self) -> dict:
+        return self._app.check_update_async()
+
+    def install_update(self) -> dict:
+        return self._app.request_install_update()
+
     def pick_folder(self) -> dict:
         import webview
         w = self._app.window
+        if self._app.worker and self._app.worker.is_alive():
+            return {"ok": False, "why": "추출을 마치거나 중지한 뒤 폴더를 추가하세요."}
         res = w.create_file_dialog(webview.FOLDER_DIALOG,
                                    directory=str(self._app.folder or ""))
         if not res:
             return {"ok": False}
-        self._app.set_folder(Path(res[0]))
+        folder = Path(res[0])
+        self._app.add_files(self._app.folder_files(folder))
+        self._app.ui_save(folder=str(folder))
         return {"ok": True, "path": str(self._app.folder)}
+
+    def pick_files(self) -> dict:
+        import webview
+        a = self._app
+        if a.worker and a.worker.is_alive():
+            return {"ok": False, "why": "추출을 마치거나 중지한 뒤 파일을 추가하세요."}
+        res = a.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True,
+                                          directory=str(a.folder or ""),
+                                          file_types=("Documents (" + ';'.join('*' + ext for ext in sorted(DOCUMENT_EXTENSIONS)) + ")",))
+        if not res:
+            return {"ok": False}
+        a.add_files([Path(p) for p in res])
+        return {"ok": True, "n": len(a.pdfs)}
 
     # ── 한국어 번역 ─────────────────────────────────────────────────
     def doc_lang(self, index: int, lang: str = "en") -> dict:
@@ -1149,13 +1794,11 @@ class Api:
             # 여기서만 내용 지문까지 확인한다. 옮겨오거나 이름만 바꾼 PDF 를
             # 다시 뽑느라 몇 분을 버리느니, 몇 초 더 읽는 편이 낫다.
             a.status("이미 처리된 것이 있는지 확인하는 중…", busy=True, force=True)
-            targets = [p for p in a.pdfs if a.sha_for(p, deep=True) is None]
+            targets = [p for p, row in zip(a.pdfs, a.file_rows()) if not row["done"]]
             a.status("", busy=False, force=True)
-            if not targets:
-                targets = list(a.pdfs)
         if not targets:
-            return {"ok": False, "why": "처리할 PDF 가 없습니다"}
-        a.start(targets)
+            return {"ok": False, "why": "처리할 문서가 없습니다. 다시 추출할 문서를 선택하세요."}
+        a.start(targets, force=which == "one")
         return {"ok": True, "n": len(targets)}
 
     def count_todo(self) -> dict:
@@ -1163,16 +1806,81 @@ class Api:
         todo = [p for p in a.pdfs if a.sha_for(p) is None]
         return {"todo": len(todo), "total": len(a.pdfs)}
 
+    def extract_selected(self, indexes: list[int], force: bool = False) -> dict:
+        a = self._app
+        if a.worker and a.worker.is_alive():
+            return {"ok": False, "why": "이미 처리 중입니다."}
+        if not isinstance(indexes, list) or not isinstance(force, bool):
+            return {"ok": False, "why": "문서 선택을 확인하세요."}
+        rows = a.file_rows()
+        picked = list(dict.fromkeys(i for i in indexes if type(i) is int and 0 <= i < len(a.pdfs)))
+        targets = [a.pdfs[i] for i in picked if force or not rows[i]["done"]]
+        if not targets:
+            return {"ok": False, "why": "추출할 문서를 선택하세요."}
+        a.start(targets, force=force)
+        return {"ok": True, "n": len(targets)}
+
+    def open_file(self, index: int, kind: str = "source") -> dict:
+        a = self._app
+        if type(index) is not int or not 0 <= index < len(a.pdfs):
+            return {"ok": False, "why": "문서를 선택하세요."}
+        source = a.pdfs[index]
+        if kind == "source":
+            target = source
+        elif kind == "markdown":
+            saved = (a.exported.get(_norm(source)) or {}).get("markdown")
+            target = Path(saved) if saved else None
+        else:
+            return {"ok": False, "why": "지원하지 않는 열기 동작입니다."}
+        if target is None or not target.is_file():
+            return {"ok": False, "why": "저장된 파일이 없습니다. 먼저 추출·저장하세요."}
+        try:
+            os.startfile(str(target))
+        except OSError as error:
+            return {"ok": False, "why": f"파일을 열지 못했습니다: {error}"}
+        return {"ok": True, "path": str(target)}
+
     def cancel(self) -> dict:
         self._app.cancel.set()
         return {"ok": True}
+
+    def search(self, index: int, query: str) -> dict:
+        from pubnexus import comparison
+        try:
+            doc, source = self._app.comparison_doc(index)
+            return comparison.search(doc, source, query, mapping=self._app.document_map(index))
+        except (ValueError, OSError) as error:
+            return {'ok': False, 'why': str(error), 'results': []}
+
+    def search_source(self, index: int, query: str) -> dict:
+        """Search the preview itself even when no Markdown result exists."""
+        from pubnexus import comparison
+        from pubnexus.preview import preview_path
+        import fitz
+        try:
+            if type(index) is not int or not 0 <= index < len(self._app.pdfs):
+                raise ValueError('문서를 선택하세요.')
+            source = preview_path(self._app.pdfs[index]).path
+            with fitz.open(utils.long_path(source)) as pdf:
+                pages = [{'width': p.rect.width, 'height': p.rect.height} for p in pdf]
+            return comparison.search({}, source, query, mapping={'blocks': [], 'pages': pages})
+        except (ValueError, OSError, RuntimeError) as error:
+            return {'ok': False, 'why': str(error), 'results': []}
+
+    def location(self, index: int, block_id: str) -> dict:
+        data = self._app.document_map(index)
+        block = next((b for b in data['blocks'] if b['id'] == block_id), None)
+        if not block or not block['locations']:
+            return {'ok': False, 'why': data.get('error') or '이 부분의 원본 위치를 연결하지 못했습니다.'}
+        return {'ok': True, 'locations': block['locations'], 'mapping': block['mapping'], **block['locations'][0]}
 
     def state(self) -> dict:
         a = self._app
         ui = a.ui_load()
         last = ui.get("paper") if _norm(ui.get("folder") or "") == _norm(a.folder or "") else None
         return {"path": str(a.folder or ""), "grobid": a.grobid.state,
-                "sec": a.grobid.secs, "files": a.file_rows(), "last": last}
+                "sec": a.grobid.secs, "files": a.file_rows(), "last": last,
+                "output_dir": str(a.output_dir)}
 
     def remember(self, name: str) -> dict:
         """마지막에 보던 논문. 다음에 켜면 그 자리에서 이어 본다."""
@@ -1186,949 +1894,21 @@ class Api:
             return {"ok": False, "why": str(e)}
         return {"ok": True}
 
+    def reveal_output(self) -> dict:
+        try:
+            self._app.output_dir.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(self._app.output_dir))
+        except OSError as error:
+            return {'ok': False, 'why': str(error)}
+        return {'ok': True, 'path': str(self._app.output_dir)}
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  화면 — CSS·JS 전부 인라인(바깥 자원 0)
 # ══════════════════════════════════════════════════════════════════════
-INDEX_HTML = r"""<!DOCTYPE html>
-<html lang="ko"><head><meta charset="utf-8">
-<title>PDF Extractor</title>
-<style>
-:root{
-  --bg:#f4f5f7; --panel:#fff; --line:#e7e9ee; --line2:#f0f1f4;
-  --ink:#1e2227; --ink2:#3d444d; --mut:#7c848e; --mut2:#a2a9b3;
-  --accent:#2f6bd8; --accent-s:#eaf0fd; --ok:#16a34a; --warn:#c2870b;
-  --ui:"Segoe UI Variable Text","Segoe UI","Pretendard Variable",Pretendard,
-      "Malgun Gothic",system-ui,sans-serif;
-  --serif:Charter,Georgia,"Iowan Old Style","Times New Roman","Malgun Gothic",serif;
-}
-*{box-sizing:border-box}
-html,body{height:100%;margin:0}
-body{background:var(--bg);color:var(--ink);font-family:var(--ui);
-  font-size:13px;overflow:hidden;-webkit-font-smoothing:antialiased;
-  display:flex;flex-direction:column;height:100%}   /* 높이를 숫자로 빼지 않는다 */
-button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
-::-webkit-scrollbar{width:11px;height:11px}
-::-webkit-scrollbar-thumb{background:#cfd4db;border-radius:8px;
-  border:3px solid transparent;background-clip:content-box}
-::-webkit-scrollbar-thumb:hover{background:#b3bac3;background-clip:content-box;
-  border:3px solid transparent}
-::-webkit-scrollbar-track{background:transparent}
-
-/* ── 위쪽 막대 ───────────────────────────────────────────── */
-#top{flex:none;display:flex;align-items:center;gap:10px;padding:9px 14px;
-  background:var(--panel);border-bottom:1px solid var(--line)}
-.btn{padding:6px 13px;border-radius:7px;border:1px solid var(--line);
-  background:#fff;color:var(--ink2);font-size:12.5px;line-height:1.4;
-  transition:background .12s,border-color .12s}
-.btn:hover{background:#f7f8fa;border-color:#d8dce3}
-.btn:active{background:#eef0f4}
-.btn[disabled]{opacity:.42;cursor:default;background:#fff}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn.primary:hover{background:#2a60c4}
-.btn.primary[disabled]{background:var(--accent);opacity:.35}
-.btn.ghost{border-color:transparent;color:var(--mut)}
-.btn.ghost:hover{background:#f2f4f7;color:var(--ink2)}
-#path{flex:1;min-width:0;color:var(--ink2);font-size:12.5px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* 경로는 한 덩어리로 고르게 보여준다. 끝만 굵거나 진하면 시선이 그리로 끌려
-   경로를 읽는 흐름이 끊긴다. 어차피 전체 경로는 툴팁에 있다. */
-#gro{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);
-  padding:3px 9px;border-radius:20px;background:#f4f5f7;white-space:nowrap}
-#gro i{width:7px;height:7px;border-radius:50%;background:var(--mut2);
-  display:inline-block}
-#gro.ok i{background:var(--ok)} #gro.starting i{background:var(--warn);
-  animation:pulse 1.1s ease-in-out infinite} #gro.off i{background:#d05a5a}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-
-/* ── 진행 표시 — 일이 없으면 자리를 차지하지 않는다 ────────── */
-#prog{flex:none;height:0;overflow:hidden;background:var(--panel);
-  border-bottom:1px solid transparent;transition:height .18s ease}
-#prog.idle{height:27px;border-bottom-color:var(--line)}
-#prog.on{height:41px;border-bottom-color:var(--line)}
-#prog .in{display:flex;align-items:center;gap:12px;padding:0 15px;height:27px}
-#prog.on .in{height:38px}
-#prog:not(.on) #bar{display:none}
-#prog:not(.on) .sep{display:none}
-#pcount{font-size:12px;color:var(--ink2);font-variant-numeric:tabular-nums;
-  white-space:nowrap}
-#pstage{font-size:11.5px;color:var(--mut);white-space:nowrap}
-#pname{flex:1;min-width:0;font-size:11.5px;color:var(--mut);white-space:nowrap;
-  overflow:hidden;text-overflow:ellipsis}
-#peta{font-size:11.5px;color:var(--mut2);white-space:nowrap}
-#bar{height:3px;background:#eef0f4}
-#bar span{display:block;height:100%;width:0;background:var(--accent);
-  transition:width .35s cubic-bezier(.4,0,.2,1)}
-.sep{width:1px;height:12px;background:var(--line)}
-
-/* ── 3분할 ──────────────────────────────────────────────── */
-#cols{flex:1;min-height:0;display:grid;
-  grid-template-columns:minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,2fr)}
-.split{background:var(--line);cursor:col-resize;position:relative}
-.split::after{content:"";position:absolute;inset:0 -4px;z-index:5}
-.split:hover{background:var(--accent)}
-.pane{min-width:0;display:flex;flex-direction:column;background:var(--panel);
-  overflow:hidden}
-
-/* ── 왼쪽: 목록 ─────────────────────────────────────────── */
-#find{padding:10px 10px 9px}
-#q{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:7px;
-  font:inherit;font-size:12px;background:#fafbfc;outline:none}
-#q:focus{border-color:#c3cfe6;background:#fff;box-shadow:0 0 0 3px var(--accent-s)}
-#list{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 6px 10px;outline:none}
-.row{display:flex;gap:7px;align-items:flex-start;padding:6px 7px;border-radius:6px;
-  cursor:default;font-size:11.5px;line-height:1.45;color:var(--ink2);
-  overflow-wrap:anywhere;word-break:normal;hyphens:none}
-.row:hover{background:#f5f6f8}
-.row.sel{background:var(--accent-s);color:#1c3f80}
-.row .dot{flex:none;width:6px;height:6px;border-radius:50%;margin-top:5px;
-  background:#dfe3e9}
-.row.done .dot{background:var(--ok)}
-.row .nm{flex:1;min-width:0}
-
-/* ── 가운데: PDF ────────────────────────────────────────── */
-.head{display:flex;align-items:center;gap:8px;padding:7px 12px;
-  border-bottom:1px solid var(--line2);min-height:36px}
-.head .t{font-size:11.5px;color:var(--mut);letter-spacing:.02em;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.head .sp{flex:1}
-.zbtn{width:26px;height:24px;border-radius:6px;color:var(--mut);font-size:14px;
-  line-height:1}
-.zbtn:hover{background:#f2f4f7;color:var(--ink)}
-.zbtn[disabled]{opacity:.28;cursor:default;background:none}
-#pgno{font-size:11.5px;color:var(--mut);min-width:56px;text-align:center;
-  font-variant-numeric:tabular-nums}
-#scroll{flex:1;overflow:auto;background:#f1f2f4;padding:16px 0 30px;
-  scroll-behavior:auto}
-.pg{margin:0 auto 14px;background:#fff;position:relative;
-  box-shadow:0 1px 2px rgba(20,28,40,.10),0 3px 12px rgba(20,28,40,.06)}
-.pg img{width:100%;height:100%;display:block}
-/* 쪽마다 '3 / 15' 를 찍지 않는다 — 스크롤할 때마다 눈에 걸린다.
-   지금 몇 쪽인지는 위 도구줄(#pgno)이 이미 말해 준다. */
-.empty{display:flex;height:100%;align-items:center;justify-content:center;
-  color:var(--mut2);font-size:12.5px;flex-direction:column;gap:8px;padding:20px;
-  text-align:center}
-
-/* ── 오른쪽: 읽기 화면 ──────────────────────────────────── */
-#doc{flex:1;overflow:auto;background:#fff}
-#art{padding:24px 28px 70px}
-#art h1{font-family:var(--ui);font-size:23px;line-height:1.3;font-weight:650;
-  letter-spacing:-.012em;margin:0 0 11px;color:#151a21}
-#art h2{font-family:var(--ui);font-size:15.5px;font-weight:650;color:#182029;
-  margin:26px 0 9px;padding-bottom:5px;border-bottom:1px solid var(--line2);
-  letter-spacing:-.005em}
-#art h3{font-family:var(--ui);font-size:14px;font-weight:640;color:#28313c;
-  margin:19px 0 6px}
-#art h4,#art h5{font-family:var(--ui);font-size:13px;font-weight:640;
-  color:#455060;margin:15px 0 5px}
-#art .crumb{color:var(--mut2);font-weight:400;margin:0 3px}
-#art p{font-family:var(--serif);font-size:15.2px;line-height:1.72;
-  color:#242a31;margin:0 0 11px;text-align:left;
-  overflow-wrap:break-word;hyphens:auto}
-#art p.bib{font-family:var(--ui);font-size:12px;color:var(--mut);margin:0 0 6px}
-#art p.byline{font-family:var(--ui);font-size:12.5px;color:var(--ink2);
-  margin:0 0 12px;line-height:1.6}
-/* 키워드 칩 — MeSH 와 저자 키워드를 같은 모양, 색만 은은하게 다르게 */
-#art p.chips{margin:2px 0 10px;display:flex;flex-wrap:wrap;gap:4px;
-  align-items:center}
-#art .chip{font-family:var(--ui);font-size:10.5px;border-radius:4px;
-  padding:2.5px 7px;line-height:1.45;letter-spacing:.01em;
-  white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
-#art .chip.mesh{background:#eef2f8;color:#5a6675}
-#art .chip.kw{background:#f4f5f6;color:#71767e}
-#art .chip.hid{display:none}
-#art .chipmore{font-family:var(--ui);font-size:10.5px;color:var(--mut2);
-  padding:2.5px 6px;border-radius:4px}
-#art .chipmore:hover{background:#f4f5f7;color:var(--ink2)}
-#art p.aside{font-family:var(--ui);font-size:11.5px;color:var(--mut)}
-/* 참고문헌 — 번호가 왼쪽으로 걸리는 매달린 들여쓰기, 본문보다 조금 작게 */
-#art p.ref{font-family:var(--serif);font-size:13.3px;line-height:1.62;
-  color:#3a424b;margin:0 0 7px;padding-left:1.5em;text-indent:-1.5em}
-#art p.cap{font-family:var(--ui);font-size:12.5px;font-weight:620;color:#2b333d;
-  margin:20px 0 7px}
-#art blockquote{margin:0 0 15px;padding:2px 0 2px 14px;
-  border-left:2px solid var(--line);color:var(--ink2)}
-#art ul{font-family:var(--serif);font-size:14.6px;line-height:1.65;
-  color:#2b323a;margin:0 0 11px;padding-left:20px}
-#art li{margin:0 0 6px}
-#art code{font-family:Consolas,"Cascadia Mono",monospace;font-size:.88em;
-  background:#f4f5f7;border-radius:3px;padding:1px 4px;color:#48505a}
-#art .cite{color:#a8b0ba;font-size:.8em;vertical-align:.28em;
-  letter-spacing:-.02em;margin:0 .5px}
-#art a.cite{text-decoration:none;cursor:pointer}
-#art a.cite:hover{color:var(--accent)}
-#art a.cite.on{color:var(--accent);background:#eef3fb;border-radius:3px}
-#art .hit{background:#fff6d8;border-radius:3px;
-  transition:background .5s ease}                /* 눌러서 찾아간 항목 잠깐 표시 */
-/* 참고문헌 미리보기 — 읽던 자리를 잃지 않게 그 자리에 띄운다 */
-#refpop{position:fixed;z-index:60;max-width:460px;
-  background:#fff;border:1px solid var(--line);border-radius:8px;
-  box-shadow:0 8px 28px rgba(20,26,34,.18);padding:11px 13px 9px;
-  font-family:var(--serif);font-size:13.4px;line-height:1.6;color:#2b323a}
-#refpop .num{font-family:var(--ui);font-size:11px;font-weight:700;
-  color:var(--mut);letter-spacing:.02em;display:block;margin-bottom:3px}
-#refpop .go{font-family:var(--ui);font-size:11px;color:var(--mut);
-  background:none;border:0;padding:4px 0 0;cursor:pointer;display:block}
-#refpop .go:hover{color:var(--accent);text-decoration:underline}
-#art a.figref{color:var(--accent);text-decoration:none;cursor:pointer;
-  border-bottom:1px dotted rgba(90,120,170,.5)}
-#art a.figref:hover{border-bottom-style:solid}
-#art a.figref.on{background:#eef3fb;border-radius:3px}
-/* 그림 우클릭 메뉴 */
-#figmenu{position:fixed;z-index:70;min-width:158px;padding:4px;
-  background:#fff;border:1px solid var(--line);border-radius:7px;
-  box-shadow:0 8px 24px rgba(20,26,34,.18)}
-#figmenu button{display:block;width:100%;text-align:left;border:0;background:none;
-  font-family:var(--ui);font-size:12.5px;color:#2b333d;
-  padding:7px 10px;border-radius:5px;cursor:pointer}
-#figmenu button:hover{background:#eef3fb;color:var(--accent)}
-#art .fig img{cursor:context-menu}
-#art .fig{margin:0 0 18px;padding:0}
-#art .fig img{max-width:100%;height:auto;display:block;border:1px solid var(--line);
-  border-radius:6px;background:#fff}
-#art .fig figcaption{font-family:var(--ui);font-size:11.5px;color:var(--mut);
-  margin-top:6px;line-height:1.55}
-#art .twrap{overflow-x:auto;overscroll-behavior-x:contain;margin:0 0 18px;
-  border:1px solid var(--line);border-radius:8px;background:#fff}
-#art table{border-collapse:collapse;width:100%;font-family:var(--ui);
-  font-size:12.4px;line-height:1.5;table-layout:auto}
-#art th,#art td{padding:8px 12px;text-align:left;vertical-align:top;
-  border-bottom:1px solid var(--line2);white-space:normal;min-width:74px;
-  overflow-wrap:break-word;word-break:keep-all}   /* 한 글자씩 세로로 쌓이면 실패 */
-#art thead th{background:#fafbfc;font-weight:640;color:#333c46;
-  border-bottom:1px solid #dfe3e9;position:sticky;top:0}
-#art tbody tr:last-child td{border-bottom:0}
-#art tbody tr:hover{background:#fcfcfd}
-#foot{border-top:1px solid var(--line2);padding:6px 14px;font-size:10.5px;
-  color:var(--mut2);display:flex;gap:8px;align-items:center;min-height:28px}
-#foot .more{color:var(--mut);text-decoration:underline;text-underline-offset:2px}
-#notes{padding:0 14px 10px;font-size:11px;color:var(--mut);display:none;
-  border-top:1px solid var(--line2)}
-#notes.on{display:block}
-#notes li{margin:5px 0}
-
-/* ── 겹침(확인 상자·안내) ───────────────────────────────── */
-#veil{position:fixed;inset:0;background:rgba(24,29,36,.30);display:none;
-  align-items:center;justify-content:center;z-index:50}
-#veil.on{display:flex}
-.card{background:#fff;border-radius:12px;padding:22px 24px 18px;width:460px;
-  max-width:82vw;box-shadow:0 12px 40px rgba(18,24,33,.22)}
-.card h3{margin:0 0 8px;font-size:15px;font-weight:640}
-.card p{margin:0 0 18px;font-size:12.5px;color:var(--ink2);line-height:1.65;
-  white-space:pre-line;max-height:46vh;overflow:auto}
-.card .r{display:flex;justify-content:flex-end;gap:8px}
-#toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);
-  background:#232a33;color:#fff;padding:9px 16px;border-radius:8px;font-size:12px;
-  opacity:0;pointer-events:none;transition:.2s;z-index:60;max-width:70%}
-#toast.on{opacity:1;transform:translate(-50%,0)}
-</style></head><body>
-
-<div id="top">
-  <button class="btn" id="bopen">폴더 열기</button>
-  <div id="path">폴더를 고르세요</div>
-  <div id="gro"><i></i><span>분석기 확인 중</span></div>
-  <button class="btn" id="bone" disabled>이 논문만</button>
-  <button class="btn primary" id="ball" disabled>전부 추출</button>
-  <button class="btn ghost" id="bstop" style="display:none">중지</button>
-</div>
-
-<div id="prog">
-  <div class="in">
-    <span id="pcount"></span><span class="sep"></span>
-    <span id="pname"></span>
-    <span id="pstage"></span>
-    <span id="peta"></span>
-  </div>
-  <div id="bar"><span></span></div>
-</div>
-
-<div id="cols">
-  <div class="pane">
-    <div id="find"><input id="q" placeholder="파일 이름 검색" spellcheck="false"></div>
-    <div id="list" tabindex="0"></div>
-  </div>
-  <div class="split" data-s="0"></div>
-  <div class="pane">
-    <div class="head"><span class="t">PDF</span><span class="sp"></span>
-      <button class="zbtn" id="zo" title="축소">−</button>
-      <span id="pgno">—</span>
-      <button class="zbtn" id="zi" title="확대">＋</button>
-      <button class="btn ghost" id="zf" style="padding:3px 9px;font-size:11.5px">폭 맞춤</button>
-    </div>
-    <div id="scroll"><div class="empty">왼쪽에서 논문을 고르세요</div></div>
-  </div>
-  <div class="split" data-s="1"></div>
-  <div class="pane">
-    <div class="head">
-      <button class="zbtn" id="bback" title="이전 위치 (Alt+←, 마우스 옆 버튼)" disabled>‹</button>
-      <button class="zbtn" id="bfwd" title="다음 위치 (Alt+→, 마우스 옆 버튼)" disabled>›</button>
-      <span class="t" id="dtitle">추출 결과</span>
-      <span class="sp"></span>
-      <button class="btn ghost" id="bko" disabled
-              style="padding:3px 10px;font-size:11.5px"
-              title="본문을 한국어로 (이 PC 안에서 번역합니다)">KO</button>
-    </div>
-    <div id="doc"><div class="empty">왼쪽에서 논문을 고르세요</div></div>
-    <div id="notes"></div>
-    <div id="foot"></div>
-  </div>
-</div>
-
-<div id="veil"><div class="card">
-  <h3 id="mt"></h3><p id="mm"></p>
-  <div class="r"><button class="btn" id="mc">취소</button>
-  <button class="btn primary" id="mo">계속</button></div>
-</div></div>
-<div id="toast"></div>
-
-<script>
-"use strict";
-const $=s=>document.querySelector(s), DPR=Math.min(window.devicePixelRatio||1,2);
-const S={files:[],view:[],sel:-1,key:null,pages:[],zoom:1,fitW:0,bucket:1200,
-         els:[],io:null,busy:false,ready:false,
-         hist:[],hidx:-1,mem:{},    /* 이동 이력 · 논문별로 읽던 자리 */
-         cursor:-1,last:null,waiting:null,   /* 목록 커서 · 지난번 논문 · 기다리는 논문 */
-         lang:"en",trDone:0,trTotal:0};      /* 보고 있는 언어 · 번역 진척 */
-
-/* ── 도우미 ─────────────────────────────────────────────── */
-let tmr=null;
-function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("on");
-  clearTimeout(tmr);tmr=setTimeout(()=>t.classList.remove("on"),2600);}
-function ask(title,msg,ok,alone){return new Promise(res=>{
-  $("#mt").textContent=title;$("#mm").textContent=msg;$("#mo").textContent=ok||"계속";
-  $("#mc").style.display=alone?"none":"";
-  $("#veil").classList.add("on");
-  const done=v=>{$("#veil").classList.remove("on");
-    $("#mo").onclick=null;$("#mc").onclick=null;res(v);};
-  $("#mo").onclick=()=>done(true);$("#mc").onclick=()=>done(false);});}
-const api=()=>window.pywebview&&window.pywebview.api;
-/* 경로는 **읽는 순서 그대로** 보여 준다 — 상위 경로를 옅게 앞에, 폴더 이름을 진하게 뒤에.
-   예전에는 폴더 이름을 앞에 두고 상위 경로를 뒤에 붙였는데("예시  C:\\…\\전달용"),
-   실제 경로와 순서가 뒤집혀 읽는 사람이 한 번 더 생각해야 했다. 좁으면 앞이 잘리도록
-   direction:rtl 대신 그냥 ellipsis 를 쓰고, 전체 경로는 툴팁에 남긴다. */
-function setPath(p){
-  const el=$("#path");el.title=p||"";el.dataset.full=p||"";
-  if(!p){el.textContent="폴더를 고르세요";return;}
-  renderPath();}
-/* 경로는 읽는 순서 그대로. 넘치면 **앞쪽**을 …로 줄인다 —
-   뒤를 자르면 정작 어느 폴더인지가 사라진다. */
-function renderPath(){
-  const el=$("#path"),full=el.dataset.full||"";
-  if(!full)return;
-  const parts=full.replace(/[\\/]+$/,"").split(/[\\/]/);
-  const name=parts.pop()||full;
-  let segs=parts,cut=false;
-  const draw=()=>{
-    const head=(cut?"…\\":"")+(segs.length?segs.join("\\")+"\\":"");
-    el.textContent=head+name;};
-  draw();
-  let guard=0;
-  while(el.scrollWidth>el.clientWidth+1&&segs.length&&guard++<40){
-    segs=segs.slice(1);cut=true;draw();}}
-
-/* ── 목록 ───────────────────────────────────────────────── */
-function setFiles(files){S.files=files||[];draw();}
-function draw(){
-  const q=$("#q").value.trim().toLowerCase();
-  S.view=[];const L=$("#list");L.textContent="";
-  const frag=document.createDocumentFragment();
-  S.files.forEach((f,i)=>{
-    if(q&&f.name.toLowerCase().indexOf(q)<0)return;
-    S.view.push(i);
-    const d=document.createElement("div");
-    d.className="row"+(f.done?" done":"")+(i===S.cursor?" sel":"");
-    d.dataset.i=i;
-    d.title=f.name;
-    d.innerHTML='<span class="dot"></span><span class="nm"></span>';
-    d.lastChild.textContent=f.name;
-    frag.appendChild(d);});
-  L.appendChild(frag);
-  updateCount();
-  $("#ball").disabled=!S.ready||!S.files.length||S.busy;
-  $("#bone").disabled=!S.ready||S.sel<0||S.busy;
-}
-/* 편수는 늘 목록에서 다시 세어 쓴다 — 더하기로 굴리면 어긋난다(실측) */
-/* 숫자는 **한 곳에 하나만.** 배치 진행 순번과 누적 추출 수가 따로 놀면
-   왜 60 과 77 이 다른지 알 수 없다(원장 지적). 기준은 하나 — 전체 중 끝난 편수. */
-function updateCount(){
-  const done=S.files.reduce((n,f)=>n+(f.done?1:0),0);
-  $("#pcount").textContent=S.files.length?`${done} / ${S.files.length} 추출됨`:"";
-  if(!S.busy)showProg(false);}
-$("#list").addEventListener("click",e=>{
-  const r=e.target.closest(".row");if(!r)return;
-  $("#list").focus({preventScroll:true});openPaper(+r.dataset.i);});
-$("#q").addEventListener("input",()=>{draw();autoPick();});
-
-/* 목록을 화살표로 오르내린다. 연타할 때 매번 열면 버벅이므로 커서만 먼저
-   움직이고, 손을 멈춘 뒤에 연다. */
-let pickTimer=null;
-function markCursor(i){
-  S.cursor=i;
-  const L=$("#list");
-  L.querySelectorAll(".row.sel").forEach(r=>r.classList.remove("sel"));
-  const r=L.querySelector('.row[data-i="'+i+'"]');
-  if(r){r.classList.add("sel");r.scrollIntoView({block:"nearest"});}}
-function moveSel(d){
-  if(!S.view.length)return;
-  let k=S.view.indexOf(S.cursor);
-  k=(k<0)?(d>0?0:S.view.length-1):Math.min(S.view.length-1,Math.max(0,k+d));
-  const i=S.view[k];
-  if(i===S.cursor)return;
-  markCursor(i);
-  clearTimeout(pickTimer);
-  pickTimer=setTimeout(()=>{if(S.cursor===i&&S.sel!==i)openPaper(i);},170);}
-/* 폴더를 열면 빈 화면을 보여주지 않는다 — 지난번에 보던 논문, 없으면 첫 항목 */
-function autoPick(){
-  if(!S.view.length)return;
-  if(S.view.indexOf(S.sel)>=0){markCursor(S.sel);return;}
-  let i=S.view[0];
-  if(S.last){const k=S.files.findIndex(f=>f.name===S.last);
-    if(k>=0&&S.view.indexOf(k)>=0)i=k;}
-  markCursor(i);openPaper(i);}
-window.addEventListener("keydown",e=>{
-  if(e.key!=="ArrowDown"&&e.key!=="ArrowUp")return;
-  const t=e.target,tag=(t&&t.tagName||"").toLowerCase();
-  if(tag==="input"||tag==="textarea"||(t&&t.isContentEditable))return;
-  /* 본문·PDF 를 스크롤하는 중이면 그쪽이 우선 — Ctrl 을 누르면 언제나 목록 */
-  const inPane=t&&t.closest&&(t.closest("#doc")||t.closest("#scroll"));
-  if(inPane&&!e.ctrlKey)return;
-  e.preventDefault();
-  moveSel(e.key==="ArrowDown"?1:-1);});
-
-/* ── 이동 이력 ───────────────────────────────────────────
-   원장은 목록을 오르내리며 원본과 대조한다. 인용을 눌러 참고문헌으로 뛰었으면
-   **읽던 자리로 돌아올 길**이 있어야 한다. 크게 튀는 이동만 쌓는다 —
-   단순 스크롤까지 쌓으면 뒤로가기가 쓸모없어진다. */
-const dbox=()=>$("#doc");
-const curPos=()=>({p:S.sel,top:dbox().scrollTop});
-function navBtns(){
-  $("#bback").disabled=S.hidx<=0;
-  $("#bfwd").disabled=S.hidx<0||S.hidx>=S.hist.length-1;}
-function histPush(pos,from){
-  /* from 을 받는 이유: 논문을 바꾼 뒤에 curPos() 를 읽으면 이미 새 논문이라
-     떠나온 자리가 통째로 덮여 뒤로가기가 제자리를 맴돈다(실제로 겪었다). */
-  if(S.hidx>=0)S.hist[S.hidx]=from||curPos();
-  S.hist=S.hist.slice(0,S.hidx+1);
-  S.hist.push(pos);S.hidx=S.hist.length-1;
-  if(S.hist.length>80){S.hist.shift();S.hidx--;}
-  navBtns();}
-async function histGo(d){
-  const n=S.hidx+d;
-  if(S.hidx<0||n<0||n>=S.hist.length)return;
-  S.hist[S.hidx]=curPos();
-  S.hidx=n;navBtns();
-  const e=S.hist[n];
-  if(e.p!==S.sel)await openPaper(e.p,{noHist:true,top:e.top});
-  else scrollDocTo(e.top);}
-function scrollDocTo(top){
-  dbox().scrollTo({top:top,behavior:"smooth"});
-  setTimeout(()=>flashAt(top),340);}         /* 어디로 왔는지 눈이 따라가게 */
-function flashAt(top){
-  const art=$("#art");if(!art)return;
-  let best=null,bd=1e9;
-  art.querySelectorAll("p,li,h1,h2,h3,h4,h5,.twrap").forEach(el=>{
-    const d=Math.abs(el.offsetTop-top-30);
-    if(d<bd){bd=d;best=el;}});
-  if(best&&bd<400){best.classList.add("hit");
-    setTimeout(()=>best.classList.remove("hit"),1300);}}
-$("#bback").onclick=()=>histGo(-1);
-$("#bfwd").onclick=()=>histGo(1);
-/* 마우스 옆 버튼(뒤로 3 / 앞으로 4).
-   한 번 누르면 pointerdown·mousedown·mouseup·auxclick 이 줄줄이 오는데, 어느
-   것이 오고 어느 것이 안 오는지가 WebView2 에서 일정하지 않았다(앞으로가 두
-   번에 한 번 씹혔다). 그래서 **오는 것 아무거나** 받아 움직이고, 같은 한 번의
-   누름이 두 번 세지 않게 짧은 잠금으로 막는다. */
-let navGuard=0;
-function sideNav(btn){
-  const t=Date.now();
-  if(t-navGuard<320)return;
-  navGuard=t;
-  histGo(btn===3?-1:1);}
-for(const ev of ["pointerdown","mousedown","mouseup","auxclick","pointerup"])
-  window.addEventListener(ev,e=>{
-    if(e.button!==3&&e.button!==4)return;
-    e.preventDefault();e.stopPropagation();
-    sideNav(e.button);},{capture:true});
-window.addEventListener("keydown",e=>{
-  if(!e.altKey)return;
-  if(e.key==="ArrowLeft"){e.preventDefault();histGo(-1);}
-  else if(e.key==="ArrowRight"){e.preventDefault();histGo(1);}});
-
-/* ── 논문 열기 ──────────────────────────────────────────── */
-let openSeq=0, memTimer=null;
-function rememberSoon(){
-  clearTimeout(memTimer);
-  memTimer=setTimeout(()=>{if(S.last&&api())api().remember(S.last);},900);}
-async function openPaper(i,opt){
-  opt=opt||{};
-  const from=(S.sel>=0)?curPos():null;                    /* 떠나는 자리 */
-  if(from&&S.sel!==i)S.mem[S.sel]=from.top;               /* 읽던 자리 기억 */
-  S.sel=i;S.cursor=i;draw();
-  S.last=S.files[i]?S.files[i].name:null;
-  rememberSoon();                       /* 훑는 동안 파일을 매번 쓰지 않게 */
-  const seq=++openSeq;
-  $("#dtitle").textContent=S.files[i]?S.files[i].name:"";
-  $("#scroll").innerHTML='<div class="empty">여는 중…</div>';
-  $("#doc").innerHTML="";$("#foot").textContent="";
-  $("#notes").className="";$("#notes").textContent="";
-  let r;
-  try{r=await (await fetch("/open?p="+i)).json();}
-  catch(e){$("#scroll").innerHTML='<div class="empty">PDF 를 열지 못했습니다</div>';return;}
-  if(seq!==openSeq)return;
-  buildPdf(r);renderDoc(r.doc||{});
-  const top=(opt.top!==undefined)?opt.top:(S.mem[i]||0);
-  if(top)requestAnimationFrame(()=>{dbox().scrollTop=top;flashAt(top);});
-  if(!opt.noHist)histPush({p:i,top:top},from);
-}
-/* ── 한국어 보기 ────────────────────────────────────────────
-   번역은 **정본을 갈아 끼워** 다시 그린다(서버). 화면은 그 결과를 받을 뿐이라
-   영어판과 그리는 길이 하나다. 아직 안 된 문단은 원문이 그대로 보이므로,
-   번역이 도는 동안에도 읽을 수 있다. */
-function koBtn(){return $("#bko");}
-function setKo(on,label){
-  const b=koBtn(); if(!b)return;
-  b.classList.toggle("primary",!!on);
-  b.textContent=label||(on?"EN":"KO");
-  b.title=on?"원문(영어)으로 되돌리기":"본문을 한국어로 (이 PC 안에서 번역합니다)";
-}
-async function paintLang(){
-  if(S.sel<0)return;
-  const r=await api().doc_lang(S.sel,S.lang);
-  if(r&&r.ok&&r.doc)renderDoc(r.doc,{keepTop:true});
-}
-async function toggleKo(){
-  if(S.sel<0)return;
-  if(S.lang==="ko"){S.lang="en";setKo(false);await paintLang();return;}
-  S.lang="ko";setKo(true);await paintLang();
-  if(S.trDone>=S.trTotal&&S.trTotal>0)return;      /* 이미 다 되어 있다 */
-  const r=await api().translate(S.sel);
-  if(!r||!r.ok){toast((r&&r.why)||"번역을 시작하지 못했습니다");return;}
-  setKo(true,"번역 중…");
-}
-
-function renderDoc(d,opt){
-  opt=opt||{};
-  const box=$("#doc");
-  if(!d.extracted){
-    S.waiting=d.queued?($("#dtitle").textContent||""):null;
-    const msg=d.queued==="running"
-      ?["추출 중…","끝나면 바로 보여 드립니다"]
-      :d.queued==="queued"
-      ?["곧 추출됩니다","이 논문을 맨 앞으로 당겼습니다"]
-      :["추출 안 됨","위쪽 <b>이 논문만</b> 을 누르면 이 한 편을 처리합니다"];
-    box.innerHTML='<div class="empty">'+msg[0]
-      +'<br><span style="font-size:11.5px;color:#b3b9c2">'+msg[1]+'</span></div>';
-    $("#foot").textContent=d.error||"";return;}
-  S.waiting=null;
-  const keep=opt.keepTop?box.scrollTop:0;
-  box.innerHTML='<article id="art"></article>';
-  const art=$("#art");
-  art.innerHTML=d.html||"";
-  linkCites(art);
-  linkFigs(art);
-  if(d.sha1!==undefined){
-    S.trDone=d.tr_done||0;S.trTotal=d.tr_total||0;
-    if(d.lang)S.lang=d.lang;
-    koBtn().disabled=false;
-    setKo(S.lang==="ko");
-  }
-  box.scrollTop=keep;
-  const f=$("#foot");f.textContent="";
-  const s=document.createElement("span");s.textContent=d.info||"";f.appendChild(s);
-  if(d.notes&&d.notes.length){
-    const b=document.createElement("button");b.className="more";
-    b.textContent="자세히 "+d.notes.length;
-    b.onclick=()=>{const n=$("#notes");n.classList.toggle("on");
-      if(n.classList.contains("on")){n.innerHTML="<ul>"+d.notes.map(x=>
-        "<li>"+x.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))
-        +"</li>").join("")+"</ul>";}};
-    f.appendChild(b);}
-  if(d.json){const b=document.createElement("button");b.className="more";
-    b.textContent="저장된 곳 열기";
-    b.onclick=()=>api()&&api().reveal(d.json);f.appendChild(b);}
-}
-
-/* 칩이 많으면 접어 두었다가 눌러서 펼친다 */
-$("#doc").addEventListener("click",e=>{
-  const b=e.target.closest(".chipmore");if(!b)return;
-  b.parentNode.querySelectorAll(".chip.hid").forEach(c=>c.classList.remove("hid"));
-  b.remove();});
-
-/* 참고문헌 목록이 있으면 본문 [15] 를 그 항목으로 가는 링크로 바꾼다.
-   렌더러가 링크를 직접 넣어주면 그대로 쓰고, 없으면 여기서 이어준다. */
-function linkCites(art){
-  if(!art.querySelector('[id^="ref-"]'))return;
-  art.querySelectorAll("span.cite").forEach(s=>{
-    const m=s.textContent.match(/^\[\s*(\d{1,3})\s*\]$/);
-    if(!m||!art.querySelector('#ref-'+m[1]))return;
-    const a=document.createElement("a");
-    a.className="cite";a.href="#ref-"+m[1];a.textContent=s.textContent;
-    s.replaceWith(a);});
-}
-
-/* 본문의 'Figure 1'·'Fig. 2' 를 그림으로 가는 링크로. 렌더러가 앵커를 주지
-   않으므로 화면에서 만든다 — 있는 그림에만 건다(없는 번호는 그냥 글자). */
-const _FIGREF=/\bfigs?\.?\s*(\d{1,2})|\bfigures?\s*(\d{1,2})/gi;
-function linkFigs(art){
-  if(!art.querySelector('[id^="fig-"]'))return;
-  const walk=document.createTreeWalker(art,NodeFilter.SHOW_TEXT,{
-    acceptNode(n){
-      /* 캡션·제목·이미 링크인 곳은 건드리지 않는다 */
-      if(!n.nodeValue||!/fig/i.test(n.nodeValue))return NodeFilter.FILTER_REJECT;
-      const p=n.parentElement;
-      if(!p||p.closest("a,figcaption,h1,h2,h3,h4,code"))return NodeFilter.FILTER_REJECT;
-      return NodeFilter.FILTER_ACCEPT;}});
-  const hits=[];for(let n;(n=walk.nextNode());)hits.push(n);
-  hits.forEach(node=>{
-    const t=node.nodeValue;let last=0,frag=null;
-    _FIGREF.lastIndex=0;
-    for(let m;(m=_FIGREF.exec(t));){
-      const num=m[1]||m[2];
-      /* 'Supplementary Figure 1' 은 본문 Figure 1 이 아니다 — 앵커도 본문
-         그림에만 붙는다(figures_html). 앞말을 보고 건너뛴다. */
-      if(/supp(?:l|lementary)?\.?\s*$/i.test(t.slice(Math.max(0,m.index-16),m.index)))
-        continue;
-      if(!art.querySelector("#fig-"+num))continue;
-      frag=frag||document.createDocumentFragment();
-      if(m.index>last)frag.appendChild(document.createTextNode(t.slice(last,m.index)));
-      const a=document.createElement("a");
-      a.className="figref";a.href="#fig-"+num;a.textContent=m[0];
-      frag.appendChild(a);last=m.index+m[0].length;}
-    if(frag){
-      if(last<t.length)frag.appendChild(document.createTextNode(t.slice(last)));
-      node.replaceWith(frag);}});
-}
-
-/* ── PDF: 모든 쪽을 이어 붙이고, 보이는 곳만 그린다 ──────── */
-function buildPdf(r){
-  const sc=$("#scroll");sc.innerHTML="";
-  if(S.io){S.io.disconnect();S.io=null;}
-  S.key=r.key;S.pages=r.pages||[];S.els=[];S.zoom=1;
-  if(!S.pages.length){
-    sc.innerHTML='<div class="empty">'+(r.pdf_error?"PDF 를 열지 못했습니다":"빈 PDF")+'</div>';
-    $("#pgno").textContent="—";return;}
-  const frag=document.createDocumentFragment();
-  S.pages.forEach((wh,i)=>{const d=document.createElement("div");
-    d.className="pg";d.dataset.i=i;
-    frag.appendChild(d);S.els.push(d);});
-  sc.appendChild(frag);
-  layout();
-  S.io=new IntersectionObserver(ents=>{
-    for(const e of ents){ if(e.isIntersecting) load(e.target); else drop(e.target); }},
-    {root:sc,rootMargin:"1400px 0px"});
-  S.els.forEach(d=>S.io.observe(d));
-  sc.scrollTop=0;$("#pgno").textContent="1 / "+S.pages.length;
-}
-function layout(keep){
-  if(!S.pages.length)return;
-  const sc=$("#scroll");
-  const anchor=keep?(sc.scrollTop+sc.clientHeight/2)/Math.max(sc.scrollHeight,1):0;
-  const avail=Math.max(160,sc.clientWidth-34);
-  S.fitW=avail;
-  const W=Math.round(S.fitW*S.zoom);
-  S.bucket=Math.min(2200,Math.max(700,Math.ceil(W*DPR/200)*200));
-  S.els.forEach((d,i)=>{const p=S.pages[i];
-    d.style.width=W+"px";d.style.height=Math.round(W*p[1]/p[0])+"px";});
-  if(keep)sc.scrollTop=anchor*sc.scrollHeight-sc.clientHeight/2;
-  S.els.forEach(d=>{if(d.firstChild)load(d);});
-}
-function load(d){
-  const url="/page?k="+S.key+"&i="+d.dataset.i+"&w="+S.bucket;
-  let img=d.firstChild;
-  if(img&&img.getAttribute("src")===url)return;
-  if(!img){img=new Image();img.decoding="async";d.appendChild(img);}
-  img.setAttribute("src",url);
-}
-function drop(d){ if(d.firstChild)d.removeChild(d.firstChild); }
-function zoom(f){S.zoom=Math.max(.3,Math.min(4,S.zoom*f));layout(true);}
-$("#zi").onclick=()=>zoom(1.2); $("#zo").onclick=()=>zoom(1/1.2);
-$("#zf").onclick=()=>{S.zoom=1;layout(true);};
-$("#scroll").addEventListener("wheel",e=>{
-  if(e.ctrlKey){e.preventDefault();zoom(e.deltaY<0?1.12:1/1.12);}},{passive:false});
-let rafOn=false;
-$("#scroll").addEventListener("scroll",()=>{
-  if(rafOn||!S.pages.length)return;rafOn=true;
-  requestAnimationFrame(()=>{rafOn=false;
-    const sc=$("#scroll"),y=sc.scrollTop+50;let n=1;
-    for(let i=0;i<S.els.length;i++){if(S.els[i].offsetTop<=y)n=i+1;else break;}
-    $("#pgno").textContent=n+" / "+S.pages.length;});});
-let rt=null;
-window.addEventListener("resize",()=>{clearTimeout(rt);
-  rt=setTimeout(()=>{layout(true);renderPath();},120);});
-
-/* ── 분할선 ───────────────────────────────────────────────
-   폭을 px 로 굳히지 않고 **비율(fr)** 로 유지한다 — 창 크기를 바꿔도
-   1 : 2 : 2 로 잡아둔 배분이 그대로 따라간다. 분할선을 두 번 누르면 기본값.
-   PDF 는 늘 **폭맞춤**이다(zoom=1 이 곧 폭맞춤. layout() 이 칸 너비에서 다시 잰다). */
-const DEF_COLS="minmax(150px,1fr) 1px minmax(220px,2fr) 1px minmax(320px,2fr)";
-(function(){
-  let cur=null,x0=0,a0=0,b0=0,c0=0;
-  const cols=$("#cols"), MIN=150;
-  const put=(a,b,c)=>{cols.style.gridTemplateColumns=
-    a.toFixed(3)+"fr 1px "+b.toFixed(3)+"fr 1px "+c.toFixed(3)+"fr";};
-  document.querySelectorAll(".split").forEach(s=>{
-    s.title="끌어서 폭 조절 · 두 번 누르면 기본 비율(1 : 2 : 2)";
-    s.addEventListener("dblclick",()=>{cols.style.gridTemplateColumns=DEF_COLS;layout(true);});
-    s.addEventListener("mousedown",e=>{
-      cur=+s.dataset.s;x0=e.clientX;
-      const st=getComputedStyle(cols).gridTemplateColumns.split(" ").map(parseFloat);
-      a0=st[0];b0=st[2];c0=st[4];
-      document.body.style.cursor="col-resize";e.preventDefault();});});
-  let pend=false;
-  window.addEventListener("mousemove",e=>{
-    if(cur===null)return;
-    const dx=e.clientX-x0;
-    if(cur===0){const a=Math.max(MIN,Math.min(a0+b0-MIN,a0+dx));put(a,a0+b0-a,c0);}
-    else{const b=Math.max(MIN,Math.min(b0+c0-MIN,b0+dx));put(a0,b,b0+c0-b);}
-    /* PDF 도 끄는 동안 같이 커진다. 놓을 때까지 옛 크기로 있으면 얼마나
-       넓혀야 할지 가늠이 안 된다. 프레임당 한 번만 다시 잡는다. */
-    if(!pend){pend=true;requestAnimationFrame(()=>{pend=false;layout(true);});}});
-  window.addEventListener("mouseup",()=>{if(cur===null)return;
-    cur=null;document.body.style.cursor="";layout(true);});
-})();
-
-/* ── 본문 안 링크: [15] → 아래 참고문헌 15번으로 부드럽게 ──────────
-   참고문헌 절 규격이 확정되기 전이라도, 앵커(#ref-15)가 오면 바로 동작한다. */
-function jumpTo(t){
-  /* 뛰기 전에 지금 자리를 이력에 남긴다 — 뒤로 눌러 돌아올 수 있게 */
-  histPush({p:S.sel,top:Math.max(0,t.offsetTop-dbox().clientHeight/2)});
-  t.scrollIntoView({behavior:"smooth",block:"center"});
-  /* 착지점이 빈 앵커면 감싼 문단을 물들인다 — 빈 태그는 강조해도 안 보인다 */
-  const box=(t.textContent||"").trim()?t:(t.parentElement||t);
-  box.classList.add("hit");setTimeout(()=>box.classList.remove("hit"),1400);
-}
-
-/* ── 참고문헌 미리보기 ────────────────────────────────────────────
-   [15] 를 누르면 아래로 뛰지 않고 그 자리에 띄운다. 읽던 자리를 잃지 않는
-   것이 목적이다. 목록으로 가고 싶으면 팝업 안에서 한 번 더 누르면 된다. */
-let popFor=null;
-function popClose(){
-  const p=$("#refpop"); if(p)p.remove();
-  if(popFor){popFor.classList.remove("on");popFor=null;}
-}
-function refPop(a,t){
-  if(popFor===a){popClose();return;}          /* 같은 것을 또 누르면 닫는다 */
-  popClose();
-  const p=document.createElement("div");
-  p.id="refpop";
-  const num=(a.textContent||"").replace(/[\[\]\s]/g,"");
-  p.innerHTML=(num?'<span class="num">참고문헌 '+num+'</span>':"")+
-              '<div class="body"></div>'+
-              '<button class="go" type="button">목록에서 보기 →</button>';
-  /* 항목 글만 넣는다. 원본을 그대로 옮기면 id 가 겹쳐 다음 클릭이 팝업을
-     가리키게 된다 — textContent 로 담아 그런 일을 막는다. */
-  p.querySelector(".body").textContent=(t.textContent||"").trim();
-  p.querySelector(".go").onclick=()=>{popClose();jumpTo(t);};
-  document.body.appendChild(p);
-
-  /* 자리: 링크 아래에 붙이되 화면 밖으로 나가지 않게 접는다 */
-  const r=a.getBoundingClientRect(),b=p.getBoundingClientRect(),M=10;
-  let left=Math.min(Math.max(M,r.left-12),innerWidth-b.width-M);
-  let top=r.bottom+8;
-  if(top+b.height>innerHeight-M)top=Math.max(M,r.top-b.height-8);
-  p.style.left=left+"px";p.style.top=top+"px";
-  a.classList.add("on");popFor=a;
-}
-/* ── 그림 우클릭: 복사·저장 ────────────────────────────────────────
-   <img> 가 가리키는 곳이 저장소 안 내부 주소라 브라우저 기본 저장이 먹지
-   않는다. 복사는 클립보드로 바로, 저장은 파이썬에 파일 복사를 시킨다. */
-function figMenuClose(){const m=$("#figmenu");if(m)m.remove();}
-function figSrcParts(img){
-  const u=new URL(img.getAttribute("src"),location.href);
-  return {sha:u.searchParams.get("s")||"",name:u.searchParams.get("f")||""};
-}
-$("#doc").addEventListener("contextmenu",e=>{
-  const img=e.target.closest(".fig img");
-  if(!img)return;
-  e.preventDefault();figMenuClose();popClose();
-  const m=document.createElement("div");
-  m.id="figmenu";
-  m.innerHTML='<button type="button" data-a="copy">이미지 복사</button>'+
-              '<button type="button" data-a="save">다른 이름으로 저장…</button>';
-  document.body.appendChild(m);
-  const b=m.getBoundingClientRect(),M=8;
-  m.style.left=Math.min(e.clientX,innerWidth-b.width-M)+"px";
-  m.style.top=Math.min(e.clientY,innerHeight-b.height-M)+"px";
-  m.onclick=async ev=>{
-    const act=(ev.target.dataset||{}).a; if(!act)return;
-    figMenuClose();
-    const {sha,name}=figSrcParts(img);
-    if(act==="save"){
-      const r=await api().save_figure(sha,name);
-      if(r&&r.ok)toast("저장했습니다");
-      else if(r&&r.why)toast(r.why);
-      return;
-    }
-    try{
-      const blob=await (await fetch(img.src)).blob();
-      /* 클립보드는 PNG 만 확실히 받는다. JPEG 는 캔버스로 옮겨 담는다. */
-      let item=blob;
-      if(blob.type!=="image/png"){
-        item=await new Promise(res=>{
-          const im=new Image();
-          im.onload=()=>{const c=document.createElement("canvas");
-            c.width=im.naturalWidth;c.height=im.naturalHeight;
-            c.getContext("2d").drawImage(im,0,0);c.toBlob(res,"image/png");};
-          im.src=URL.createObjectURL(blob);});
-      }
-      await navigator.clipboard.write([new ClipboardItem({"image/png":item})]);
-      toast("이미지를 복사했습니다");
-    }catch(err){toast("복사하지 못했습니다");}
-  };
-},true);
-window.addEventListener("mousedown",e=>{
-  if($("#figmenu")&&!e.target.closest("#figmenu"))figMenuClose();},true);
-window.addEventListener("scroll",figMenuClose,true);
-window.addEventListener("resize",figMenuClose);
-
-window.addEventListener("keydown",e=>{if(e.key==="Escape"){popClose();figMenuClose();}},true);
-window.addEventListener("mousedown",e=>{
-  /* 인용·그림 링크는 예외다 — 여기서 닫아 버리면 뒤이은 click 의 '또 누르면
-     닫기' 토글이 무력해져 닫혔다가 즉시 다시 열린다. */
-  if($("#refpop")&&!e.target.closest("#refpop")&&!e.target.closest("a.cite,a.figref"))
-    popClose();},true);
-/* 자리를 fixed 로 잡으므로, 스크롤·창 크기 변화로 링크가 움직이면 닫는다 —
-   안 그러면 카드만 허공에 남는다. 다른 칸(PDF 쪽) 스크롤도 마찬가지다. */
-window.addEventListener("scroll",popClose,true);
-window.addEventListener("resize",popClose);
-
-$("#doc").addEventListener("click",e=>{
-  const a=e.target.closest('a[href^="#"]');
-  if(!a)return;
-  e.preventDefault();
-  const id=a.getAttribute("href").slice(1);
-  const t=document.getElementById(id);
-  if(!t)return;
-  /* 참고문헌만 팝업이다. 목록이 맨 아래라 뛰면 읽던 자리를 잃는다.
-     그림·표는 이제 처음 인용된 문단 뒤에 있으니 그냥 그리로 간다(가깝다). */
-  if(id.indexOf("ref-")===0){refPop(a,t);return;}
-  jumpTo(t);
-});
-
-/* ── 추출 ───────────────────────────────────────────────── */
-$("#bko").onclick=toggleKo;
-$("#bone").onclick=async()=>{
-  if(S.sel<0){toast("왼쪽에서 논문을 먼저 고르세요");return;}
-  const r=await api().extract("one",S.sel); if(!r.ok)toast(r.why||"시작하지 못했습니다");};
-$("#ball").onclick=async()=>{
-  const c=await api().count_todo();
-  const n=c.todo||c.total;
-  const msg=(c.todo?`아직 추출되지 않은 ${c.todo}편을 처리합니다.`
-                   :`모두 추출되어 있습니다. ${c.total}편을 다시 처리합니다.`)
-    +"\n분량에 비례해 오래 걸리고, 중간에 멈춰도 다시 하면 이어집니다.";
-  if(!await ask("전부 추출",msg,"시작"))return;
-  const r=await api().extract("all"); if(!r.ok)toast(r.why||"시작하지 못했습니다");};
-$("#bstop").onclick=()=>{                       /* 눌린 티가 바로 나야 한다 */
-  $("#bstop").textContent="중지 중…";$("#bstop").disabled=true;
-  $("#pstage").textContent="이 논문을 마치면 멈춥니다";api().cancel();};
-$("#bopen").onclick=async()=>{const r=await api().pick_folder();
-  if(r&&r.ok)toast("폴더를 읽었습니다");};
-
-/* ── 파이썬이 밀어넣는 신호 ─────────────────────────────── */
-window.pnx={on(m){
-  if(m.kind==="status"){          /* 폴더 훑기처럼 편수가 없는 일 */
-    if(m.text!==undefined){$("#pstage").textContent=m.text;
-      $("#pname").textContent="";$("#peta").textContent="";}
-    if(m.pct!==null&&m.pct!==undefined)$("#bar").firstChild.style.width=m.pct+"%";
-    if(m.busy!==undefined&&m.busy!==null)showProg(m.busy||S.busy);
-  }else if(m.kind==="prog"){
-    $("#pname").textContent=m.name?("지금: "+m.name):"";
-    $("#pstage").textContent=m.stage||"";
-    $("#peta").textContent=m.eta?etaText(m.eta):"";   /* 못 믿을 값은 아예 안 쓴다 */
-    $("#bar").firstChild.style.width=(m.pct||0)+"%";
-  }else if(m.kind==="mark"){
-    const f=S.files.find(x=>x.name===m.name);
-    if(f&&!f.done){f.done=true;
-      const r=$("#list").querySelector('.row[data-i="'+S.files.indexOf(f)+'"]');
-      if(r)r.classList.add("done");
-      updateCount();
-      /* 기다리던 논문이 끝났으면 말없이 다시 열어 결과를 보여준다 */
-      if(S.waiting&&S.waiting===m.name&&S.sel>=0&&S.files[S.sel]&&
-         S.files[S.sel].name===m.name){S.waiting=null;
-        openPaper(S.sel,{noHist:true,top:0});}}
-  }else if(m.kind==="trans"){
-    /* 번역 진행. 다 될 때까지 기다리게 하지 않고 **틈틈이 다시 그린다** —
-       된 문단부터 한국어로 바뀐다. 너무 자주 그리면 읽는 중에 글이 튄다. */
-    if(m.state==="done"){
-      setKo(S.lang==="ko");
-      if(S.lang==="ko")paintLang();
-    }else if(m.total){
-      S.trDone=m.done;S.trTotal=m.total;
-      setKo(true,"번역 중 "+Math.floor(100*m.done/m.total)+"%");
-      if(S.lang==="ko"&&m.done-(S.lastPaint||0)>=8){S.lastPaint=m.done;paintLang();}
-    }
-  }else if(m.kind==="grobid"){
-    /* 원장은 GROBID 가 뭔지 알 필요가 없다. 준비 상태만 조용히 보이면 된다. */
-    const g=$("#gro");
-    g.className=m.state==="ok"?"ok":
-      (m.state==="starting"||m.state==="installing")?"starting":
-      m.state==="off"?"off":"";
-    /* 내려받는 중(퍼센트)과 켜지기를 기다리는 중(초)은 다른 일이다. */
-    g.lastChild.textContent=m.state==="ok"?"논문 분석기 준비됨":
-      m.state==="installing"?("논문 분석기 설치 중… "+(m.sec||0)+"%"):
-      m.state==="starting"?("논문 분석기 준비 중… "+(m.sec||0)+"초"):
-      m.state==="off"?"간이 분석으로 진행":"분석기 확인 중";
-    g.title=m.state==="installing"
-      ?"처음 한 번만 내려받습니다(약 435MB). 다음부터는 바로 켜집니다"
-      :m.state==="off"
-      ?"논문 분석기를 켜지 못해 PDF 자체 텍스트만 씁니다 — 추출은 계속됩니다":"";
-  }else if(m.kind==="folder"){
-    S.hist=[];S.hidx=-1;S.mem={};S.sel=-1;S.cursor=-1;navBtns();
-    setPath(m.path);setFiles(m.files);
-    if(m.last!==undefined)S.last=m.last;
-    autoPick();
-  }else if(m.kind==="run"){
-    S.busy=!!m.on;showProg(S.busy);
-    $("#bstop").style.display=S.busy?"":"none";
-    $("#bstop").textContent="중지";$("#bstop").disabled=false;
-    if(m.on){$("#pstage").textContent="시작";
-      $("#pname").textContent="";$("#peta").textContent="";
-      $("#bar").firstChild.style.width="0%";}
-    draw();
-    if(!m.on){
-      if(m.files)setFiles(m.files);
-      if(S.sel>=0)openPaper(S.sel);
-      report(m);
-    }
-  }}};
-function etaText(s){
-  if(s<75)return "1분 이내";
-  if(s<3600)return "약 "+Math.round(s/60)+"분 남음";
-  return "약 "+(s/3600).toFixed(1)+"시간 남음";}
-function showProg(on){
-  const e=$("#prog");e.classList.toggle("on",!!on);
-  /* 놀 때는 편수 한 줄만 남긴다(자리를 거의 안 먹는다) */
-  e.classList.toggle("idle",!on&&S.files.length>0);
-  if(!on){$("#pname").textContent="";$("#pstage").textContent="";
-    $("#peta").textContent="";}}
-/* 끝난 뒤 보고 — 실패를 조용히 넘기지 않는다 */
-function report(m){
-  const ok=m.done||0, nf=m.nfail||0;
-  if(!nf){toast(m.stopped?("중지했습니다 — "+ok+"편까지 저장됨")
-                         :(ok+"편 추출을 마쳤습니다"));return;}
-  const list=(m.fails||[]).map(f=>"· "+f.name+"\n   "+f.why).join("\n");
-  ask((m.stopped?"중지됨 — ":"")+ok+"편 완료 · "+nf+"편 실패",
-      "다음 논문은 처리하지 못했습니다. 나머지는 정상 저장됐습니다.\n\n"+list,
-      "확인",true);
-}
-
-/* ── 시작 ───────────────────────────────────────────────── */
-window.addEventListener("pywebviewready",async()=>{
-  S.ready=true;
-  const st=await api().state();
-  setPath(st.path);
-  if(st.last)S.last=st.last;
-  if(st.files&&st.files.length){setFiles(st.files);autoPick();}else draw();
-  window.pnx.on({kind:"grobid",state:st.grobid,sec:st.sec});
-});
-fetch("/files").then(r=>r.json()).then(d=>{
-  if(d.path)setPath(d.path);
-  if(d.files&&d.files.length&&!S.files.length)setFiles(d.files);}).catch(()=>{});
-</script></body></html>
-"""
+from pubnexus.ui import INDEX_HTML
 
 
-# ══════════════════════════════════════════════════════════════════════
 def _screen() -> tuple[int, int]:
     """작업 화면 크기. 창이 화면보다 커지면 분할선이 밖으로 나간다."""
     try:
@@ -2204,11 +1984,12 @@ def paint_caption(timeout: float = 8.0) -> bool:
         return False
 
 
-def build(folder: str | Path | None = None):
+def build(folder: str | Path | None = None, *, hidden: bool = False):
     """창을 만들어 돌려준다(테스트에서 직접 몰아보기 위해 분리)."""
     import webview
 
     app = App()
+    app._hidden = hidden
     port = serve(app)
     api = Api(app)
     # 창을 **최대화해서** 띄운다. 세 칸을 나란히 보는 화면이라 넓을수록 좋고,
@@ -2216,11 +1997,26 @@ def build(folder: str | Path | None = None):
     # 창 오른쪽이 화면 밖으로 나가는 일을 원천적으로 막는다.
     w, h = _screen()
     win = webview.create_window(
-        "PDF Extractor", url=f"http://127.0.0.1:{port}/", js_api=api,
+        "문서 추출기", url=f"http://127.0.0.1:{port}/", js_api=api,
         width=min(1360, max(1120, w - 120)), height=min(860, max(660, h - 120)),
-        min_size=(1120, 660), maximized=True,
+        min_size=(1120, 660), maximized=not hidden, hidden=hidden,
         background_color="#ffffff", text_select=True)
     app.window = win
+    win.events.closing += app.request_close
+
+    def bind_drop() -> None:
+        from webview.dom import DOMEventHandler
+        def dropped(event):
+            result = app.add_dropped_files(event)
+            app.push('notice', {'text': (f"{result['n']}개 문서를 추가했습니다." if result.get('ok') else
+                                         result.get('why', '파일을 추가하지 못했습니다.'))})
+        try:
+            body = win.dom.get_element('body')
+            body.on('dragover', DOMEventHandler(lambda event: None, prevent_default=True))
+            body.on('drop', DOMEventHandler(dropped, prevent_default=True))
+        except Exception:
+            utils.log('파일 끌어놓기를 연결하지 못했습니다. 파일/폴더 추가는 계속 사용할 수 있습니다.')
+    win.events.loaded += bind_drop
 
     # 시작 폴더: 지난번에 열었던 곳 → 설정 → 없음.
     # 빈 값으로 resolve 하면 프로젝트 루트가 나와 리포 전체를 훑게 된다.
@@ -2235,24 +2031,34 @@ def build(folder: str | Path | None = None):
 
     def boot() -> None:
         paint_caption()          # 제목표시줄을 본문과 같은 흰색으로(창이 뜬 뒤에)
-        app.grobid.ensure_async()
         try:
             if start and start.is_dir():
                 app.set_folder(start)
         except Exception:  # noqa: BLE001
             utils.log(traceback.format_exc())
+        app.start_auto_update(hidden=hidden)
 
     return app, win, boot
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == '--ocr-worker':
+        from pubnexus.local_ocr import worker_cli
+        raise SystemExit(worker_cli(sys.argv[2]))
     import webview
-    app, win, boot = build()
+    test_port = os.environ.get('PNX_TEST_DEBUG_PORT')
+    if '--hidden' in sys.argv[1:] and test_port:
+        port = int(test_port)
+        if not 1 <= port <= 65535:
+            raise ValueError('검증용 포트 범위는 1..65535입니다.')
+        webview.settings['REMOTE_DEBUGGING_PORT'] = port
+    app, win, boot = build(hidden='--hidden' in sys.argv[1:])
     try:
         webview.start(lambda: threading.Thread(target=boot, daemon=True).start(),
                       debug=bool(os.environ.get("PNX_DEBUG")), private_mode=True)
     finally:
         app.renderer.close_all()
+        app.apply_update_on_exit()
 
 
 if __name__ == "__main__":

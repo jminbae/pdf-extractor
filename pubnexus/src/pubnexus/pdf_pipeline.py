@@ -1,0 +1,58 @@
+"""Select a published PDF converter after the existing paper preservation guard."""
+from __future__ import annotations
+
+import copy
+
+from . import pdf_markdown, store
+from .general_pdf import ExtractionCancelled
+
+
+def current(doc):
+    identity = (doc.get('pdf_conversion_engine') or
+                ((doc.get('extraction_report') or {}).get('engine') or {}).get('identity') or doc.get('sdk_engine'))
+    return (doc.get('source') == 'pdf_sdk' and isinstance(doc.get('sdk_markdown'), str)
+            and identity == pdf_markdown.engine_id())
+
+
+def upgrade_general(doc, source, *, cancel=None, progress=None):
+    # Healthy structured papers never enter the general conversion engine.
+    if current(doc) or doc.get('source') not in ('pdf_general', 'pdf_sdk'):
+        return doc
+    if not pdf_markdown.available():
+        return doc
+    try:
+        sha = store.file_sha1(source)
+        converted = pdf_markdown.convert(source, store.figs_dir(sha), progress=progress, cancel=cancel)
+        # Reuse the existing loss guard as a check, never as a layout algorithm.
+        # A layout model excluding a whole body page must not replace its text.
+        if (doc.get('source') == 'pdf_general' and
+                (doc.get('source_map') or {}).get('coordinate_space') == 'pymupdf_unrotated_points'):
+            from .general_pdf import _coverage_sections, _fold, _sampled_coverage
+            baseline, _ = _coverage_sections(doc.get('body_text') or [],
+                                             (doc.get('extraction_report') or {}).get('pages') or [])
+            coverage = _sampled_coverage(baseline, _fold(converted.get('sdk_markdown') or ''))
+            coverage['baseline_available'] = any(page['native_chars'] for page in coverage['page_coverage'])
+            if coverage['wholly_unrepresented_pages'] or (coverage['baseline_available'] and coverage['sampled_text_coverage'] < .50):
+                raise pdf_markdown.PDFMarkdownError('기존 원문 검사에서 본문 누락이 발견됐습니다.', 'incomplete_body')
+            converted.setdefault('extraction_report', {})['native_coverage'] = coverage
+    except ExtractionCancelled:
+        raise
+    except Exception as error:
+        if getattr(error, 'code', None) in ('source_changed', 'asset_conflict'):
+            raise
+        # Preserve the already validated native/OCR result on unsupported scans,
+        # timeouts, missing resources or converter failure. Never label it SDK.
+        fallback = copy.deepcopy(doc)
+        report = fallback.setdefault('extraction_report', {})
+        if report.get('status') != 'failed':
+            report['status'] = 'partial'
+        report.setdefault('warnings', []).append(f'공개 PDF 엔진을 적용하지 못해 기존 추출을 보존했습니다: {error}')
+        fallback['pdf_conversion_attempt'] = pdf_markdown.engine_id()
+        return fallback
+    converted['sha1'] = sha
+    converted['source_file'] = str(source)
+    converted['pdf_conversion_engine'] = pdf_markdown.engine_id()
+    # Source-native coverage/OCR diagnostics are provenance, never extra body or
+    # stale GROBID references appended to the published converter's Markdown.
+    converted['native_validation'] = copy.deepcopy(doc.get('extraction_report') or {})
+    return converted

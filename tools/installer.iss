@@ -1,7 +1,7 @@
 ﻿; PDF Extractor 설치프로그램 (Inno Setup 6)
 ;
 ;   build_exe.ps1 이 부른다. 직접 부를 때는 프로그램 폴더를 넘긴다:
-;     ISCC.exe /DAppDir=D:\pnxb\dist\PDF Extractor tools\installer.iss
+;     ISCC.exe /DAppDir=... /DAppVer=... tools\installer.iss
 ;
 ; 왜 설치프로그램인가
 ;   PyInstaller --onefile 로 만든 exe 를 Defender 가 Trojan:Win32/Wacatac.H!ml
@@ -18,7 +18,9 @@
 #endif
 
 #define AppName "PDF Extractor"
-#define AppVer "1.1"
+#ifndef AppVer
+  #error AppVer is required. Use build_exe.ps1 to read pubnexus/version.py.
+#endif
 #define AppExe "PDF Extractor.exe"
 
 [Setup]
@@ -58,8 +60,15 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "지금 실행"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Description: "지금 실행"; Flags: nowait postinstall skipifsilent; Check: not IsUpdateRestart
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: IsUpdateRestart
 
-; 지울 때: 프로그램만 지운다. 뽑아 둔 정본·그림(%LOCALAPPDATA%\PDF Extractor)과
-; 분석 엔진은 남긴다 — 다시 깔면 그대로 이어서 쓴다. 사용자가 뽑은 결과물을
-; 설치 관리자가 말없이 지우는 일은 없어야 한다.
+[Code]
+function IsUpdateRestart: Boolean;
+begin
+  Result := ExpandConstant('{param:PNXRESTART|0}') = '1';
+end;
+
+// 지울 때: 프로그램만 지운다. 뽑아 둔 정본·그림(%LOCALAPPDATA%\PDF Extractor)과
+// 분석 엔진은 남긴다 — 다시 깔면 그대로 이어서 쓴다. 사용자가 뽑은 결과물을
+// 설치 관리자가 말없이 지우는 일은 없어야 한다.

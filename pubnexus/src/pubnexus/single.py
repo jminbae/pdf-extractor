@@ -94,7 +94,8 @@ def is_extracted(pdf_path: str | Path, out_json: str | Path | None = None) -> bo
 
 def extract_one(pdf_path: str | Path, config: dict | None = None, *,
                 out_json: str | Path | None = None,
-                on_progress=None, use_grobid: bool = True) -> dict:
+                on_progress=None, use_grobid: bool = True,
+                cancel=None, on_fulltext_progress=None) -> dict:
     """PDF 한 편 → 정본 문서 dict. out_json 을 주면 그 경로에 저장한다.
 
     처리 순서(설계 원칙 그대로):
@@ -110,7 +111,8 @@ def extract_one(pdf_path: str | Path, config: dict | None = None, *,
     cfg = _prepare_cfg(config)
     ctx = _Ctx(cfg)
     return _extract(Path(pdf_path), cfg, ctx, out_json=out_json,
-                    on_progress=on_progress, use_grobid=use_grobid)
+                    on_progress=on_progress, use_grobid=use_grobid,
+                    cancel=cancel, on_fulltext_progress=on_fulltext_progress)
 
 
 def extract_folder(folder: str | Path, config: dict | None = None, *,
@@ -236,7 +238,7 @@ def extract_folder(folder: str | Path, config: dict | None = None, *,
 
 # ── 파이프라인 본체 ──────────────────────────────────────────────────
 def _extract(pdf: Path, cfg: dict, ctx: "_Ctx", *, out_json, on_progress,
-             use_grobid: bool) -> dict:
+             use_grobid: bool, cancel=None, on_fulltext_progress=None) -> dict:
     from . import inventory
 
     pdf = Path(pdf)
@@ -299,7 +301,15 @@ def _extract(pdf: Path, cfg: dict, ctx: "_Ctx", *, out_json, on_progress,
 
     # 4) 본문 — PMC 원문 XML → GROBID → PyMuPDF 폴백
     _emit(on_progress, "fulltext", 3, steps, pdf.name, "본문 추출")
-    doc = _fulltext(pdf, meta, rec, cfg, ctx, use_grobid, notes)
+    try:
+        doc = _fulltext(pdf, meta, rec, cfg, ctx, use_grobid, notes)
+    except Exception as error:
+        # Paper parsers can reject a book or a single damaged page. The final
+        # native-page guard below gets an independent chance to preserve text.
+        from .schema import Document, Meta
+        notes.append(f"논문 경로 실패 → 일반 PDF 보완: {type(error).__name__}: {error}")
+        doc = Document(paper_id=doi or "", source="pdf_fallback",
+                       meta=Meta(doi=doi, title=meta.get("title") or pdf.stem))
 
     # 5) 조립 — 정본 스키마 dict + 수리 + 품질점수
     _emit(on_progress, "assemble", 4, steps, pdf.name, "정본 조립")
@@ -445,6 +455,15 @@ def _extract(pdf: Path, cfg: dict, ctx: "_Ctx", *, out_json, on_progress,
             notes.append(f"옆 논문 참고문헌 {st['foreign_block']}개 분리")
     except Exception as e:  # noqa: BLE001 — 참조 실패가 본문 추출을 무효화하지 않는다
         notes.append(f"참고문헌 확정 생략: {type(e).__name__}: {e}")
+
+    # Check AFTER destructive paper postprocessing (language/boundary/captions),
+    # but BEFORE saving. Paper-specific filters are never reused by this guard.
+    from . import general_pdf
+    d, general_report = general_pdf.ensure_fulltext(
+        d, pdf, cancel=cancel, progress=on_fulltext_progress)
+    if general_report["used_fallback"]:
+        notes.append("일반 PDF 보완: 페이지별 원문 텍스트 보존(표 구조·읽기 순서 검수 필요)")
+    notes.extend(general_report["warnings"])
 
     try:
         from . import qc

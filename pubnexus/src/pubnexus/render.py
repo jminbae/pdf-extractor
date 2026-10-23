@@ -49,12 +49,20 @@ def _float_number(item: dict, kind: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _table_block(t: dict) -> list[str]:
-    return ["", f"**{t.get('caption') or t['id']}**", "",
-            t.get("markdown") or "*(표 본문을 뽑지 못했습니다)*"]
+def _marked(item: dict, lines: list[str], enabled: bool) -> list[str]:
+    if not enabled:
+        return lines
+    # Marker payload is hex encoded, so untrusted document IDs cannot close HTML.
+    key = str(item.get('_view_id') or item.get('id') or '').encode().hex()
+    return ['', f'<!--pnx-block:{key}-->'] + lines + ['', '<!--pnx-end-->']
 
 
-def _figure_block(f: dict) -> list[str]:
+def _table_block(t: dict, marked: bool = False) -> list[str]:
+    caption = ['', f"**{t['caption']}**", ''] if t.get('caption') else ['']
+    return _marked(t, caption + [t.get("markdown") or "*(표 본문을 뽑지 못했습니다)*"], marked)
+
+
+def _figure_block(f: dict, marked: bool = False) -> list[str]:
     """그림 한 장. 이미지가 있으면 **마크다운 그림**으로 낸다.
 
     `![캡션](fig1.png)` — 경로는 `figures[].image` 그대로(상대경로)다. 화면 쪽은
@@ -64,8 +72,8 @@ def _figure_block(f: dict) -> list[str]:
     cap = (f.get("caption") or "").strip()
     img = (f.get("image") or "").strip()
     if img:
-        return ["", f"![{cap}]({img})"]
-    return ["", f"**{cap}**"] if cap else []
+        return _marked(f, ["", f"![{cap}]({img})"], marked)
+    return _marked(f, ["", f"**{cap}**"], marked) if cap else []
 
 
 class _FloatPlacer:
@@ -76,7 +84,9 @@ class _FloatPlacer:
       · 문단 글자의 'Figure 2'·'Table 1' — 위가 비어 있는 문서를 위한 보완
     """
 
-    def __init__(self, doc: dict) -> None:
+    def __init__(self, doc: dict, marked: bool = False) -> None:
+        self._marked = marked
+        self._native_order = doc.get('source') == 'pdf_general' or str(doc.get('source') or '').startswith('document_')
         self._figs = list(doc.get("figures") or [])
         self._tabs = list(doc.get("tables") or [])
         self._left_f = {id(f): f for f in self._figs}
@@ -97,14 +107,16 @@ class _FloatPlacer:
     def after(self, para: dict, text: str) -> list[str]:
         """이 문단이 처음 부른 그림·표의 마크다운. 없으면 빈 목록."""
         out: list[str] = []
+        if self._native_order:
+            text = ''  # Native document anchors own order; paper mentions are a different contract.
         for t in self._pick(para.get("refs_table"), text,
                             _TAB_MENTION_RE, self._tab_by_id,
                             self._tab_by_num, self._left_t, "tab"):
-            out += _table_block(t)
+            out += _table_block(t, self._marked)
         for f in self._pick(para.get("refs_figure"), text,
                             _FIG_MENTION_RE, self._fig_by_id,
                             self._fig_by_num, self._left_f, "fig"):
-            out += _figure_block(f)
+            out += _figure_block(f, self._marked)
         return out
 
     @staticmethod
@@ -277,7 +289,11 @@ def _clean_lead(text: str) -> tuple[str, str | None]:
     return t.lstrip(), opener
 
 
-def to_markdown(doc: dict, show_citations: bool = True) -> str:
+def to_markdown(doc: dict, show_citations: bool = True, *, source_markers: bool = False) -> str:
+    # A published converter owns this text and reading order. Never run the
+    # paper title/citation/float renderer over it, even for the internal view.
+    if isinstance(doc.get('sdk_markdown'), str):
+        return doc['sdk_markdown']
     m = doc.get("meta", {})
     out: list[str] = []
     out.append(f"# {m.get('title') or doc.get('paper_id')}")
@@ -307,7 +323,8 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
 
     # 그림·표를 **처음 인용된 문단 바로 뒤**에 놓는다(실제 논문 조판과 같다).
     # 맨 아래로 몰면 'Figure 2 에서 보듯' 을 읽을 때마다 끝으로 갔다 돌아와야 한다.
-    placer = _FloatPlacer(doc)
+    placer = _FloatPlacer(doc, source_markers)
+    general = doc.get('source') == 'pdf_general' or str(doc.get('source') or '').startswith('document_')
 
     # 목록에 실제로 있는 지면 번호만 링크 대상으로 삼는다.
     known_nums = {int(r["number"]) for r in (doc.get("references") or [])
@@ -322,7 +339,7 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
         # 첫 문단 머리말 정리 + letter 시작 표지 확보
         opener = None
         if paras:
-            cleaned, opener = _clean_lead(paras[0].get("text", "")) if first_para else \
+            cleaned, opener = _clean_lead(paras[0].get("text", "")) if first_para and not general else \
                 (paras[0].get("text", ""), None)
             if first_para:
                 paras = [dict(paras[0], text=cleaned)] + list(paras[1:])
@@ -358,10 +375,12 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
         for p in paras:
             text = p.get("text", "")
             if not text.strip():
+                if general:
+                    out += placer.after(p, '')
                 continue
             # 인용은 본문 안에 [15] 로 이미 박혀 있다 → 문단 아래에 따로 붙이지
             # 않고, 그 자리에서 눌러 목록으로 뛸 수 있게 링크로 바꾼다.
-            out += ["", _link_citations(text, known_nums)]
+            out += _marked(p, ["", _link_citations(text, known_nums)], source_markers)
             out += placer.after(p, text)        # 이 문단이 처음 부른 그림·표
 
     # 본문에서 한 번도 부르지 않은 것은 갈 자리가 없다 → 끝에 모은다.
@@ -369,9 +388,9 @@ def to_markdown(doc: dict, show_citations: bool = True) -> str:
     if left_t:
         out += ["", "## Tables"]
         for t in left_t:
-            out += _table_block(t)
+            out += _table_block(t, source_markers)
     if left_f:
-        blocks = [b for f in left_f for b in _figure_block(f)]
+        blocks = [b for f in left_f for b in _figure_block(f, source_markers)]
         if blocks:
             out += ["", "## Figures"] + blocks
 
