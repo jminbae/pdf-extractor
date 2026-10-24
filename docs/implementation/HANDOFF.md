@@ -6,7 +6,7 @@
 
 실제 EXE의13쪽PDF(본문73047자/표3/13쪽)·scan OCR·native6형식(DOCX/XLSX/TXT/MD/RTF/HWPX)의 원본 보기·검색·trusted확대·상단MD1click·자료보존/Job/TEMP 검증과 독립 감사는 PASS입니다. native 최종 `frozen-native-viewer/20261024-173807-0c13ac46/receipt.json`은 실제trusted선택→DOM/PNGdecode1031/967/917/931/962/1967ms(숨김focus조건/OSpaint아님)입니다. 앞선2943ms는 CDP입력3왕복까지포함한 잘못된 시계 경계로 false원형을 보존했습니다. PDF/scan의 강제reload 때 pywebview의 오래된list_folders callback 예외 각1건은 기능통과와 별도 알려진로그 한계입니다.
 
-**남은 배포 게이트는71장PPTX의 숨김WebView2 키보드 검증입니다.** r1/r2는 원본 문서 기능이 수행됐지만 Esc가 iframe대신 parent에 전달됐고, r3는 정확한iframe히트테스트에도 child.hasFocus 대기에서timeout했습니다. false영수증/원본무변경/TEMP회수를 보존했습니다. 소유가 검증된 OOPIF의 CDP focus/input/reset 경계를 하네스에서 고치며 생산소스는 변경하지 않습니다. 새 검증기는 native6+기존PDF/scan/71게이트를 유지합니다. 아직1.2.7 tag/공개/설치를 하지 않았고1.2.6은 불변입니다.
+**최종 배포 전 검증은 모두 통과했습니다.** Office71 r5는 첫decode1183ms, 실제 소유 OOPIF의 Ctrl+F·검색닫기Esc·문서닫기Esc/trusted·prevented·원본focus·3회reset ACK/detach, MD/CSV 독립worker·추출중복귀·닫은뒤완료까지 PASS입니다. `frozen-1.2.7-office71-final-r5/receipt.json` SHA `7759258415d93f9d2d0693e46a76307062dfeb05326fe85873ca12ecd909539c`, 하네스 `d929a939b8b784ea8afddaf37b5969838af68aabe041eda47d851c9c1312f26e`입니다. r1~r4 false는 숨김CDP의 parent/child focus 경계 문제로 보존했고, 소유 child의 표준window.focus와 독립session/input/reset으로 하네스만 보완했습니다. 생산소스는 그대로입니다. `build-1.2.7-final-artifacts-verification.json`은 main51/worker4·실물/모델/34+21고지/striprtf원parser·metadata·4종 frozen QA·외부자산 모두 PASS입니다. 지금은 tag/공개3자산 재다운로드/표준설치/자료보존과 설치본 업데이트 확인 전 단계이며 공개·설치1.2.6은 불변입니다.
 
 최신 기준은 **빠른 원본 뷰어가 주 기능, Markdown 추출은 부수 기능**입니다. 폴더 트리 / 문서 리스트·썸네일 / 원본 미리보기를 정돈하고, 저장 완료·대기 등 기본 목록 상태를 없앴습니다. `MD 추출`·`MD 보기`는 상단 직접 버튼이며 삼점 메뉴는 드문 파일정보 동작만 맡습니다. TXT·MD는 추가 추출하지 않습니다. 사용자 데모52545/62724는 별도 private TEMP 사본을 사용하며 유지합니다. 최신 실제 통합 데모59251는 worker의 HWP 대조 후 공개합니다.
 
@@ -16,7 +16,7 @@
 
 개발 App의 실제70MB42장 PPTX first-visible930ms/현재 viewport decode943ms, 실제13쪽 PDF133ms, 합성 DOCX230ms/TXT64ms를 확인했습니다. 396쪽 PDF metadata 첫119ms/warm0.19~0.53ms, 5MB·5만행 XLSX 새 프로세스334/340/344ms, 12쪽HWPX metadata+PNG667ms/warm12ms입니다. API·개발 브라우저 증거이며 최종 EXE/OS paint/모든 파일 성능 보증과 구분합니다. 상세는 [1.2.7 기록](./2026-10-24-viewer-1.2.7.md)과 DevCache 영수증에 있습니다.
 
-현재 공개·설치본은 **1.2.6**입니다. 1.2.7 최종 전체 Python/UI/실제 EXE 시험→고정 source/build/license 감사→tag 1회/공개3자산 재다운로드→표준 CURRENTUSER 설치→고정 bundle/사용자자료 전수대조→설치본 QA/실제 업데이트 조회를 이어갑니다. 새 소스 tag나 배포는 아직 하지 않았습니다. 기존1.2.6 tag·pins·rollback은 불변입니다.
+현재 공개·설치본은 **1.2.6**입니다. 1.2.7 최종 전체 Python/UI/실제 EXE 시험→고정 source/build/license 감사→tag 1회/공개3자산 재다운로드→표준 CURRENTUSER 설치→고정 bundle/사용자자료 전수대조→설치본 QA/실제 업데이트 조회를 이어갑니다. 새 소스 tag/공개/설치는 최종 자산 감사 뒤 진행합니다. 기존1.2.6 tag·pins·rollback은 불변입니다.
 
 배포 전 백업 `deployment-backup-1.2.7/receipt.json`은 store2425/출력516/설치EXE2 총2943개·1,759,903,782B 사본과 원본4개/이전백업/rollback을 포함9501파일 대조 PASS입니다. 실제 원본·기존 MD를 자동 재추출하거나 삭제하지 않습니다. 시험용 TEMP2개(`tmphhkxbxpq`, `native-preview-test-c1eggwld`)의 삭제는 자동 승인 정책에서 거절되어 남겨뒀고 우회하지 않았습니다.
 
