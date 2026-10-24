@@ -1139,7 +1139,13 @@ class App:
         if not (0 <= i < len(self.pdfs)):
             return {"error": "없는 항목"}
         pdf = self.pdfs[i]
-        res: dict = {"name": pdf.name, "path": str(pdf)}
+        suffix = pdf.suffix.lower()
+        slides = suffix in {'.pptx', '.ppt', '.odp'}
+        sheets = suffix in {'.xlsx', '.xls', '.ods'}
+        res: dict = {"name": pdf.name, "path": str(pdf), "source_ready": True,
+                     "source_label": ('원본 슬라이드' if slides else '원본 시트' if sheets else
+                                      '원본 PDF' if suffix == '.pdf' else '원본 문서'),
+                     "source_unit_label": '슬라이드' if slides else '쪽'}
         try:
             from pubnexus.preview import preview_path
             original_view = preview_path(pdf)
@@ -1160,6 +1166,15 @@ class App:
         if not res["doc"].get("extracted"):
             res["doc"]["queued"] = self.bump(pdf)
         return res
+
+    def result_view(self, i: int) -> dict:
+        """Read a saved result without preparing its original preview or queue."""
+        if not (0 <= i < len(self.pdfs)):
+            return {"error": "없는 항목"}
+        source = self.pdfs[i]
+        doc = self.doc_view(source)
+        return {"name": source.name, "path": str(source), "doc": doc,
+                "revision": doc.get('revision'), "source_ready": False, "pages": []}
 
     def bump(self, pdf: Path) -> str | None:
         """지금 보는 논문을 배치 맨 앞으로.
@@ -1836,7 +1851,9 @@ class Handler(BaseHTTPRequestHandler):
                             "files": self.app.file_rows(), "output_dir": str(self.app.output_dir)})
             elif u.path == "/open":
                 index = int(q.get('p', ['-1'])[0])
-                self._json(self.app.source_view(index) if q.get('mode', [''])[0] == 'source' else self.app.paper(index))
+                mode = q.get('mode', [''])[0]
+                self._json(self.app.source_view(index) if mode == 'source' else
+                           self.app.result_view(index) if mode == 'result' else self.app.paper(index))
             elif u.path == "/document-map":
                 self._json(self.app.document_map(int(q.get('p', ['-1'])[0])))
             elif u.path == "/page":

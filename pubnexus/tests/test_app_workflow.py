@@ -180,6 +180,52 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(self.app.exported)
         self.assertFalse(self.app.file_rows()[0]['md_ready'])
 
+    def test_result_only_http_open_does_not_wait_for_office_preview_or_change_queue(self):
+        from pptx import Presentation
+        source = self.root / 'slides.pptx'
+        deck = Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[1])
+        slide.shapes.title.text = 'Saved slide content 8426'
+        deck.save(source)
+        self.app.pdfs = [source]
+        self.app._work([source])
+        handler = object.__new__(support.app_module.Handler)
+        handler.app = self.app
+        handler.path = '/open?p=0&mode=result'
+        responses = []
+        handler._json = responses.append
+        with patch('pubnexus.preview.preview_path', side_effect=AssertionError('Result reading must not render Office')) as preview, \
+             patch.object(self.app, 'bump', side_effect=AssertionError('Reading must not change extraction queue')):
+            handler.do_GET()
+        preview.assert_not_called()
+        self.assertEqual(len(responses), 1)
+        result = responses[0]
+        self.assertTrue(result['doc']['extracted'])
+        self.assertIn('Saved slide content 8426', result['doc']['md_text'])
+        self.assertFalse(result['source_ready'])
+        self.assertEqual(result['pages'], [])
+        self.assertEqual(result['revision'], result['doc']['revision'])
+
+    def test_source_navigation_labels_use_document_units(self):
+        from pubnexus.preview import Preview
+        display = self.source()
+        self.addCleanup(self.app.renderer.close_all)
+        for suffix, label, unit in [('.pptx', '원본 슬라이드', '슬라이드'),
+                                    ('.odp', '원본 슬라이드', '슬라이드'),
+                                    ('.xlsx', '원본 시트', '쪽'),
+                                    ('.docx', '원본 문서', '쪽'),
+                                    ('.hwp', '원본 문서', '쪽'),
+                                    ('.pdf', '원본 PDF', '쪽')]:
+            with self.subTest(suffix=suffix):
+                source = self.root / ('original' + suffix)
+                source.write_bytes(b'Synthetic source for label only')
+                self.app.pdfs = [source]
+                with patch('pubnexus.preview.preview_path', return_value=Preview(display, suffix != '.pdf', 'synthetic', 'sha')):
+                    result = self.app.source_view(0)
+                self.assertEqual(result.get('source_label'), label)
+                self.assertEqual(result.get('source_unit_label'), unit)
+                self.assertTrue(result.get('source_ready'))
+
     def test_original_search_works_before_markdown_exists(self):
         source = self.source()
         self.app.pdfs = [source]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -10,7 +11,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,21 @@ class Preview:
 
 _locks_guard = threading.Lock()
 _locks = {}
+_PRESENTATIONS = frozenset({'.pptx', '.ppt', '.odp'})
+
+
+@contextmanager
+def _preview_lock(lock, cancel=None):
+    acquired = False
+    try:
+        while not acquired:
+            if cancel and cancel():
+                raise PreviewUnavailable('미리보기 생성을 중지했습니다.')
+            acquired = lock.acquire(timeout=.1)
+        yield
+    finally:
+        if acquired:
+            lock.release()
 
 
 def find_engine(name: str) -> Path | None:
@@ -78,7 +94,8 @@ def renderer_identity(source: str | Path) -> str:
     if not engine:
         return 'unavailable'
     stat = engine.stat()
-    return f'{engine.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:preview-v3'
+    version = 'preview-v4' if Path(source).suffix.lower() in _PRESENTATIONS else 'preview-v3'
+    return f'{engine.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{version}'
 
 
 def _run(args, *, work: Path, timeout: float, cancel=None):
@@ -147,7 +164,7 @@ def preview_path(source: str | Path, *, timeout: float = 120, cancel=None) -> Pr
     destination = folder / 'preview.pdf'
     with _locks_guard:
         lock = _locks.setdefault(key, threading.Lock())
-    with lock:
+    with _preview_lock(lock, cancel):
         if cancel and cancel():
             raise PreviewUnavailable('미리보기 생성을 중지했습니다.')
         if destination.is_file():
@@ -171,8 +188,13 @@ def preview_path(source: str | Path, *, timeout: float = 120, cancel=None) -> Pr
                 # Nesting it below the SHA cache can fail with exit 0 and no PDF.
                 profile = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix='pnx-lo-')))
                 _profile(profile)
+                # Native presentation extraction includes hidden slides. The official
+                # Impress option keeps preview page indices aligned with those units.
+                pdf_filter = ('pdf:impress_pdf_Export:' + json.dumps(
+                    {'ExportHiddenSlides': {'type': 'boolean', 'value': 'true'}}, separators=(',', ':'))
+                    if source.suffix.lower() in _PRESENTATIONS else 'pdf')
                 args = [engine, '-env:UserInstallation=' + profile.as_uri(), '--headless', '--nologo',
-                        '--nodefault', '--norestore', '--convert-to', 'pdf', '--outdir', work, input_copy]
+                        '--nodefault', '--norestore', '--convert-to', pdf_filter, '--outdir', work, input_copy]
                 output = work / 'input.pdf'
             _run(args, work=work, timeout=timeout, cancel=cancel)
             if cancel and cancel():
