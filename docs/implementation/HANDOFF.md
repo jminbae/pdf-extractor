@@ -1,6 +1,16 @@
 # 문서 추출기 구현 진행 기록
 
-## 진행 중 — 2026-10-24, 1.2.6 실제 문서 사용 흐름
+## 완료 — 2026-10-24, 1.2.6 폴더 탐색·연속 보기·이미지 글자 추출
+
+**[v1.2.6 공개](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.6)·공개3자산 재다운로드 대조·표준CURRENTUSER설치·설치본실행/업데이트확인·기존자료보존을 마쳤습니다.** source/tag `34b523b0c9f3ce0d8fe48042d81cc1b1c43ac8a4`는 그대로 두고 이후 기록만 별도 commit합니다. 생산checkpoint4961be6/main6dd980d4/Setup3883543c(243664380B)/worker1205d498, 외부pins dc0ee25b의 고정2,405파일이 최종 설치본과 같습니다.
+
+왼쪽 폴더 탐색·열기(Ctrl+O)/드래그, 기본1040×760/최소720×520와 폴더접기, 완료파일체크/재추출, PPTX 연속스크롤·원본왼쪽/우측추출→MD보기를 적용했습니다. 실제71장 이미지 OCR은 본문93,187자·4,288문단·원본81그림/실패0이며 기존 이미지 위주 결과는 다시 추출할 때 갱신합니다. 338Python시험/독립UI15종/실제AppAPI·최종EXE 실제13p/scan/합성71·실제71직접worker와46main/4worker감사 PASS입니다. hidden focus조건에서합성71첫decode423ms이며가시paint/모든입력지연보장과구분합니다.
+
+공개ZIP196소스의tag대응·CRC·gitarchive전체bytes/cleanOID, Setup/checksum/sourceZIP3public다운로드SHA를독립확인했습니다. HKCU1.2.6/HKLM중복없음/설치2,405파일일치, 정상실행전보호6,443개전수대조PASS입니다. 설치본native PDF/CSV독립2worker·검색/대조/줌/theme·실공개업데이트 `up_to_date/1.2.6`도PASS입니다. UAC=0/High에서limited-token자동설치검증은아니며정책/ACL변경없습니다.
+
+정상앱PID32476/`문서 추출기`/Respondingtrue를열어뒀고396쪽기존책MD·그림186/표18/fakePage0·기존MD SHA6878bed6…fe4f와원본3개/일반ui,index제외기존2,830자료의SHA·size·mtime불변을확인했습니다. DevCache `releases/1.2.6/published-verification.json`, `installed-1.2.6-verification.json`, `deployment-backup-1.2.6/postinstall-before-launch.json`, `frozen-1.2.6-installed-native-update-final/receipt.json`, `installed-book-open-1.2.6.json`이최종증거입니다. 아래후보/실패기록과rollback1.2.5를보존합니다. [상세 증거·한계](./2026-10-24-reader-1.2.6.md).
+
+### 이전 후보 검증 — 1.2.6 실제 문서 사용 흐름
 
 사용자 새 제보: 완료 상태의 체크 제한, 폴더 이동 부재, PPTX 한 장씩 이동, 추출 버튼 위치, 완료 후 옆 MD, 이미지 속 본문 누락과 PDF 90% 정체입니다. **왼쪽 원본 / 오른쪽 추출→MD 보기**가 최신 사용자 기준입니다. 말보다 수정·실제 파일 검증 결과를 짧게 보고합니다.
 
