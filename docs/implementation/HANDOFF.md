@@ -1,12 +1,17 @@
 # 문서 추출기 구현 진행 기록
 
-## 배포 준비 — 2026-10-24, 1.2.5 빠른 PPTX·공통 문서 UX
+## 완료 — 2026-10-24, 1.2.5 빠른 PPTX·공통 문서 UX 공개·설치
 
-**최종 UX·실제 EXE·artifact 감사 완료, 공개·설치는 다음 단계입니다.** production checkpoint `53576a8a533041737c9bf49764709e9048a7278e`, UI `ae821c660e87417a68d0c30d85de6309e4f537f8187f28acdaf5a6b2e4866e92`, frame `8d243f0d4d939d22b9694c22e50faa56ed380b9657cad3f7f9c8009ac6d93952`입니다. Setup243625715B/SHA`f68c965a2f1f3477d36429afa8ff73e99db8ab4454efdaa6f7bb818d805cc3ba`, main`8737bc4a10a3a793fabacdddbd0394db0e65e5def3216c6621a1740d6a7b3758`, worker`255045959bbec6819b4aa34dd633f9d2aea33c013d9fa23b2aaa7f17a6d1d652`입니다. DevCache `build-pins-1.2.5-ux-final.json`, `build-1.2.5-ux-artifacts-verification.json`이 최종 기준이며 이전 pins/감사·실패 기록은 baseline으로 보존합니다.
+**[v1.2.5 공개](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.5)·공개 파일 재다운로드·표준 HKCU 설치·설치본 검증과 정상 앱 실행을 마쳤습니다.** 공개 tag/source commit은 `3eea5231f21e46db5c8e74315cce1c6e961ec38a`, production checkpoint는 `53576a8a533041737c9bf49764709e9048a7278e`입니다. UI `ae821c660e87417a68d0c30d85de6309e4f537f8187f28acdaf5a6b2e4866e92`, frame `8d243f0d4d939d22b9694c22e50faa56ed380b9657cad3f7f9c8009ac6d93952`. Setup243625715B/SHA`f68c965a2f1f3477d36429afa8ff73e99db8ab4454efdaa6f7bb818d805cc3ba`, main`8737bc4a10a3a793fabacdddbd0394db0e65e5def3216c6621a1740d6a7b3758`, worker`255045959bbec6819b4aa34dd633f9d2aea33c013d9fa23b2aaa7f17a6d1d652`입니다. DevCache `build-pins-1.2.5-ux-final.json`, `build-1.2.5-ux-artifacts-verification.json`이 최종 빌드 기준이며 이전 pins/감사·실패 기록은 baseline으로 보존합니다.
 
 합성71장17,565,219B의 실제 새 EXE 첫슬라이드는 실폭1306/iframe1347에서 그림decode·fonts·2RAF **1182ms**, 마지막장별도2024ms입니다. 숨긴WebView의test-onlyfocus조건이며OSpaint/실제사용자PPTX 보증과구분합니다. `frozen-1.2.5-presentation71-keyboard-v3/receipt.json`과 `pdf-ux-final`/`scan-ux-final`이 동일main/외부4자산에묶인 native3QA입니다. 전체312시험95.407초/독립UI11종/UX실입력·lightdark픽셀/45main·4worker·모델·고지·PPTX소스동봉 검사 PASS입니다. Ctrl+F현재문서검색·Esc dialog→검색→목록 우선순위와 추출중목록복귀뒤 실제MD저장도 확인했습니다. 소스/하네스는 동결합니다.
 
-남은 절차: 마지막 기록·하네스 commit→v1.2.5tag/sourcezip/공개3자산재다운로드와해시검증→표준HKCU설치→backup194개중프로그램2개를제외한사용자192개와책원본해시를정상앱실행전에대조→설치본private native검증→실제정상앱을열어놓기. 기존배포승인은유효하며 UAC/ACL/정책을변경하지않습니다. [상세 증거](./2026-10-24-reader-1.2.5.md).
+- 공개 Setup·checksum·188파일 소스ZIP을 실제 public URL로 재다운로드해 SHA/bytes·CRC·tag 대응을 대조했습니다. ZIP1151133B/SHA`e226c4f10d169299e416ba1338082735946f4378d4206088e83dc7cb0e7a5836`. `releases/1.2.5/published-verification.json`. Git의 표준 개행 처리까지 포함한 `git archive` 전체 바이트 동등과188개 clean blob OID를 검증했습니다.
+- 표준 CURRENTUSER 설치 exit0, HKCU1.2.5/HKLM양view없음. 설치된 전체2405파일이 승인 bundle과 SHA/bytes 동일합니다. 정상 앱 실행 전 backup194사본·프로그램2개를 제외한 기존 사용자192개와 원본책을 전수 대조했습니다. `installed-1.2.5-verification.json`, `installed-1.2.5-bundle-verification.json`.
+- 설치본 실제 native PDF/CSV·별도2PID·원본/MD/코드/대조·확대/배율복귀·다크·X·원본불변/TEMP정리 PASS. 실제 수동 업데이트 `up_to_date/1.2.5`도 확인했습니다. `frozen-1.2.5-installed-native/receipt.json`. 설치본의 별도71장 재시험을 뜻하지 않으며, 후보의71장 증거는2405파일 동등성으로 연결합니다.
+- 정상 앱 PID36532/창 `문서 추출기`/Respondingtrue를 열어뒀습니다. 기존396쪽 책의 MDready/needs_refreshfalse, 그림186·표18·가짜Page제목0, MD SHA`6878bed61a231e362e3819032a31ced0f658e8a21e44468e41f4d93c2b4dfe4f`·원본불변을 실제 앱의 결과 전용 경로에서 확인했습니다. UI/index 정상활동을 제외한190개 기존자료도 그대로입니다. `installed-book-open-1.2.5.json`.
+
+정상 실행: `%LOCALAPPDATA%\Programs\PDF Extractor\PDF Extractor.exe`. 이전1.2.4 rollback Setup과 기존 실패 증거를 보존합니다. UAC/ACL/계정/정책을 변경하지 않았으며, 이 PC의 UAC=0 환경을 limited-token 자동설치 증거로 확대하지 않습니다. 공개 tag는 이후 기록 commit으로 이동하지 않습니다. [상세 증거](./2026-10-24-reader-1.2.5.md).
 
 ### 이전 후보 진행 기록
 
