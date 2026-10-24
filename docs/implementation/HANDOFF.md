@@ -6,7 +6,11 @@
 
 실제 원본은 기존 폴더 아래 `261023 린버크 승인`에 있습니다. 13쪽 `Upadacitinib vitiligo P3_manuscipt.pdf`와 71장 PPTX를 private 사본으로 검사합니다. 사용자 원본·기존 MD·store·설정은 수정하지 않습니다. 생성물은 프로젝트 DevCache/TEMP입니다. 실제 설치1.2.5 worker에서 새SDK18.484초, 기존grobid캐시1.156초에 완료돼 지속90%정체는 아직 재현하지 못했습니다. 확정한 SDK stderr tqdm 진행 미수신을 수정했고 신규3개 포함 SDK/process23시험이 통과했습니다. 가짜 진행률을 추가하지 않습니다.
 
-root 폴더 API는 immediate 파일/하위폴더·추출 중 탐색·expected_paths 가드로 4RED→input/API/parallel27PASS(7.325초), 독립 input10PASS입니다. folder_files/폴더 추가/드래그의 재귀 수집은 유지합니다. UI owner `reader_ux_v126`은 체크·자동 옆MD와 폴더 UI를 보완했고 연속 슬라이드·우측 CTA·path guard 연결을 진행 중입니다. debugger `stall_diagnosis`는 documents.py/local_ocr.py의 PPTX 이미지 OCR·현재 버전 marker·native 진행 콜백을 담당합니다. root가 app.py의 marker 캐시 갱신과 통합·빌드·배포를 맡고 `implementation_review`가 독립 검수합니다. 현재 v1.2.6은 미배포입니다. [계획·검증](./2026-10-24-reader-1.2.6.md).
+최신UI는 주소창/폴더추가버튼을제거하고왼쪽폴더탐색·열기(Ctrl+O)·드래그로통합했습니다. 단일열기는바로원본, 다중열기는선택한파일만체크합니다. 기본1040×760/최소720×520이며좁은창의폴더패널은접을수있습니다. PPTX는연속스크롤/가까운장만준비, 우측추출→MD보기/왼쪽원본·오른쪽MD를적용했습니다. 실제71장그림속본문OCR은기존10,225→93,187자/원본그림81개보존이며유료API는없습니다. 모든체크·폴더이동중기존작업보존·expected_paths가드·공식KnownFolder network존재검증생략을확인했습니다.
+
+생산checkpoint `4961be6c691db052da865ee75501aeee44e74535`, 338Python시험/독립UI15종/실제rootAPI PASS입니다. 최종main`6dd980d453d8b92211bf1932a7c3a1afda5f860a66e6bb239107562cd92f4efe`/Setup`3883543cea164a9324fb323c6c573813a94941d2f29fe4bf75481930f6a737e5`(243664380B)/worker`1205d49847e92d0b9de855c78e4d3b62ae202942065f8f0fbc9478315c18e8a6`입니다. DevCache 최종pins`build-pins-1.2.6-sidebar-final.json` SHA`dc0ee25b4a191d6cf2a56f9b26ac1a737bfd7eb31efffd7ce6be5e250c9334b4`에2405파일전체명세가고정돼있습니다.
+
+최종EXE actual13p본문73047자·표3개,scan,synthetic71native423ms첫decode·마지막1059ms의3QA와46main/4worker·모델/고지·외부4자산감사PASS입니다. 실제71PPTX도같은main직접worker97.781초/19checks PASS입니다. actual13p첫하네스는1pfixture고정조건때문에추출전대기실패(false보존), 전용wrapper13쪽조건으로엄격수정후PASS입니다. 사용자STORE2373/출력459/프로그램2개전체백업·원본/기존백업포함6445해시PASS. 설치후일반실행전6443개재대조해야합니다. 현재v1.2.6은미공개·미설치이며최종검수→source tag1회→3publicassets실재다운로드검증→표준CURRENTUSER설치→고정전체bundle/6443보존검증→설치본QA/업데이트→정상실행을이어갑니다. [계획·검증](./2026-10-24-reader-1.2.6.md).
 
 ## 완료 — 2026-10-24, 1.2.5 빠른 PPTX·공통 문서 UX 공개·설치
 
