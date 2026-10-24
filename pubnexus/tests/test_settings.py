@@ -39,6 +39,68 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(support.app_module.Api(app).settings()['auto_update'])
         self.assertTrue((store.root() / 'settings.json').is_file())
 
+    def test_theme_survives_restart_without_clobbering_other_preferences_while_busy(self):
+        app = support.app_module.App()
+        api = support.app_module.Api(app)
+        self.assertEqual(api.settings()['theme'], 'light')
+        destination = self.root / 'keep-output'
+        app.preferences.set_output_dir(destination)
+        app.preferences.set_auto_update(False)
+        app.worker = Mock()
+        app.worker.is_alive.return_value = True
+        app.push = Mock()
+        self.assertTrue(api.set_theme('dark')['ok'])
+        restored = support.app_module.App()
+        state = support.app_module.Api(restored).state()['settings']
+        self.assertEqual(state['theme'], 'dark')
+        self.assertEqual(restored.output_dir, destination.resolve())
+        self.assertFalse(state['auto_update'])
+        restored.preferences.set_auto_update(True)
+        self.assertTrue(support.app_module.Api(restored).set_theme('light')['ok'])
+        again = support.app_module.Api(support.app_module.App()).settings()
+        self.assertEqual(again['theme'], 'light')
+        self.assertTrue(again['auto_update'])
+        self.assertEqual(again['output_dir'], str(destination.resolve()))
+        self.assertTrue(any(args[0] == 'settings' and args[1]['theme'] == 'dark'
+                            for args, _ in app.push.call_args_list))
+
+    def test_invalid_theme_does_not_mutate_preferences_or_emit_success(self):
+        app = support.app_module.App()
+        api = support.app_module.Api(app)
+        self.assertTrue(api.set_theme('dark')['ok'])
+        before = (store.root() / 'settings.json').read_bytes()
+        app.push = Mock()
+        for invalid in ('system', 'DARK', '', None, True, 1, [], {}):
+            with self.subTest(theme=invalid):
+                self.assertFalse(api.set_theme(invalid)['ok'])
+                self.assertEqual(api.settings()['theme'], 'dark')
+                self.assertEqual((store.root() / 'settings.json').read_bytes(), before)
+        app.push.assert_not_called()
+
+    def test_theme_write_failure_preserves_previous_value_and_other_preferences(self):
+        app = support.app_module.App()
+        api = support.app_module.Api(app)
+        self.assertTrue(api.set_theme('dark')['ok'])
+        before = (store.root() / 'settings.json').read_bytes()
+        app.push = Mock()
+        with patch('pubnexus.settings.utils.write_json', side_effect=OSError('disk unavailable')):
+            result = api.set_theme('light')
+        self.assertFalse(result['ok'])
+        self.assertEqual(api.settings()['theme'], 'dark')
+        self.assertEqual((store.root() / 'settings.json').read_bytes(), before)
+        app.push.assert_not_called()
+
+    def test_missing_or_invalid_saved_theme_defaults_to_light(self):
+        from pubnexus.settings import Preferences
+        store.root().mkdir(parents=True, exist_ok=True)
+        for theme in (None, True, 12, [], {}, 'system'):
+            with self.subTest(theme=theme):
+                support.app_module.utils.write_json(store.root() / 'settings.json',
+                    {'theme': theme, 'auto_update': False})
+                prefs = Preferences()
+                self.assertEqual(prefs.theme, 'light')
+                self.assertFalse(prefs.auto_update)
+
     def test_change_only_affects_future_exports_and_reset_is_persisted(self):
         app = support.app_module.App()
         app.exported['previous'] = {'markdown': 'old/result.md'}

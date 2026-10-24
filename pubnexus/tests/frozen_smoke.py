@@ -100,6 +100,20 @@ try {
   if(originalSearch?.ok===false||!Array.isArray(originalSearch.results)||(!cfg.scan_mode&&!originalSearch.results.some(hit=>hit.side==='source'&&hit.locations?.length)))throw Error('Original search before export failed: '+JSON.stringify(originalSearch));
   original.search_hits=originalSearch.results.length;original.hidden_test_eager_load=true;
   if((await evaluate('window.pywebview.api.state()')).files.some(f=>f.md_ready))throw Error('Original view/search unexpectedly created saved Markdown');
+  const theme={ok:false,initial:await evaluate("({theme:document.documentElement.dataset.theme,background:getComputedStyle(document.body).backgroundColor})")};
+  await evaluate("document.querySelector('#theme-toggle').click();true");
+  await until(()=>evaluate("document.documentElement.dataset.theme==='dark'&&!document.querySelector('#theme-toggle').disabled"),'native dark theme switch');
+  theme.dark=await evaluate("({theme:document.documentElement.dataset.theme,background:getComputedStyle(document.body).backgroundColor,color:getComputedStyle(document.body).color,paper:getComputedStyle(document.querySelector('.pdf-page')).backgroundColor,imageFilters:Array.from(document.querySelectorAll('#source-scroll img')).map(i=>getComputedStyle(i).filter)})");
+  theme.native_dark=await evaluate('window.pywebview.api.settings()');
+  if(theme.native_dark.theme!=='dark'||theme.dark.background===theme.initial.background||theme.dark.paper!=='rgb(255, 255, 255)'||!theme.dark.imageFilters.length||theme.dark.imageFilters.some(v=>v!=='none'))throw Error('Dark theme changed original pixels or failed to persist natively');
+  await command('Page.reload');
+  await until(()=>evaluate("document.documentElement.dataset.theme==='dark'&&!!window.pywebview?.api?.settings&&document.querySelectorAll('.file-row').length>0"),'saved dark theme restored after a real WebView reload');
+  if(focusEmulation.requested&&!((await focusState('after-theme-reload')).valid))throw Error('Focus emulation was lost during the theme reload');
+  theme.restored=await evaluate('window.pywebview.api.settings()');
+  if(theme.restored.theme!=='dark')throw Error('Native theme did not survive the UI reload');
+  await evaluate("document.querySelector('#theme-toggle').click();true");
+  await until(()=>evaluate("document.documentElement.dataset.theme==='light'&&!document.querySelector('#theme-toggle').disabled"),'light theme restored');
+  theme.ok=true;
   await evaluate("document.querySelector('[data-action=list]').click();true");
   await evaluate("window.__documentWorkers=[];const initialOn=window.pnx.on;window.pnx.on=function(m){if(m.kind==='worker_started')window.__documentWorkers.push({pid:m.pid,path:m.path});return initialOn(m);};true");
   const started=await evaluate('window.pywebview.api.extract_selected([0,1])');
@@ -116,7 +130,15 @@ try {
   await evaluate("document.querySelector('[data-action=read][data-index=\"1\"]').click();true");
   await until(()=>evaluate(`document.querySelector('#document')?.innerText.includes(${JSON.stringify(cfg.csvMarker)})&&document.querySelectorAll('#document table tr').length>=2`),'CSV reader table');
   const csvUi=await evaluate("({tables:document.querySelectorAll('#document table').length,editable:document.querySelectorAll('#reader [contenteditable=true],#reader textarea').length,readonly:document.querySelector('#reader .readonly')?.textContent,content:document.querySelector('#document').innerText})");
-  if(csvUi.editable||!csvUi.readonly?.includes('읽기 전용'))throw Error('Result reader is editable or lacks its read-only label');
+  if(csvUi.editable)throw Error('Result reader exposes editable controls');
+  const zoomTarget=await evaluate("(()=>{const node=document.querySelector('#result-scroll');const box=node.getBoundingClientRect();window.__nativeZoomProbe=null;node.addEventListener('wheel',event=>window.__nativeZoomProbe={trusted:event.isTrusted,prevented:event.defaultPrevented},{once:true});return {x:box.left+Math.min(80,box.width/2),y:box.top+Math.min(80,box.height/2),bodyWidth:document.body.getBoundingClientRect().width};})()");
+  await command('Input.dispatchMouseEvent',{type:'mouseWheel',x:zoomTarget.x,y:zoomTarget.y,deltaX:0,deltaY:-120,modifiers:2});
+  await until(()=>evaluate("document.querySelector('#md-zoom-reset')?.textContent.trim()==='110%'"),'trusted Ctrl+wheel magnifies Markdown to 110 percent');
+  const mdZoom=await evaluate("({label:document.querySelector('#md-zoom-reset').textContent.trim(),zoom:Number(getComputedStyle(document.querySelector('#document')).zoom),bodyWidth:document.body.getBoundingClientRect().width,content:document.querySelector('#document').innerText,event:window.__nativeZoomProbe})");
+  if(mdZoom.zoom<=1||mdZoom.content!==csvUi.content||mdZoom.bodyWidth!==zoomTarget.bodyWidth||!mdZoom.event?.trusted||!mdZoom.event?.prevented)throw Error('Markdown zoom did not remain local and read-only: '+JSON.stringify(mdZoom));
+  await evaluate("document.querySelector('#md-zoom-reset').click();true");
+  await until(()=>evaluate("document.querySelector('#md-zoom-reset').textContent.trim()==='100%'&&Number(getComputedStyle(document.querySelector('#document')).zoom)===1"),'Markdown zoom reset');
+  mdZoom.reset=true;
   await evaluate("document.querySelector('#code-tab').click();true");
   const code=await evaluate("({tag:document.querySelector('#md-source').tagName,text:document.querySelector('#md-source').textContent,editable:document.querySelector('#md-source').isContentEditable})");
   if(code.tag!=='PRE'||code.editable||!code.text.includes(cfg.csvMarker))throw Error('Raw Markdown read-only view failed');
@@ -130,6 +152,12 @@ try {
   if(!compare.visible||compare.editable||compare.error_note||compare.page_errors)throw Error('PDF comparison has an error or is not a read-only view: '+JSON.stringify(compare));
   compare.hidden_test_eager_load=true;
   await optionalScreenshot(cfg.compareShot);
+  await evaluate("document.querySelector('#reader-close').click();true");
+  await until(()=>evaluate("document.querySelector('#reader').hidden&&!document.querySelector('#list-view').hidden"),'viewer close X returns to the file list');
+  const minimalChrome=await evaluate("({close_returns_list:document.querySelector('#reader').hidden,savebar_visible:!!document.querySelector('.savebar')?.getClientRects().length,footer_visible:!!document.querySelector('.footer')?.getClientRects().length})");
+  if(minimalChrome.savebar_visible||minimalChrome.footer_visible)throw Error('Redundant persistent status/path chrome remains visible');
+  await evaluate("document.querySelector('[data-action=read][data-index=\"0\"]').click();true");
+  await until(()=>evaluate(`document.querySelector('#document')?.innerText.includes(${JSON.stringify(cfg.pdfMarker)})`),'saved Markdown reopens after X');
   if(cfg.background_book){
     await evaluate("window.__backgroundWorkers=[];const on=window.pnx.on;window.pnx.on=function(m){if(m.kind==='worker_started')window.__backgroundWorkers.push(m.pid);return on(m);};true");
     const start=await evaluate('window.pywebview.api.extract_selected([2],true)');
@@ -211,7 +239,7 @@ try {
     if(!stopped.files[1].done||!stopped.files[1].md_ready||workers.length!==2||new Set(workers).size!==2)throw Error('The independent completed CSV or two worker PIDs were not preserved');
     background={...background,ok:background.latency_failures.length===0,stage:'cancelled-and-verified',measurements,source_search_ms:searchMs,controls,cancel_ms:cancelMs,worker_pids:workers,reader_query_preserved:true,enqueue:enqueued,duplicate,parallel_completed:parallelFinished.files[1],resources:parallelFinished.resources,book_final:stopped.files[2]};
   }
-  completedResult={ok:background?.ok!==false,target_url:target.url,bridge:true,settings,settings_ui:settingsUi,manual_update:manualUpdate,initial_md_buttons:initialMdButtons,original_before_export:original,start_response:started,document_workers:documentWorkers,state:finished,csv_ui:csvUi,raw_markdown:code,pdf_comparison:compare,background,screenshots,focus_emulation:focusEmulation};
+  completedResult={ok:background?.ok!==false,target_url:target.url,bridge:true,settings,settings_ui:settingsUi,manual_update:manualUpdate,initial_md_buttons:initialMdButtons,original_before_export:original,start_response:started,document_workers:documentWorkers,state:finished,csv_ui:csvUi,theme,md_zoom:mdZoom,minimal_chrome:minimalChrome,raw_markdown:code,pdf_comparison:compare,background,screenshots,focus_emulation:focusEmulation};
   fs.writeFileSync(cfg.result,JSON.stringify(completedResult,null,2),'utf8');
   if(!completedResult.ok)throw Error('Book latency failed the unchanged 2000ms gate: '+JSON.stringify(background.latency_failures));
 } catch(error){

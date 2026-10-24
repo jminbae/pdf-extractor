@@ -74,7 +74,6 @@ async function uiBackgroundRegression(page, baseURL) {
       unsavedMdDisabled:document.querySelector('.file-row[data-index="2"] [data-action=read]').disabled,
       oldSavedStatus:document.querySelector('.file-row[data-index="1"]').dataset.status
     }));
-    const engine = await p.locator('#engine').textContent();
     // A newly published backend must not supply new coordinates to this old DOM.
     await p.evaluate(() => {window.__revision='saved-B-v2';document.querySelector('#result-scroll').scrollTop=0;});
     await p.locator('#document [data-block-id="b-old"]').click();
@@ -88,7 +87,7 @@ async function uiBackgroundRegression(page, baseURL) {
     await p.locator('#search-form button[type=submit]').click();
     await p.waitForFunction(() => document.querySelector('#search-results').textContent.includes('다시 열어'));
     const staleSearch = await p.locator('#search-results').textContent();
-    const proof={busy,beforeRunComplete:before,afterAppend,afterRunComplete:after,sourceControls:source,forcedRetrySavedMd:retry,failure,engine,oldMapping,staleSearch};
+    const proof={busy,beforeRunComplete:before,afterAppend,afterRunComplete:after,sourceControls:source,forcedRetrySavedMd:retry,failure,oldMapping,staleSearch};
     const violations={
       fileInputBlocked:busy.addFilesDisabled||busy.addFolderDisabled,
       newDocumentSelectionBlocked:busy.checkboxes[2],
@@ -101,7 +100,6 @@ async function uiBackgroundRegression(page, baseURL) {
       unsavedMdEnabled:!retry.unsavedMdDisabled||!failure.unsavedMdDisabled,
       priorSavedMdLostAfterFailure:failure.oldSavedMdDisabled,
       fakeCompleteStatus:retry.rowStatus!=='running'||failure.oldSavedStatus==='complete',
-      wrongEngineLabel:engine!=='PDF 추출 준비됨',
       oldSnapshotUsedNewMapping:oldMapping.nativeLocationCalls!==0||oldMapping.highlightTop!=='6%'||oldMapping.highlightLeft!=='5%',
       staleSearchMixedNewResult:!staleSearch.includes('다시 열어')
     };

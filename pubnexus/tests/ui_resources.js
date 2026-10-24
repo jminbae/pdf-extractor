@@ -1,6 +1,7 @@
 async function uiResourcesRegression(page, baseURL) {
   const context = await page.context().browser().newContext({viewport:{width:1336,height:900}});
   const p = await context.newPage();
+  const errors=[];p.on('pageerror',error=>errors.push(String(error)));
   try {
     await p.goto(baseURL);
     await p.waitForSelector('.file-row');
@@ -27,21 +28,21 @@ async function uiResourcesRegression(page, baseURL) {
       running:document.querySelectorAll('.file-row[data-status="running"]').length,
       a:document.querySelector('.file-row[data-index="0"] .status-text').textContent,
       c:document.querySelector('.file-row[data-index="2"] .status-text').textContent,
-      resources:document.querySelector('#resources')?.textContent,
+      resourceVisible:!!document.querySelector('#resources')?.getClientRects().length,
       query:document.querySelector('#search').value,scroll:document.querySelector('#result-scroll').scrollTop,
       width:document.documentElement.scrollWidth,viewport:document.documentElement.clientWidth}));
     await p.setViewportSize({width:375,height:812});
     const mobile = await p.evaluate(() => ({width:document.documentElement.scrollWidth,viewport:document.documentElement.clientWidth}));
     const unknown = await p.evaluate(() => {
       window.pnx.on({kind:'resources',running:2,queued:12});
-      return document.querySelector('#resources').textContent;
+      return !!document.querySelector('#resources')?.getClientRects().length;
     });
     const violations={recreatedRows:!desktop.sameA||!desktop.sameC,missingConcurrentRows:desktop.running!==2,
       badPercent:!desktop.a.includes('9%')||!desktop.c.includes('37%'),
-      missingResources:!desktop.resources?.includes('추출 2 · 대기 12')||!desktop.resources?.includes('4.0GB / 예산 64.0GB')||!desktop.resources?.includes('CPU 16%'),
+      unwantedResources:desktop.resourceVisible||unknown,
       readerReset:desktop.query!=='needle'||desktop.scroll!==700,
       overflow:desktop.width>desktop.viewport||mobile.width>mobile.viewport,
-      unknownReportedAsZero:!unknown.includes('메모리 —')||!unknown.includes('CPU —')};
+      pageErrors:errors.length!==0};
     if(Object.values(violations).some(Boolean))throw new Error('UI_RESOURCES_RED '+JSON.stringify({violations,desktop,mobile}));
     return {ok:true,frontendFixtureOnly:true,desktop,mobile,unknown};
   } finally {await context.close();}

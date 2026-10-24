@@ -822,6 +822,7 @@ class App:
         from pubnexus.version import VERSION
         return {'ok': True, 'output_dir': str(self.output_dir),
                 'auto_update': self.preferences.auto_update, 'current_version': VERSION,
+                'theme': self.preferences.theme,
                 'update': self._updater.snapshot() if self._updater else
                     {'status': 'idle', 'message': '업데이트를 확인할 수 있습니다.'}}
 
@@ -1927,6 +1928,17 @@ class Api:
         except (OSError, ValueError) as error:
             return {'ok': False, 'why': str(error)}
 
+    def set_theme(self, theme: str) -> dict:
+        try:
+            self._app.preferences.set_theme(theme)
+            state = self._app.settings_state()
+            self._app.push('settings', state)
+            if self._app.window is not None and not getattr(self._app, '_hidden', False):
+                paint_caption(timeout=.2, theme=theme)
+            return state
+        except (OSError, ValueError) as error:
+            return {'ok': False, 'why': str(error)}
+
     def check_update(self) -> dict:
         return self._app.check_update_async()
 
@@ -2147,7 +2159,7 @@ class Api:
         return {"path": str(a.folder or ""), "grobid": a.grobid.state,
                 "sec": a.grobid.secs, "files": a.file_rows(), "last": last,
                 "output_dir": str(a.output_dir), 'pdf_engine_available': pdf_markdown.available(),
-                'resources': dict(a._resource_state)}
+                'resources': dict(a._resource_state), 'settings': a.settings_state()}
 
     def remember(self, name: str) -> dict:
         """마지막에 보던 논문. 다음에 켜면 그 자리에서 이어 본다."""
@@ -2216,8 +2228,8 @@ def _own_hwnd() -> int:
         return 0
 
 
-def paint_caption(timeout: float = 8.0) -> bool:
-    r"""제목표시줄을 화면과 같은 흰색으로 칠한다(윈도우 11).
+def paint_caption(timeout: float = 8.0, *, theme: str = 'light') -> bool:
+    r"""제목표시줄 색을 선택한 화면 테마에 맞춘다(윈도우 11).
 
     검정 제목표시줄 밑에 흰 화면이 붙으면 창이 두 동강 나 보인다. DWM 속성으로
     캡션·글자·테두리 색을 지정하면 제목표시줄부터 본문까지 색이 이어진다.
@@ -2243,9 +2255,11 @@ def paint_caption(timeout: float = 8.0) -> bool:
             dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), ctypes.c_uint(attr),
                                       ctypes.byref(v), ctypes.sizeof(v))
 
-        put(35, 0x00FFFFFF)      # DWMWA_CAPTION_COLOR — 본문과 같은 흰색
-        put(36, 0x0028231F)      # DWMWA_TEXT_COLOR    — #1f2328
-        put(34, 0x00EEE9E7)      # DWMWA_BORDER_COLOR  — #e7e9ee
+        dark = theme == 'dark'
+        put(20, int(dark))       # DWMWA_USE_IMMERSIVE_DARK_MODE
+        put(35, 0x002B2B2B if dark else 0x00FFFFFF)  # DWMWA_CAPTION_COLOR
+        put(36, 0x00EEEEEE if dark else 0x0028231F)  # DWMWA_TEXT_COLOR
+        put(34, 0x00505050 if dark else 0x00EEE9E7)  # DWMWA_BORDER_COLOR
         return True
     except Exception:  # noqa: BLE001 — 구버전 윈도우: 그냥 기본 창틀로 둔다
         return False
@@ -2297,7 +2311,7 @@ def build(folder: str | Path | None = None, *, hidden: bool = False):
         start = utils.resolve(_cfg_dir) if _cfg_dir else None
 
     def boot() -> None:
-        paint_caption()          # 제목표시줄을 본문과 같은 흰색으로(창이 뜬 뒤에)
+        paint_caption(theme=app.preferences.theme)
         try:
             if start and start.is_dir():
                 app.set_folder(start)

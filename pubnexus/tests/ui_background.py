@@ -23,10 +23,17 @@ def main():
                   "markdown": str(root / "Markdown" / "B.md")},
                  {"name": "C.pdf", "path": str(root / "C.pdf"), "done": False, "md_ready": False, "status": "ready", "pages": 30}]
         state = {"files": files, "path": str(root), "output_dir": str(root / "Markdown"),
-                 "grobid": "off", "pdf_engine_available": True}
+                 "grobid": "off", "pdf_engine_available": True,
+                 "settings": {"ok": True, "theme": "light", "output_dir": str(root / "Markdown"),
+                              "auto_update": False, "current_version": "1.2.4", "update": {"status": "idle"}}}
         bootstrap = """<script>window.__calls=[];window.__fixture=STATE;window.__revision='saved-B-v1';
+window.__fixture.settings.theme=localStorage.getItem('__fixture-theme')||'light';
 window.pywebview={api:new Proxy({},{get:(_,name)=>(...args)=>{window.__calls.push({name,args});
 if(name==='state')return Promise.resolve(window.__fixture);
+if(name==='settings')return Promise.resolve(window.__fixture.settings);
+if(name==='set_theme'){
+if(window.__themeRejectNext){window.__themeRejectNext=false;return Promise.resolve({ok:false,why:'테마 저장 실패 fixture'});}
+window.__fixture.settings={...window.__fixture.settings,theme:args[0]};localStorage.setItem('__fixture-theme',args[0]);return Promise.resolve(window.__fixture.settings);}
 if(name==='extract_selected')return Promise.resolve(window.__rejectNext?{ok:true,n:0,queued:true,accepted_paths:[]}:{ok:true,n:1,queued:!!window.__queueMode});
 if(name==='search'&&args[2]!==window.__revision)return Promise.resolve({ok:false,code:'stale_revision',why:'새 Markdown이 저장되었습니다. MD를 다시 열어 검색하세요.'});
 if(name==='search'||name==='search_source')return Promise.resolve({results:[{text:'needle fixture',side:name==='search_source'?'source':'result',page:2,locations:[{page:2,bbox:[20,30,100,60],height:500}]}]});
@@ -59,6 +66,8 @@ return Promise.resolve({ok:true,n:1});}})};</script>""".replace("STATE", json.du
                     data, mime = Path(__file__).with_name("ui_queue.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
                 elif url.path == "/resources-regression":
                     data, mime = Path(__file__).with_name("ui_resources.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
+                elif url.path == "/minimal-regression":
+                    data, mime = Path(__file__).with_name("ui_minimal.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
                 else:
                     self.send_error(404)
                     return

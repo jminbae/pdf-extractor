@@ -7,8 +7,8 @@ version source link, dependency versions, original notices and source metadata.
 
 ## Source corresponding to a release
 
-For version 1.2.3, check out the public `v1.2.3` tag in
-[jminbae/pdf-extractor](https://github.com/jminbae/pdf-extractor/tree/v1.2.3).
+For version 1.2.4, check out the public `v1.2.4` tag in
+[jminbae/pdf-extractor](https://github.com/jminbae/pdf-extractor/tree/v1.2.4).
 The release provides the installer, SHA256 checksum and source archive at the
 same location. No user PDFs, extracted text, images or model caches are included
 in the application source archive.

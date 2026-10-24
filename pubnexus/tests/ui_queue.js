@@ -31,7 +31,6 @@ async function uiQueueRegression(page, baseURL) {
     const afterQueue = await p.evaluate(() => ({query:document.querySelector('#search').value,
       scroll:document.querySelector('#result-scroll').scrollTop,readerVisible:!document.querySelector('#reader').hidden,
       activePct:document.querySelector('.file-row[data-index="0"] .status-text').textContent,
-      stage:document.querySelector('#progress-stage').textContent,
       pendingStatus:document.querySelector('.file-row[data-index="2"]').dataset.status,
       duplicateDisabled:document.querySelector('#extract').disabled}));
     await p.evaluate(() => document.querySelector('#extract').click());
@@ -56,7 +55,7 @@ async function uiQueueRegression(page, baseURL) {
     const proof={before,sent,afterQueue,callsAfterDuplicate,afterAdd,rejectedCleared,failedRetry,stoppingDisabled};
     const violations={wrongSelection:JSON.stringify(sent[0])!=='[2]',
       readerReset:afterQueue.query!==before.query||afterQueue.scroll!==before.scroll||!afterQueue.readerVisible,
-      activeProgressReset:!afterQueue.activePct.includes('4%')||afterQueue.stage!=='문서 구조 추출',
+      activeProgressReset:!afterQueue.activePct.includes('4%'),
       queueNotShown:afterQueue.pendingStatus!=='queued',duplicateAllowed:!afterQueue.duplicateDisabled||callsAfterDuplicate!==1,
       autoQueuedFileAddition:afterAdd.calls!==1,newFileCannotQueue:afterAdd.disabled||!afterAdd.label.includes('대기열에 추가'),
       rejectedInflightStuck:!rejectedCleared,

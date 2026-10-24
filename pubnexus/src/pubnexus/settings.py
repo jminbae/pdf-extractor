@@ -25,6 +25,8 @@ class Preferences:
             'output_dir': directory if isinstance(directory, str) and directory
                 and '\x00' not in directory and Path(directory).is_absolute() else None,
             'auto_update': data.get('auto_update') if type(data.get('auto_update')) is bool else True,
+            'theme': data.get('theme') if isinstance(data.get('theme'), str)
+                and data['theme'] in ('light', 'dark') else 'light',
         }
 
     @property
@@ -39,6 +41,11 @@ class Preferences:
     def auto_update(self) -> bool:
         with self._lock:
             return self._data['auto_update']
+
+    @property
+    def theme(self) -> str:
+        with self._lock:
+            return self._data['theme']
 
     def _save(self, **changes):
         with self._lock:
@@ -66,3 +73,8 @@ class Preferences:
         if type(enabled) is not bool:
             raise ValueError('자동 업데이트 설정을 확인하세요.')
         self._save(auto_update=enabled)
+
+    def set_theme(self, theme: str) -> None:
+        if not isinstance(theme, str) or theme not in ('light', 'dark'):
+            raise ValueError('밝은 화면 또는 어두운 화면을 선택하세요.')
+        self._save(theme=theme)
