@@ -1,8 +1,8 @@
 # 문서 추출기 구현 진행 기록
 
-## 진행 중 — 2026-10-24, 1.2.3 동시 백그라운드 추출
+## 완료 — 2026-10-24, 1.2.3 동시 백그라운드 추출 공개·설치
 
-아래 1.2.2 기록보다 이 절이 우선합니다. **1.2.3 최종 후보의 회귀·산출물 감사·scan·우선순위·명시적 포커스/가시성 조건의 책 동시 실행 검증을 마쳤습니다. 기본 hidden 책 지연 시험은 raw 실패로 보존하며 아직 공개·설치 완료가 아닙니다.**
+아래 1.2.2 기록보다 이 절이 우선합니다. **[v1.2.3 공개](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.3)·공개 파일 재다운로드 대조·기존 HKCU 설치 갱신·실제 설치본 기능·업데이트 확인을 마쳤습니다.** tag/source commit `e7f6eaabe07f159efffaa9f85fc83576df2e7495`입니다. 최종 후보의 회귀·산출물·scan·우선순위·명시적 포커스/가시성 조건의 책 동시 실행 검증도 완료했습니다. 기본 hidden 지연 시험의 raw 실패는 보존합니다.
 
 - 설치된 1.2.2의 실제 스택과 API timeout으로 근본 원인을 확인했습니다. GUI와 같은 Python 프로세스에서 native MuPDF/GIL 작업을 실행했고 모든 새 PDF에 논문 서지/GROBID 경로가 선행했습니다. 이제 모든 PDF는 공통 SDK 우선 경로이며 문서마다 별도 프로세스로 실행합니다.
 - 사용자는 여러 문서를 동시에 독립 실행하되 자원 한도를 요구했습니다. 최종 스케줄러는 CPU에 따른 동시 상한(이 PC 물리16/논리24 CPU에서 8, 절대 상한 10), psutil 7.2.2 실측·예상 메모리 예약, 자원 부족 시 자동 대기/재개를 적용합니다. RAM 50% 예산·시스템 예비 15%/최소2GiB·CPU90% 대기 및 작은 PC 단일 작업 예외는 **새 작업 시작 기준이지 실행 중 메모리/CPU의 강제 상한이 아닙니다.** 같은 내용 SHA는 직렬화하고 export commit은 OS 파일 잠금으로 보호합니다.
@@ -13,21 +13,21 @@
 - 최종 실제 scan은 `frozen-1.2.3-priority-scan/receipt.json ok=true`입니다. 실제 책의 GUI NORMAL32·문서/SDK BELOW_NORMAL16384를 각7회 확인(`frozen-1.2.3-priority-book/priority-verification.json ok=true`)했으며, 이것이 WebView 지연을 해결했다는 증거는 아닙니다.
 - 최신 hidden 책 시험 `frozen-1.2.3-priority-book/receipt.json`은 **ok=false 유지**입니다. 상태 bridge 2.0–23.2ms·Node HTTP2–38ms였으나 브라우저 내부 fetch 완료 측정 1회 4,175.7ms로 2초 기준을 초과했습니다. 다른 MD/검색어·추가 CSV 저장·중복 차단·취소321ms·원본 불변은 확인했습니다. 환경 flag A/B는 `frozen-1.2.3-priority-book-foreground/receipt.json`의 `applied=false/ok=false`이므로 유효한 비교·개선 근거가 아닙니다. 전체 UI 응답 2초 보장은 미확인입니다.
 - 사용자 기존 프로그램/책 자료193개는 `deployment-backup-1.2.3/receipt.json`으로 SHA 대조 백업했고 원본 PDF는 수정하지 않았습니다. 현재 증거는 DevCache 후보 검증이며 실제 Documents·캐시의 새 결과 반영 또는 설치 완료로 올리지 않습니다.
-- 남은 작업: 아래 배포 확인란의 소스/tag/archive·installer/checksum 게시/다운로드 대조 → 기존 HKCU 설치 갱신·실제 설치본 확인입니다. 기존 1.2.2 릴리스/tag와 실패 raw receipt는 보존합니다. 상세 근거·수치는 [배경 추출 진단](./2026-10-24-background-extraction.md)을 확인합니다.
+- 공개·설치 후에도 원본 책과 저장 MD는 동일 SHA입니다. 일반 앱 실행 전 사용자 자료191개와 백업193개를 재대조했습니다. 설치본 native QA와 실제 공개 업데이트 `up_to_date/1.2.3` PASS, 정상 앱 PID3732를 열어 기존396쪽 책의 MD 준비 상태·그림186·표18·가짜Page0을 확인했습니다. [최종 배포 검증](./2026-10-24-release-1.2.3.md)에 근거와 한계를 기록했습니다. 기존1.2.2 tag와 실패 raw receipt는 보존합니다.
 
 최종 `frozen-1.2.3-book-focus-emulation-final/receipt.json`은 `ok=true`입니다. 같은 최종 EXE에 시험 전용 공식 CDP 포커스·가시성 에뮬레이션을 적용하고 전후/4회/검색/취소의 실제 상태와 해제를 확인했습니다. bridge2.6–11ms/Node HTTP1–4ms/브라우저 HTTP2.8–86.2ms, 실제쪽0/0/0/28, 검색108.6ms·12건·CSV 독립PID 저장·취소463ms(31쪽)·기존MD/검색어/원본SHA/TEMP정리 PASS입니다. 제품 설정과 기본 hidden 실패 기록을 바꾸지 않았고 모든 보이는 창 입력→paint 성능으로 확대하지 않습니다. 상세는 [1.2.3 배포 검증](./2026-10-24-release-1.2.3.md)에 있습니다.
 
-### 1.2.3 배포 확인란 — 아직 미실행
+### 1.2.3 배포 확인란 — 완료
 
-| 단계 | 현재 상태 | 완료 뒤 기록할 근거 |
+| 단계 | 현재 상태 | 확인 근거 |
 | --- | --- | --- |
-| 최종 소스 commit·v1.2.3 tag·소스 archive | 미게시·미기록 | 실제 commit/tag SHA, archive 크기·SHA·공개 URL |
-| Setup·checksum 공개와 재다운로드 | 미게시 | 최종 Setup SHA `e43b9ecf…67f33`, 게시 바이트/다운로드 SHA 영수증 |
-| 기존 HKCU 설치 갱신 | 1.2.3 미설치 | 설치 로그 exitcode, HKCU 버전·경로, 설치 EXE SHA |
-| 설치본 원본/MD·검색·추출·중지 확인 | 미실행 | 실제 설치본 검증 영수증과 원본/기존 출력 보호 결과 |
-| 공개 업데이트 확인 | 미실행 | 실제 공개 tag 기준의 수동 확인 결과; hidden 자동 설치 차단과 구분 |
+| 최종 소스 commit·v1.2.3 tag·소스 archive | 공개 완료 | tag `e7f6eaabe07f159efffaa9f85fc83576df2e7495`, ZIP1,022,083바이트/SHA `ef1dc66d…8ec10`, tag145파일 대응 |
+| Setup·checksum 공개와 재다운로드 | PASS | Setup243,151,591바이트/SHA `e43b9ecf…67f33`, `releases/1.2.3/published-verification.json` |
+| 기존 HKCU 설치 갱신 | PASS | exit0/HKCU1.2.3/HKLM없음/main7a634a…/worker89865a…, `installed-1.2.3-verification.json` |
+| 설치본 원본/MD·추출과 기존 책 열기 | PASS | `frozen-1.2.3-installed-native/receipt.json`와 `installed-book-open-1.2.3.json`; 동일 EXE의 책 실행 중 검색/중지는 위 focus 시험에서 검증 |
+| 공개 업데이트 확인 | PASS | 실제 수동 `up_to_date/1.2.3`; hidden 자동 설치 미수행과 구분 |
 
-이 표는 배포 작업을 했다는 기록이 아닙니다. root가 만드는 최종 1.2.3 배포 검증 문서와 실제 영수증을 확인한 뒤 완료한 행만 바꿉니다. 이 PC의 UAC=0/관리자 High 환경은 실제 비승격 자동 설치 검증으로 확대하지 않습니다.
+이 표는 실제 완료 영수증을 확인해 갱신했습니다. 정상 앱은 열어 두었으며, 일반 실행 뒤 UI/index의 최근 보기 변경은 설치 전후 자료 보존 검증과 구분합니다. 이 PC의 UAC=0/관리자 High 환경은 실제 비승격 자동 설치 검증으로 확대하지 않습니다.
 
 ## 최신 — 2026-10-24, 1.2.2 공개·설치·책 결과 반영 완료
 
