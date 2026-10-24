@@ -2,7 +2,7 @@
 
 ## 진행 상태
 
-UI 개선 진행 중입니다. 아직 1.2.4의 공개·설치 완료 기록이 아닙니다. 이전1.2.3 설치·복구 근거는 `2026-10-24-release-1.2.3.md`에 보존합니다.
+구현·실제 UI·실행 파일 검증을 마쳤습니다. 이 절은 공개·설치 전 상태이며 이후 실제 완료 근거를 덧붙입니다. 제품 코드 checkpoint는 `981de5ebbe2d971d64e5337a85e89de393fb2651`입니다. 이전1.2.3 설치·복구 근거는 `2026-10-24-release-1.2.3.md`에 보존합니다.
 
 ## 사용자 요구와 적용 범위
 
@@ -26,3 +26,30 @@ Windows 제목 표시줄은 공식 [DWMWINDOWATTRIBUTE](https://learn.microsoft.
 - MD 확대/100% 복귀, 검색/문서 DOM/현재 읽던 위치, 비교의 원본 좌표 연결, 일반 휠/원본 영역, 보기 모드별 X와 작업 지속을 검증합니다.
 - 기존 동시 실행/큐/리소스 이벤트 UI 검증은 제거된 표시 문구만 정정하고, 개별 진행률·행 DOM·검색/스크롤·오래된 정본 거부·읽기 전용·오류 감지를 유지합니다.
 - 새 실행 파일의 PDF/CSV/OCR 저장·읽기·대조와 실제 확대/닫기, 공개 파일 hash·설치본·기존 사용자 자료 보존을 확인한 뒤 완료 상태로 갱신합니다.
+
+## 최종 후보 검증
+
+증거 경로는 `D:\DevCache\260725 PDF 추출`입니다.
+
+| 대상 | 실제 결과 |
+| --- | --- |
+| 전체 회귀 | `test-1.2.4-final.log`, **289개 PASS / 88.980초**. 테마 restart·다른 설정 보존·invalid 입력·쓰기 실패4개를 포함 |
+| 실제 UI 회귀 | `ui-minimal-1.2.4/regression-final-receipt.json`, minimal/reader/queue/resources4종 PASS 및 별도 브라우저 독립 재실행 PASS |
+| MD 확대 | 실제 Ctrl+휠110%·DOM동일·앵커 차이 약0.92px, 확대 상태 양방향 위치 연결·100%복귀·50–250% 상한 확인 |
+| 닫기 | MD/원본/대조3모드의 X가 목록으로 복귀하며 진행 상태 유지·취소 호출0 |
+| 테마·상세 정보 | dark 실제저장호출/reload복원·쓰기 실패 원상태, 경고 원문2건/파일정보 X·ESC/포커스 복귀 확인 |
+| 두 테마 화면 | `ui-minimal-1.2.4/final-shots/visual-final-receipt.json`, 1336/375px 라이트·다크20화면. 가로 넘침0·원본 흰종이/필터없음·체크박스14px |
+| 실제 EXE | `frozen-1.2.4-book/receipt.json`과 `frozen-1.2.4-scan/receipt.json`, 모두`ok=true`/실행파일 SHA동일. native 저장·원본/MD 대조·실제 OCR provenance 유지 |
+| 실제 EXE 확대·테마 | trusted CDP wheel 이벤트와 defaultPrevented,110%/내용·body폭불변/100%복귀, X/재열기·footer/savebar비노출, native theme저장·실제WebView reload복원·원본 필터없음 확인 |
+| 실제 책 동시 실행 | 포커스/가시성 에뮬레이션 조건의 SDK 진행0/0/0/28쪽 관측, 상태 bridge최대6.3ms/브라우저HTTP최대16.5ms·기존2초기준 PASS, 추가CSV 독립저장·중지456ms·원본/TEMP보존 |
+| 산출물 감사 | `build-1.2.4-artifacts-verification.json ok=true`, main44/worker4 소스·내장코드·고지33/21패키지·ONNX17/Kiwi9·입력275개 불변 확인 |
+
+소스/UI SHA256은 `c7a1fa5a18e715fa0851144040dbeaec011dc9e0644177c4dd2dc5ee789bc8f1`입니다. 브라우저 검증은 실제 UI에 합성 native 응답을 연결한 것이며, 실제 EXE 검증은 별도 영수증입니다. 실제 책 시험은 동시 실행·취소를 위한 부분 실행으로396쪽 완주나 모든 입력→paint 성능 보장을 뜻하지 않습니다. 추출 코어 알고리즘은 이번 버전에서 바꾸지 않았습니다.
+
+| 최종 후보 | bytes | SHA256 |
+| --- | ---: | --- |
+| Setup | 243140721 | `e989c2f995702bdf3f049e5206daf45ee63a75f6fe3c5bcd6246db51ab20b0cd` |
+| main EXE | 11822697 | `1daca99e6bfabc48a845a7e44b03152d39b522d03d4499538950694acfb4c6bf` |
+| SDK worker | 10817172 | `3ca3f9504f64c9f25888112b9fffbfcb7d25cc0ea79451c6b7910f7d6ce5ef5b` |
+
+기존 프로그램·사용자 자료193개는 `deployment-backup-1.2.4/receipt.json`으로 SHA 대조 백업했습니다. 원본 PDF는 수정하지 않았으며,1.2.3 rollback Setup도 보존합니다. 새 버전의 공개·재다운로드·동일 HKCU 설치와 설치본 확인은 다음 단계입니다.
