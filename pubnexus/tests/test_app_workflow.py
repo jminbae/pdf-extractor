@@ -226,6 +226,87 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(result.get('source_unit_label'), unit)
                 self.assertTrue(result.get('source_ready'))
 
+    def test_fast_pptx_source_reads_header_without_running_full_pdf_renderer(self):
+        import sys
+        from types import SimpleNamespace
+        source = self.root / 'fast.pptx'
+        source.write_bytes(b'Synthetic opaque package for dispatch only')
+        self.app.pdfs = [source]
+        header = {'source_kind': 'presentation', 'source_ready': True,
+                  'source_revision': 'current-source', 'pages': [[960, 540]] * 71}
+        engine = SimpleNamespace(available=lambda: True, describe=Mock(return_value=header))
+        import pubnexus
+        with patch.dict(sys.modules, {'pubnexus.presentation_preview': engine}), \
+             patch.object(pubnexus, 'presentation_preview', engine, create=True), \
+             patch('pubnexus.preview.preview_path', side_effect=AssertionError('No full Office conversion for fast preview')) as slow:
+            result = self.app.source_view(0)
+        slow.assert_not_called()
+        self.assertEqual(result['source_kind'], 'presentation')
+        self.assertEqual(result['pages'], [[960, 540]] * 71)
+        engine.describe.assert_called_once_with(source, 0)
+
+    def test_fast_pptx_map_and_result_search_do_not_prepare_full_pdf(self):
+        from pptx import Presentation
+        from pubnexus import presentation_preview
+        source = self.root / 'searchable.pptx'
+        deck = Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[1])
+        slide.shapes.title.text = 'Searchable presentation 8426'
+        deck.save(source)
+        self.app.pdfs = [source]
+        self.app._work([source])
+        view = self.app.result_view(0)
+        with patch.object(presentation_preview, 'available', return_value=True), \
+             patch('pubnexus.preview.preview_path', side_effect=AssertionError('No full conversion for fast map/search')):
+            mapping = self.app.document_map(0, renderer='presentation')
+            result = support.app_module.Api(self.app).search(0, '8426', view['revision'], 'presentation')
+        self.assertEqual(mapping['source_kind'], 'presentation')
+        self.assertTrue(mapping['source_revision'])
+        self.assertTrue(any(block.get('slide') == 0 for block in mapping['blocks']))
+        self.assertTrue(all(not block['locations'] for block in mapping['blocks']))
+        self.assertTrue(result['ok'], result)
+        self.assertTrue(result['results'])
+
+    def test_presentation_raw_data_has_no_cors_and_rejects_stale_or_invalid_selection(self):
+        from pptx import Presentation
+        from pubnexus import presentation_preview
+        source = self.root / 'raw.pptx'
+        deck = Presentation(); deck.slides.add_slide(deck.slide_layouts[6]); deck.save(source)
+        self.app.pdfs = [source]
+        revision = presentation_preview.describe(source, 0)['source_revision']
+        handler = object.__new__(support.app_module.Handler)
+        handler.app = self.app
+        handler._send = Mock()
+        handler.send_error = Mock()
+        handler.path = '/presentation-data?p=0&r=' + revision
+        handler.do_GET()
+        self.assertEqual(handler._send.call_args.args[0], source.read_bytes())
+        self.assertNotIn('headers', handler._send.call_args.kwargs)
+        handler._send.reset_mock()
+        handler.path = '/presentation-data?p=0&r=' + '0' * 64
+        handler.do_GET()
+        handler.send_error.assert_called_with(409)
+        handler._send.assert_not_called()
+        handler.path = '/presentation-data?p=-1&r=' + revision
+        handler.do_GET()
+        handler.send_error.assert_called_with(404)
+
+    def test_presentation_static_modules_allow_opaque_frame_but_data_does_not(self):
+        from pubnexus import presentation_preview
+        handler = object.__new__(support.app_module.Handler)
+        handler.app = self.app
+        handler._send = Mock()
+        with patch.object(presentation_preview, 'asset', return_value=b'const fixture = true;'):
+            for route in ('/presentation-frame.mjs', '/presentation-vendor.js'):
+                handler.path = route
+                handler.do_GET()
+                self.assertEqual(handler._send.call_args.kwargs['headers'], {'Access-Control-Allow-Origin': '*'})
+            handler.path = '/presentation-frame'
+            handler.do_GET()
+        headers = handler._send.call_args.kwargs['headers']
+        self.assertEqual(headers, {'Content-Security-Policy': presentation_preview.CSP})
+        self.assertIn("connect-src 'none'", headers['Content-Security-Policy'])
+
     def test_original_search_works_before_markdown_exists(self):
         source = self.source()
         self.app.pdfs = [source]

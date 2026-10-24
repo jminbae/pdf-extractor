@@ -41,6 +41,17 @@ $appVer = (& $py -B -c "import runpy, sys; print(runpy.run_path(sys.argv[1]).get
 if ($LASTEXITCODE -ne 0 -or $appVer -notmatch '^\d+\.\d+\.\d+$') { throw '앱 버전을 읽지 못했습니다.' }
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
+# The PPTX reader uses a pinned browser renderer. Building fetches exact upstream
+# archives when needed; the installed application never downloads code or fonts.
+$presentationAssets = Join-Path $work 'engines\pptx-renderer-1.4.0'
+& $py -B (Join-Path $repo 'tools\build_presentation_renderer.py') --out $presentationAssets --source-cache (Join-Path $work 'pptx-browser-1.2.5\archives')
+if ($LASTEXITCODE -ne 0) { throw 'The pinned PPTX browser renderer could not be prepared' }
+foreach ($assetName in @('presentation-frame.html', 'presentation-frame.mjs')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $repo ('pubnexus\web\' + $assetName)))) {
+        throw ('The PPTX sandbox frame source is missing: ' + $assetName)
+    }
+}
+
 $entry = Join-Path $repo "pubnexus\app.py"
 if (-not (Test-Path $entry)) { throw "화면 파일이 없다: $entry" }
 
@@ -83,6 +94,10 @@ try {
         "--add-data", "$cfgTmp;.",
         "--add-data", "$glsTmp;.",
         '--add-data', ($pdfEngineDir + ';engines/pdf-markdown'),
+        '--add-data', ((Join-Path $presentationAssets 'renderer.mjs') + ';web/pptx-renderer'),
+        '--add-data', ((Join-Path $presentationAssets 'manifest.json') + ';web/pptx-renderer'),
+        '--add-data', ((Join-Path $repo 'pubnexus\web\presentation-frame.html') + ';web'),
+        '--add-data', ((Join-Path $repo 'pubnexus\web\presentation-frame.mjs') + ';web'),
         "--collect-submodules", "pubnexus",
         "--collect-all", "webview",
         "--hidden-import", "clr_loader",
@@ -135,6 +150,14 @@ if (-not (Test-Path $app)) { throw "결과물이 없다: $app" }
     --toc (Join-Path $work 'work\PDF Extractor\Analysis-00.toc') `
     --destination (Join-Path (Split-Path $app) 'licenses') --repo $repo --version $appVer
 if ($LASTEXITCODE -ne 0) { throw 'Main dependency license collection failed' }
+
+# Keep browser notices and the MPL corresponding source beside the other
+# installed notices, at the exact path promised by the upstream manifest.
+$presentationNotices = Join-Path (Split-Path $app) 'licenses\pptx_renderer'
+New-Item -ItemType Directory -Force -Path $presentationNotices | Out-Null
+Get-ChildItem -LiteralPath (Join-Path $presentationAssets 'licenses') | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $presentationNotices -Recurse -Force
+}
 
 # ── 설치프로그램으로 묶는다 ─────────────────────────────────────────────
 # 리포에는 exe 를 두지 않는다. 배포는 Releases 의 설치프로그램 하나로 한다

@@ -1,5 +1,11 @@
 # 문서 추출기 구현 진행 기록
 
+## 진행 중 — 2026-10-24, 1.2.5 공통 확대·PPTX 대기와 보기 UX
+
+사용자는 PPTX 첫 화면1–2초, 원본을 포함한 공통확대, 목록 복귀·현재문서 추출과 간결한 화면을 요청했습니다. root backend/preview checkpoint는 `96131b79a37e30fe6ee594ad126d3da3a820ee73`이며1.2.5는 아직 미공개·미설치입니다. LO 전체 변환은 첫 화면 목표를 충족하지 못해 공개 `@aiden0z/pptx-renderer`1.4.0의 수정 없는 번들로 PPTX만 먼저 표시·요청 장만 렌더하도록 통합했습니다. backend revision/ZIP/asset 경계, sandbox/CSP·nonce 전송, 공개API 검색·공통 확대와 고지·MPL대응소스 동봉까지 검수 중입니다. UIworker는 마지막 응답 경계와 실제 frozen Office71장 시험, debugger는 실제 App HTTP71장 속도를 담당합니다. root는 전체회귀/새빌드·정확한공개/설치 검증을 이어갑니다.
+
+실제사용자PPTX가이전폴더에없어현재경로를비동기로물었고 아직 미제공입니다. 독립 Chromium 합성71장 약17MB에서 첫 그림 decode·fonts·2RAF219ms, 다음장37ms, 임의71장101ms였으나 실제 App/EXE 증거와 구분합니다. pre-fast1.2.5빌드와 focused native8.682초 결과는 보존하되 최종 배포·성능 증거로 쓰지 않습니다. 현재1.2.4/사용자자료·settings194파일은DevCache/deployment-backup-1.2.5에백업했습니다. 기존설치/정상앱에실험용결과를반영하지않습니다. 상세작업/검증은 [1.2.5 기록](./2026-10-24-reader-1.2.5.md)을보세요.
+
 ## 완료 — 2026-10-24, 1.2.4 간결한 UI·다크 모드 공개·설치
 
 **[v1.2.4 공개](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.4)·공개 파일 재다운로드·기존 HKCU 설치 갱신·실제 설치본 확인을 마쳤습니다.** 공개 tag/source commit `c7898134d0b5164f94b7bf10f0f7f6463a504ce6`, 구현 checkpoint `981de5ebbe2d971d64e5337a85e89de393fb2651`, UI SHA `c7a1fa5a…89bc8f1`입니다. Ctrl+휠50–250%/배율클릭100%, 보기X·파일명/검색한줄, 경로·합계·리소스·정상안내 제거와 native설정 라이트/다크 저장·복원을 적용했습니다. 추출 코어·메모리 진입 정책은 바꾸지 않았습니다.

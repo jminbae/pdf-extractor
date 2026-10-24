@@ -1134,8 +1134,10 @@ class App:
         return self._warning_cache[key]
 
     # ── 문서 한 편 ──────────────────────────────────────────────────
-    def source_view(self, i: int) -> dict:
+    def source_view(self, i: int, *, renderer: str = '') -> dict:
         """Read the original preview without touching extraction, results or queue."""
+        if renderer not in ('', 'presentation', 'pdf'):
+            return {'error': '지원하지 않는 표시 방식입니다.'}
         if not (0 <= i < len(self.pdfs)):
             return {"error": "없는 항목"}
         pdf = self.pdfs[i]
@@ -1147,10 +1149,15 @@ class App:
                                       '원본 PDF' if suffix == '.pdf' else '원본 문서'),
                      "source_unit_label": '슬라이드' if slides else '쪽'}
         try:
+            if suffix == '.pptx' and renderer != 'pdf':
+                from pubnexus import presentation_preview
+                if presentation_preview.available():
+                    res.update(presentation_preview.describe(pdf, i))
+                    return res
             from pubnexus.preview import preview_path
             original_view = preview_path(pdf)
             res.update(self.renderer.open(original_view.path))
-            res.update(source_converted=original_view.converted, source_engine=original_view.engine)
+            res.update(source_converted=original_view.converted, source_engine=original_view.engine, source_kind='pdf')
         except Exception as e:  # noqa: BLE001
             res["pdf_error"] = f"{type(e).__name__}: {e}"
             res["pages"] = []
@@ -1317,12 +1324,16 @@ class App:
         changed = hashlib.sha256(data).hexdigest() != output.get('markdown_sha256')
         return data.decode('utf-8-sig', errors='replace'), changed
 
-    def comparison_doc(self, index: int) -> tuple[dict, Path]:
+    def comparison_doc(self, index: int, *, renderer: str = '') -> tuple[dict, Path]:
+        if renderer not in ('', 'presentation', 'pdf'):
+            raise ValueError('지원하지 않는 표시 방식입니다.')
         from pubnexus import store, comparison
         from pubnexus.preview import preview_path, renderer_identity
         if type(index) is not int or not 0 <= index < len(self.pdfs):
             raise ValueError('문서를 선택하세요.')
         source = self.pdfs[index]
+        from pubnexus import presentation_preview
+        fast_presentation = source.suffix.lower() == '.pptx' and renderer != 'pdf' and presentation_preview.available()
         source_stat = source.stat()
         output = self.exported.get(_norm(source)) or {}
         sha = self.sha_for(source, deep=True)
@@ -1334,7 +1345,8 @@ class App:
         md_stat = md_path.stat() if md_path and md_path.is_file() else None
         cache_key = (_norm(source), source_stat.st_size, source_stat.st_mtime_ns,
                      md_stat.st_size if md_stat else None, md_stat.st_mtime_ns if md_stat else None,
-                     output.get('source_sha1'), snapshot['revision'] if snapshot else None, renderer_identity(source))
+                     output.get('source_sha1'), snapshot['revision'] if snapshot else None,
+                     'presentation:' + presentation_preview.VERSION if fast_presentation else renderer_identity(source))
         hit = self._comparison_cache.get(cache_key)
         display_stat = hit[2].stat() if hit and hit[2].is_file() else None
         if hit and display_stat and hit[3] == (display_stat.st_size, display_stat.st_mtime_ns):
@@ -1349,24 +1361,32 @@ class App:
             raise ValueError('저장된 MD가 외부에서 변경되어 위치 연결을 껐습니다.')
         if not doc.get('body_text') and doc.get('sections'):
             doc = dict(doc, body_text=doc['sections'])
-        try:
-            display_source = preview_path(source).path
-        except RuntimeError:
+        header = presentation_preview.describe(source, index) if fast_presentation else None
+        if fast_presentation:
             display_source = source
+        else:
+            try:
+                display_source = preview_path(source).path
+            except RuntimeError:
+                display_source = source
         doc = comparison.attach(doc, display_source)
         doc['_reader_revision'] = snapshot['revision'] if snapshot else None
         display_stat = display_source.stat()
-        mapping = dict(comparison.document_map(doc, display_source), revision=doc['_reader_revision'])
+        mapping = dict(presentation_preview.document_map(doc, header) if header else
+                       comparison.document_map(doc, display_source), revision=doc['_reader_revision'])
+        current_stat = source.stat()
+        if (source_stat.st_size, source_stat.st_mtime_ns) != (current_stat.st_size, current_stat.st_mtime_ns):
+            raise ValueError('원본이 변경됐습니다. 다시 여세요.')
         self._comparison_cache[cache_key] = (doc, mapping, display_source,
                                              (display_stat.st_size, display_stat.st_mtime_ns))
         while len(self._comparison_cache) > 4:
             self._comparison_cache.popitem(last=False)
         return doc, display_source
 
-    def document_map(self, index: int) -> dict:
+    def document_map(self, index: int, *, renderer: str = '') -> dict:
         from pubnexus import comparison
         try:
-            doc, source = self.comparison_doc(index)
+            doc, source = self.comparison_doc(index, renderer=renderer) if renderer else self.comparison_doc(index)
             hit = next((value for value in self._comparison_cache.values() if value[0] is doc), None)
             return dict(hit[1] if hit else comparison.document_map(doc, source), revision=doc.get('_reader_revision'))
         except (ValueError, OSError) as error:
@@ -1813,11 +1833,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_a) -> None:      # 콘솔을 더럽히지 않는다
         pass
 
-    def _send(self, body: bytes, ctype: str, cache: str = "no-store") -> None:
+    def _send(self, body: bytes, ctype: str, cache: str = "no-store", *, headers: dict | None = None) -> None:
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -1852,10 +1875,30 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/open":
                 index = int(q.get('p', ['-1'])[0])
                 mode = q.get('mode', [''])[0]
-                self._json(self.app.source_view(index) if mode == 'source' else
+                renderer = q.get('renderer', [''])[0]
+                self._json(self.app.source_view(index, renderer=renderer) if mode == 'source' else
                            self.app.result_view(index) if mode == 'result' else self.app.paper(index))
             elif u.path == "/document-map":
-                self._json(self.app.document_map(int(q.get('p', ['-1'])[0])))
+                self._json(self.app.document_map(int(q.get('p', ['-1'])[0]), renderer=q.get('renderer', [''])[0]))
+            elif u.path in {'/presentation-frame', '/presentation-frame.mjs', '/presentation-vendor.js'}:
+                from pubnexus import presentation_preview
+                frame = u.path == '/presentation-frame'
+                name = 'presentation-frame.html' if frame else 'presentation-frame.mjs' if u.path.endswith('.mjs') else 'vendor'
+                headers = {'Content-Security-Policy': presentation_preview.CSP} if frame else {'Access-Control-Allow-Origin': '*'}
+                self._send(presentation_preview.asset(name), 'text/html; charset=utf-8' if frame else
+                           'text/javascript; charset=utf-8', headers=headers)
+            elif u.path == '/presentation-data':
+                from pubnexus import presentation_preview
+                index = int(q.get('p', ['-1'])[0])
+                if not 0 <= index < len(self.app.pdfs):
+                    self.send_error(404)
+                    return
+                try:
+                    body = presentation_preview.read_data(self.app.pdfs[index], q.get('r', [''])[0])
+                except (ValueError, OSError):
+                    self.send_error(409)
+                    return
+                self._send(body, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
             elif u.path == "/page":
                 data = self.app.renderer.png(int(q["k"][0]), int(q["i"][0]),
                                              int(q["w"][0]))
@@ -2130,14 +2173,14 @@ class Api:
         self._app.cancel.set()
         return {"ok": True}
 
-    def search(self, index: int, query: str, expected_revision: str | None = None) -> dict:
+    def search(self, index: int, query: str, expected_revision: str | None = None, renderer: str = '') -> dict:
         from pubnexus import comparison
         try:
             snapshot = self._app._saved_snapshot(self._app.pdfs[index])
             if expected_revision is not None and (not snapshot or snapshot['revision'] != expected_revision):
                 return {'ok': False, 'code': 'stale_revision', 'why': '새 Markdown이 저장되었습니다. MD를 다시 열어 검색하세요.', 'results': []}
-            doc, source = self._app.comparison_doc(index)
-            mapping = self._app.document_map(index)
+            doc, source = self._app.comparison_doc(index, renderer=renderer) if renderer else self._app.comparison_doc(index)
+            mapping = self._app.document_map(index, renderer=renderer) if renderer else self._app.document_map(index)
             if expected_revision is not None and mapping.get('revision') != expected_revision:
                 return {'ok': False, 'code': 'stale_revision', 'why': '새 Markdown이 저장되었습니다. MD를 다시 열어 검색하세요.', 'results': []}
             return comparison.search(doc, source, query, mapping=mapping)
@@ -2159,8 +2202,8 @@ class Api:
         except (ValueError, OSError, RuntimeError) as error:
             return {'ok': False, 'why': str(error), 'results': []}
 
-    def location(self, index: int, block_id: str, expected_revision: str | None = None) -> dict:
-        data = self._app.document_map(index)
+    def location(self, index: int, block_id: str, expected_revision: str | None = None, renderer: str = '') -> dict:
+        data = self._app.document_map(index, renderer=renderer) if renderer else self._app.document_map(index)
         if expected_revision is not None and data.get('revision') != expected_revision:
             return {'ok': False, 'code': 'stale_revision', 'why': '새 Markdown이 저장되었습니다. MD를 다시 열어 위치를 확인하세요.'}
         block = next((b for b in data['blocks'] if b['id'] == block_id), None)

@@ -1,0 +1,475 @@
+{
+  "schema_version": 1,
+  "engine": "@aiden0z/pptx-renderer",
+  "version": "1.4.0",
+  "upstream_tag": "https://github.com/aiden0z/pptx-renderer/tree/v1.4.0",
+  "vendor_patches": false,
+  "bundle": {
+    "npm_entry": "package/dist/aiden0z-pptx-renderer.browser.es.js",
+    "cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\package\\dist\\aiden0z-pptx-renderer.browser.es.js",
+    "sha256": "eed96db79a8300ef66a57e8a5f4f2c06a5cb78ac30b7eecd5df921c05ac5069b",
+    "bytes": 2371205
+  },
+  "runtime_policy": {
+    "external_media": "block",
+    "pdfjs": false,
+    "remote_network": false,
+    "lazy_media": true,
+    "lazy_slides": true
+  },
+  "dependency_scope": "Conservative complete upstream runtime dependency closure. Published JSZip includes a prebuilt browser sub-bundle; some Node-only closure files may be omitted by the browser build. No inferred exact sub-bundle dependency version claim.",
+  "upstream_lock": {
+    "url": "https://raw.githubusercontent.com/aiden0z/pptx-renderer/v1.4.0/pnpm-lock.yaml",
+    "sha256": "427728df321cf001e878b08bd0cdb6e0fcd117897a264b6def4e09fe4a6a2a11"
+  },
+  "packages": [
+    {
+      "name": "@aiden0z/pptx-renderer",
+      "version": "1.4.0",
+      "declared_license": "Apache-2.0",
+      "metadata_url": "https://registry.npmjs.org/@aiden0z%2Fpptx-renderer/1.4.0",
+      "tarball_url": "https://registry.npmjs.org/@aiden0z/pptx-renderer/-/pptx-renderer-1.4.0.tgz",
+      "integrity": "sha512-GUQbdJCYjTfXkJWtSgo5pIYXZYQjOQLlnjfRYE5ycpWgPa8rIK711wQa0kAl71H++vYnFYUp9fjQkKB8K/6ShA==",
+      "tarball_sha256": "3c10129958f16d8b2a97b9d3afc28600189ace99a01930dd53e8067d6b2662a3",
+      "tarball_bytes": 907100,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\aiden0z-pptx-renderer-1.4.0.tgz",
+      "dependencies": [
+        "echarts",
+        "jszip",
+        "mtx-decompressor"
+      ],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/aiden0z-pptx-renderer/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "bytes": 11357
+        },
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/aiden0z-pptx-renderer/THIRD_PARTY_NOTICES.md",
+          "archive_entry": "package/THIRD_PARTY_NOTICES.md",
+          "sha256": "4e49f2e111bff02e594594abbca7924076649d9cc8826d80e42fd7ed2f4fa11c",
+          "bytes": 2144
+        },
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/aiden0z-pptx-renderer/licenses/ECMA-text-copyright-notice.txt",
+          "archive_entry": "package/licenses/ECMA-text-copyright-notice.txt",
+          "sha256": "9a08c202df693f91f1f3b1674a64f5989d6269d5d89f710bc65e0fb2757d8f1f",
+          "bytes": 2254
+        },
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/aiden0z-pptx-renderer/licenses/mtx-decompressor-MPL-2.0.txt",
+          "archive_entry": "package/licenses/mtx-decompressor-MPL-2.0.txt",
+          "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
+          "bytes": 16725
+        }
+      ]
+    },
+    {
+      "name": "echarts",
+      "version": "6.0.0",
+      "declared_license": "Apache-2.0",
+      "metadata_url": "https://registry.npmjs.org/echarts/6.0.0",
+      "tarball_url": "https://registry.npmjs.org/echarts/-/echarts-6.0.0.tgz",
+      "integrity": "sha512-Tte/grDQRiETQP4xz3iZWSvoHrkCQtwqd6hs+mifXcjrCuo2iKWbajFObuLJVBlDIJlOzgQPd1hsaKt/3+OMkQ==",
+      "tarball_sha256": "5776a250a33c375f794d796f661d7b88ca36ec5fb16dbff374dd25bf5a64b26b",
+      "tarball_bytes": 11434762,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\echarts-6.0.0.tgz",
+      "dependencies": [
+        "zrender",
+        "tslib"
+      ],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/echarts/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "634293835b43a6dd2094fa39182a3d9a6b9ca43b7fdb9ac354e8037af2a3093a",
+          "bytes": 11990
+        },
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/echarts/licenses/LICENSE-d3",
+          "archive_entry": "package/licenses/LICENSE-d3",
+          "sha256": "e1211892da0b0e0585b7aebe8f98c1274fba15bafe47fa1f4ee8a7a502c06304",
+          "bytes": 1475
+        },
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/echarts/NOTICE",
+          "archive_entry": "package/NOTICE",
+          "sha256": "dc0d9176413c3d96d0ac40b39b1dbb11e3043b7b010be560f5dfe66bd3774ae1",
+          "bytes": 168
+        }
+      ]
+    },
+    {
+      "name": "zrender",
+      "version": "6.0.0",
+      "declared_license": "BSD-3-Clause",
+      "metadata_url": "https://registry.npmjs.org/zrender/6.0.0",
+      "tarball_url": "https://registry.npmjs.org/zrender/-/zrender-6.0.0.tgz",
+      "integrity": "sha512-41dFXEEXuJpNecuUQq6JlbybmnHaqqpGlbH1yxnA5V9MMP4SbohSVZsJIwz+zdjQXSSlR1Vc34EgH1zxyTDvhg==",
+      "tarball_sha256": "09e43233286adf643a621f9d76fe8d34b9fe7037ff7fa418b3d946d00d75ae7c",
+      "tarball_bytes": 889423,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\zrender-6.0.0.tgz",
+      "dependencies": [
+        "tslib"
+      ],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/zrender/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "a681e9d183c72b4af4856935893805eb48c08f0f5a3f260203db7444c20fb98a",
+          "bytes": 1509
+        }
+      ]
+    },
+    {
+      "name": "tslib",
+      "version": "2.3.0",
+      "declared_license": "0BSD",
+      "metadata_url": "https://registry.npmjs.org/tslib/2.3.0",
+      "tarball_url": "https://registry.npmjs.org/tslib/-/tslib-2.3.0.tgz",
+      "integrity": "sha512-N82ooyxVNm6h1riLCoyS9e3fuJ3AMG2zIZs2Gd1ATcSFjSA23Q0fzjjZeh0jbJvWVDZ0cJT8yaNNaaXHzueNjg==",
+      "tarball_sha256": "ae285639feff7e3c39de4626352181a5d73b815725e42639b411c43848abffdb",
+      "tarball_bytes": 8025,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\tslib-2.3.0.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/tslib/CopyrightNotice.txt",
+          "archive_entry": "package/CopyrightNotice.txt",
+          "sha256": "dd835e67a9a297da32f9467d7677a5d02c8e50e10f15da43b810147c79c04b9b",
+          "bytes": 824
+        },
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/tslib/LICENSE.txt",
+          "archive_entry": "package/LICENSE.txt",
+          "sha256": "210b19e543130388c68654b7497e967119ce17145f66ab7d85688fbd70f08751",
+          "bytes": 655
+        }
+      ]
+    },
+    {
+      "name": "jszip",
+      "version": "3.10.1",
+      "declared_license": "(MIT OR GPL-3.0-or-later)",
+      "metadata_url": "https://registry.npmjs.org/jszip/3.10.1",
+      "tarball_url": "https://registry.npmjs.org/jszip/-/jszip-3.10.1.tgz",
+      "integrity": "sha512-xXDvecyTpGLrqFrvkrUSoxxfJI5AH7U8zxxtVclpsUtMCq4JQ290LY8AW5c7Ggnr/Y/oK+bQMbqK2qmtk3pN4g==",
+      "tarball_sha256": "5117f4a2a645aeb307bf3b829c575ad58135cc97e75291e594532ab5b5b21b23",
+      "tarball_bytes": 195083,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\jszip-3.10.1.tgz",
+      "dependencies": [
+        "lie",
+        "pako",
+        "readable-stream",
+        "setimmediate"
+      ],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/jszip/LICENSE.markdown",
+          "archive_entry": "package/LICENSE.markdown",
+          "sha256": "566c953c6090b1218ca6217dd7359d45dde46581968586dc607d59a78af6a9c4",
+          "bytes": 33753
+        }
+      ]
+    },
+    {
+      "name": "lie",
+      "version": "3.3.0",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/lie/3.3.0",
+      "tarball_url": "https://registry.npmjs.org/lie/-/lie-3.3.0.tgz",
+      "integrity": "sha512-UaiMJzeWRlEujzAuw5LokY1L5ecNQYZKfmyZ9L7wDHb/p5etKaxXhohBcrw0EYby+G/NA52vRSN4N39dxHAIwQ==",
+      "tarball_sha256": "2db8461cd4a10e2fc3588c8c55da34d33465ff81cc19c72416bbcaec7ee6a36e",
+      "tarball_bytes": 8877,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\lie-3.3.0.tgz",
+      "dependencies": [
+        "immediate"
+      ],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/lie/license.md",
+          "archive_entry": "package/license.md",
+          "sha256": "5c81b0caa98593408b03125efa25efe622341ed87ae55561968828cd887d64a4",
+          "bytes": 1084
+        }
+      ]
+    },
+    {
+      "name": "immediate",
+      "version": "3.0.6",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/immediate/3.0.6",
+      "tarball_url": "https://registry.npmjs.org/immediate/-/immediate-3.0.6.tgz",
+      "integrity": "sha512-XXOFtyqDjNDAQxVfYxuF7g9Il/IbWmmlQg2MYKOH8ExIT1qg6xc4zyS3HaEEATgs1btfzxq15ciUiY7gjSXRGQ==",
+      "tarball_sha256": "98c792f39650b00818c05dcc407902034dc4092f368596b37658d44f28739d11",
+      "tarball_bytes": 4905,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\immediate-3.0.6.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/immediate/LICENSE.txt",
+          "archive_entry": "package/LICENSE.txt",
+          "sha256": "809e66de579fb7d92503848bbe6d1f348f4f6521a71e5d294fe7cc0c87a3b4ff",
+          "bytes": 1115
+        }
+      ]
+    },
+    {
+      "name": "pako",
+      "version": "1.0.11",
+      "declared_license": "(MIT AND Zlib)",
+      "metadata_url": "https://registry.npmjs.org/pako/1.0.11",
+      "tarball_url": "https://registry.npmjs.org/pako/-/pako-1.0.11.tgz",
+      "integrity": "sha512-4hLB8Py4zZce5s4yd9XzopqwVv/yGNhV1Bl8NTmCq1763HeK2+EwVTv+leGeL13Dnh2wfbqowVPXCIO0z4taYw==",
+      "tarball_sha256": "0d4028dc0352a740c30cbfd772917f2744986d42bfa0b06ec7642bffe7ad3941",
+      "tarball_bytes": 204482,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\pako-1.0.11.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/pako/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539",
+          "bytes": 1104
+        }
+      ]
+    },
+    {
+      "name": "readable-stream",
+      "version": "2.3.8",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/readable-stream/2.3.8",
+      "tarball_url": "https://registry.npmjs.org/readable-stream/-/readable-stream-2.3.8.tgz",
+      "integrity": "sha512-8p0AUk4XODgIewSi0l8Epjs+EVnWiK7NoDIEGU0HhE7+ZyY8D1IMY7odu5lRrFXGg71L15KG8QrPmum45RTtdA==",
+      "tarball_sha256": "1648613948f68ac9cbbe8f72a3f93a67ecdb862ffb57946a2c0bbb5a1479a532",
+      "tarball_bytes": 25747,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\readable-stream-2.3.8.tgz",
+      "dependencies": [
+        "core-util-is",
+        "inherits",
+        "isarray",
+        "process-nextick-args",
+        "safe-buffer",
+        "string_decoder",
+        "util-deprecate"
+      ],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/readable-stream/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "ec62dc96da0099b87f4511736c87309335527fb7031639493e06c95728dc8c54",
+          "bytes": 2337
+        }
+      ]
+    },
+    {
+      "name": "setimmediate",
+      "version": "1.0.5",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/setimmediate/1.0.5",
+      "tarball_url": "https://registry.npmjs.org/setimmediate/-/setimmediate-1.0.5.tgz",
+      "integrity": "sha512-MATJdZp8sLqDl/68LfQmbP8zKPLQNV6BIZoIgrscFDQ+RsvK/BxeDQOgyxKKoh0y/8h3BqVFnCqQ/gd+reiIXA==",
+      "tarball_sha256": "5cb9fc22698364ed42c02d6aa3dc50ffeafa68452ae84699672e3dfd74922c9e",
+      "tarball_bytes": 3255,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\setimmediate-1.0.5.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/setimmediate/LICENSE.txt",
+          "archive_entry": "package/LICENSE.txt",
+          "sha256": "c4b4ad3a5746f1f5249a6dd90396ec519264e1bb02e01e48a6522c48a3a97cb4",
+          "bytes": 1103
+        }
+      ]
+    },
+    {
+      "name": "core-util-is",
+      "version": "1.0.3",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/core-util-is/1.0.3",
+      "tarball_url": "https://registry.npmjs.org/core-util-is/-/core-util-is-1.0.3.tgz",
+      "integrity": "sha512-ZQBvi1DcpJ4GDqanjucZ2Hj3wEO5pZDS89BWbkcrvdxksJorwUDDZamX9ldFkp9aw2lmBDLgkObEA4DWNJ9FYQ==",
+      "tarball_sha256": "4430fdc71f2cf3b5e297113b9a692da2d6cff96cf84da00f0ecef5e5a6e74d0c",
+      "tarball_bytes": 1897,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\core-util-is-1.0.3.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/core-util-is/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "33b734d60042d0fe0c92dd1fc1e874193a1c899ec3e276a2eb935d2d0bf5b710",
+          "bytes": 1077
+        }
+      ]
+    },
+    {
+      "name": "inherits",
+      "version": "2.0.4",
+      "declared_license": "ISC",
+      "metadata_url": "https://registry.npmjs.org/inherits/2.0.4",
+      "tarball_url": "https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz",
+      "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==",
+      "tarball_sha256": "d94dbc6c1bb3c5ac0fb12a73ade187108fc60de273a1b754f55044eb5e24afaf",
+      "tarball_bytes": 2030,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\inherits-2.0.4.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/inherits/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "5ffe28e7ade7d8f10d85d5337a73fd793dac5c462fb9a28fbf8c5046c7fbca3b",
+          "bytes": 749
+        }
+      ]
+    },
+    {
+      "name": "isarray",
+      "version": "1.0.0",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/isarray/1.0.0",
+      "tarball_url": "https://registry.npmjs.org/isarray/-/isarray-1.0.0.tgz",
+      "integrity": "sha512-VLghIWNM6ELQzo7zwmcg0NmTVyWKYjvIeM83yjp0wRDTmUnrM678fQbcKBo6n2CJEF0szoG//ytg+TKla89ALQ==",
+      "tarball_sha256": "e23c76f14f5222e07e39d89858b61e8e33f96956de9e0df3659cbdf8db950c87",
+      "tarball_bytes": 2021,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\isarray-1.0.0.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/isarray/README.md",
+          "archive_entry": "package/README.md",
+          "sha256": "ff138e683771b187f3629c383db72ee7d632009010a36d08e18e8d2a34222ec7",
+          "bytes": 1890
+        }
+      ]
+    },
+    {
+      "name": "process-nextick-args",
+      "version": "2.0.1",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/process-nextick-args/2.0.1",
+      "tarball_url": "https://registry.npmjs.org/process-nextick-args/-/process-nextick-args-2.0.1.tgz",
+      "integrity": "sha512-3ouUOpQhtgrbOa17J7+uxOTpITYWaGP7/AhoR3+A+/1e9skrzelGi/dXzEYyvbxubEF6Wn2ypscTKiKJFFn1ag==",
+      "tarball_sha256": "425bf8c725d23bc5ac76bcedd10d9cdbbd6354c7273dd7def44417cfbca8889b",
+      "tarball_bytes": 1654,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\process-nextick-args-2.0.1.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/process-nextick-args/license.md",
+          "archive_entry": "package/license.md",
+          "sha256": "ecdccbcf39024f624ded480c01c0b25458e1eca8f26ecf040933865ce56d9a4f",
+          "bytes": 1064
+        }
+      ]
+    },
+    {
+      "name": "safe-buffer",
+      "version": "5.1.2",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/safe-buffer/5.1.2",
+      "tarball_url": "https://registry.npmjs.org/safe-buffer/-/safe-buffer-5.1.2.tgz",
+      "integrity": "sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g==",
+      "tarball_sha256": "e09206c60fccafb952c854af7629cbb031a98d6da2e143fb3aa3c8a48402aa22",
+      "tarball_bytes": 9822,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\safe-buffer-5.1.2.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/safe-buffer/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac",
+          "bytes": 1081
+        }
+      ]
+    },
+    {
+      "name": "string_decoder",
+      "version": "1.1.1",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/string_decoder/1.1.1",
+      "tarball_url": "https://registry.npmjs.org/string_decoder/-/string_decoder-1.1.1.tgz",
+      "integrity": "sha512-n/ShnvDi6FHbbVfviro+WojiFzv+s8MPMHBczVePfUpDJLwoLT0ht1l4YwBCbi8pJAveEEdnkHyPyTP/mzRfwg==",
+      "tarball_sha256": "af8262434508fa8292407f7fef4690d19eabb73387ca230b41f2a1155216963a",
+      "tarball_bytes": 4831,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\string_decoder-1.1.1.tgz",
+      "dependencies": [
+        "safe-buffer"
+      ],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/string_decoder/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "11f2aafb37d06b3ee5bdaf06e9811141d0da05263c316f3d627f45c20d43261b",
+          "bytes": 2338
+        }
+      ]
+    },
+    {
+      "name": "util-deprecate",
+      "version": "1.0.2",
+      "declared_license": "MIT",
+      "metadata_url": "https://registry.npmjs.org/util-deprecate/1.0.2",
+      "tarball_url": "https://registry.npmjs.org/util-deprecate/-/util-deprecate-1.0.2.tgz",
+      "integrity": "sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==",
+      "tarball_sha256": "79a1de983c1b393180c47456d6b73caab278a00ea6e37d5c6675f2dcdec2a3e5",
+      "tarball_bytes": 2246,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\util-deprecate-1.0.2.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/util-deprecate/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "0154425673db15cdfa80ecba2c9b1f1a867f7197a006764712849bfc3a93cbb7",
+          "bytes": 1102
+        }
+      ]
+    },
+    {
+      "name": "mtx-decompressor",
+      "version": "1.4.2",
+      "declared_license": "MPL-2.0",
+      "metadata_url": "https://registry.npmjs.org/mtx-decompressor/1.4.2",
+      "tarball_url": "https://registry.npmjs.org/mtx-decompressor/-/mtx-decompressor-1.4.2.tgz",
+      "integrity": "sha512-vMvMnEnxw4FJYTmZP1ANvGH9K/dxYxDg4xaOgG1cdce3O1/hsvw/Try1QiSB19CAR7qYBKXYxwWDgSFBXEPjEg==",
+      "tarball_sha256": "abb4d1b0289753fa917703af5bc801b6be773787c9db57ca194d11006aa1b4f6",
+      "tarball_bytes": 29554,
+      "archive_cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\mtx-decompressor-1.4.2.tgz",
+      "dependencies": [],
+      "notices": [
+        {
+          "path": "tools/third_party_licenses/pptx_renderer/mtx-decompressor/LICENSE",
+          "archive_entry": "package/LICENSE",
+          "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
+          "bytes": 16725
+        }
+      ]
+    }
+  ],
+  "required_source_archives": [
+    {
+      "name": "mtx-decompressor",
+      "version": "1.4.2",
+      "license": "MPL-2.0",
+      "url": "https://codeload.github.com/ChristopherVR/mtx-decompressor/tar.gz/refs/tags/v1.4.2",
+      "cache_path": "D:\\DevCache\\260725 PDF 추출\\pptx-browser-1.2.5\\archives\\mtx-decompressor-v1.4.2-source.tar.gz",
+      "sha256": "e4edf429b1614a8f7366a55cffe58b35c58e784f0d4719d209cc3aa28ef3d970",
+      "bytes": 72781,
+      "bundle_relative_path": "licenses/pptx_renderer/sources/mtx-decompressor-v1.4.2-source.tar.gz",
+      "required": true
+    }
+  ],
+  "distribution_requirements": [
+    "Copy every listed license/NOTICE unchanged alongside the installed application.",
+    "Bundle the required unmodified MPL corresponding-source archive at the specified relative path; do not rely solely on an external URL.",
+    "Do not remove copyright/license banners from the unchanged browser bundle.",
+    "Keep optional pdfjs disabled; it is not included in this manifest.",
+    "Source archives/package tarballs remain in DevCache; the repository contains only small notice text and this manifest."
+  ],
+  "distribution_notice": {
+    "path": "tools/third_party_licenses/pptx_renderer/PPTX_RENDERER_NOTICES.md",
+    "sha256": "651339e07cac4a6568b15c8807ac7358d4eaa02df77a0d2fa77ed5e65840f15f",
+    "bytes": 2527,
+    "required": true
+  }
+}
