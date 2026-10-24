@@ -25,6 +25,7 @@ from __future__ import annotations
 import html as _html
 import hashlib
 import json
+import math
 import os
 import re
 import socket
@@ -261,51 +262,22 @@ def fig_path(sha1: str, rel: str) -> Path | None:
 
 
 def _img_size(fp: Path) -> tuple[int, int] | None:
-    """이미지의 픽셀 크기를 헤더만 읽어 알아낸다(PNG·JPEG). 모르면 None.
+    """Pillow의 표준 헤더 읽기로 이미지 크기를 확인한다. 모르면 None.
 
     왜 필요한가 — 크기 없는 <img> 는 불러오기 전까지 높이가 0 이다. 그래서
     본문 [15] 를 눌러 자리를 잡아 놓아도, 그 뒤에 그림이 도착하면서 문서가
     밀려 **엉뚱한 곳에 서 있게** 된다. width/height 를 주면 브라우저가 비율을
     알고 처음부터 자리를 비워 둔다.
     """
+    from PIL import Image
+    import warnings
     try:
-        with open(utils.long_path(fp), "rb") as f:
-            head = f.read(32)
-            if head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR":
-                return (int.from_bytes(head[16:20], "big"),
-                        int.from_bytes(head[20:24], "big"))
-            if head[:2] != b"\xff\xd8":          # JPEG 아님
-                return None
-            f.seek(2)
-            while True:
-                b = f.read(1)
-                if not b:
-                    return None
-                if b != b"\xff":
-                    continue
-                while b == b"\xff":              # 채움 바이트(0xFF) 건너뛰기
-                    b = f.read(1)
-                    if not b:
-                        return None
-                marker = b[0]
-                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
-                    continue                     # 길이 없는 표지
-                size = f.read(2)
-                if len(size) < 2:
-                    return None
-                seg = int.from_bytes(size, "big") - 2
-                # SOF0~SOF15 에 크기가 있다. DHT(C4)·JPG(C8)·DAC(CC) 는 제외.
-                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
-                    body = f.read(5)
-                    if len(body) < 5:
-                        return None
-                    w = int.from_bytes(body[3:5], "big")
-                    h = int.from_bytes(body[1:3], "big")
-                    # 깨진 파일에서 우연히 SOF 처럼 보이는 바이트열을 만나면 말도
-                    # 안 되는 크기가 나온다. 그대로 믿으면 빈 자리만 거대해진다.
-                    return (w, h) if 1 <= w <= 20000 and 1 <= h <= 20000 else None
-                f.seek(seg, 1)
-    except OSError:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            with Image.open(utils.long_path(fp)) as image:
+                width, height = image.size
+                return (width, height) if width > 0 and height > 0 else None
+    except (OSError, ValueError, Image.DecompressionBombWarning, Image.DecompressionBombError):
         return None
 
 
@@ -570,6 +542,43 @@ def sdk_to_html(md: str, blocks=(), sha1: str = '', *, asset_index: int | None =
             return None
         return ('/fig?' + urllib.parse.urlencode({'s': sha1, 'f': destination}), _img_size(path))
     return to_html(md, blocks, asset_url=asset_url, safe_table=_safe_table)
+
+
+_SOURCE_IMAGE_MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                      '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp'}
+
+
+def source_image_path(source: Path, destination: str) -> Path | None:
+    """Only existing raster images below this Markdown file's own directory."""
+    try:
+        parsed = urllib.parse.urlparse(destination)
+        relative = urllib.parse.unquote(parsed.path)
+        if (parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or not relative
+                or '\\' in relative or '\0' in relative or Path(relative).is_absolute()):
+            return None
+        base = source.parent.resolve()
+        image = (base / relative).resolve(strict=True)
+        if (not image.is_relative_to(base) or image.suffix.lower() not in _SOURCE_IMAGE_MIME
+                or not image.is_file() or image.stat().st_size > 32 * 1024 * 1024):
+            return None
+        size = _img_size(image)
+        if not size or min(size) <= 0 or size[0] * size[1] > 64_000_000:
+            return None
+        return image
+    except (OSError, ValueError):
+        return None
+
+
+def source_markdown_html(markdown: str, source: Path, index: int, revision: str) -> str:
+    from pubnexus.markdown_view import to_html
+
+    def asset_url(destination):
+        image = source_image_path(source, destination)
+        if image is None:
+            return None
+        return ('/source-asset?' + urllib.parse.urlencode({'p': index, 'expected_path': str(source),
+                'r': revision, 'f': destination}), _img_size(image))
+    return to_html(markdown, asset_url=asset_url, safe_table=_safe_table, source_lines=True)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1261,8 +1270,21 @@ class App:
             if text_view is not None:
                 check()
                 res.update(text_view)
+                if suffix == '.md':
+                    res.update(format='md', markdown_html=source_markdown_html(
+                        text_view['text'], pdf, i, text_view['source_revision']))
+                    check()
                 return res
             if renderer != 'pdf':
+                if suffix in {'.hwp', '.hwpx'}:
+                    from pubnexus import hwp_preview
+                    header = hwp_preview.describe(pdf, cancel=cancel)
+                    if header is not None:
+                        res.update(header)
+                        res['source_page_url'] = '/hwp-page?' + urllib.parse.urlencode(
+                            {'p': i, 'expected_path': str(pdf), 'r': header['source_revision']})
+                        check()
+                        return res
                 from pubnexus import native_preview
                 content = native_preview.view(pdf, cancel=cancel)
                 if content is not None:
@@ -2021,8 +2043,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.app._preview_requests.work(query.get('viewer', [None])[0], generation,
                                                 _norm(path) if path else None)
 
-    _IMG = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
+    _IMG = _SOURCE_IMAGE_MIME
 
     def _fig(self, sha1: str, rel: str) -> None:
         """저장소 그림 폴더의 이미지 한 장. 폴더 밖으로는 절대 나가지 않는다."""
@@ -2104,6 +2125,52 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error(404)
                 else:
                     self._send(*result)
+            elif u.path == '/source-asset':
+                from pubnexus.preview import text_source
+                try:
+                    original = self.app.selected_source(int(q.get('p', ['-1'])[0]), q.get('expected_path', [None])[0])
+                except StaleSelection as error:
+                    self._json(self.app.selection_error(error))
+                    return
+                except ValueError:
+                    self.send_error(404)
+                    return
+                if original.suffix.lower() != '.md':
+                    self.send_error(404)
+                    return
+                current = text_source(original)
+                if current is None or current['source_revision'] != q.get('r', [''])[0]:
+                    self._json({'error': '원본이 변경됐습니다. 다시 여세요.', 'code': 'stale_source'})
+                    return
+                image = source_image_path(original, q.get('f', [''])[0])
+                if image is None:
+                    self.send_error(404)
+                    return
+                self._send(image.read_bytes(), self._IMG[image.suffix.lower()])
+            elif u.path == '/hwp-page':
+                from pubnexus import hwp_preview
+                from pubnexus.preview import PreviewUnavailable
+                try:
+                    original = self.app.selected_source(int(q.get('p', ['-1'])[0]), q.get('expected_path', [None])[0])
+                    page = int(q.get('i', ['-1'])[0])
+                    width = min(4096, max(160, int(q.get('w', ['960'])[0])))
+                    revision = q.get('r', [''])[0]
+                    if not re.fullmatch(r'[0-9a-f]{64}', revision):
+                        raise PreviewUnavailable('문서를 다시 여세요.')
+                    with self._preview_work(q) as cancel:
+                        header = hwp_preview.describe(original, revision=revision, cancel=cancel)
+                        if header is None or not 0 <= page < len(header['pages']):
+                            raise PreviewUnavailable('원본 쪽 범위를 벗어났습니다.')
+                        page_width, page_height = header['pages'][page]
+                        dimension = math.ceil(max(width, width * page_height / page_width))
+                        body, mime = hwp_preview.read_page(original, revision, page, max_dimension=dimension, cancel=cancel)
+                        if cancel():
+                            raise PreviewCancelled('다른 문서로 이동했습니다.')
+                    self._send(body, mime)
+                except StaleSelection as error:
+                    self._json(self.app.selection_error(error))
+                except (ValueError, OSError, PreviewUnavailable) as error:
+                    self._json({'error': str(error), 'code': 'preview_unavailable'})
             elif u.path in {'/presentation-frame', '/presentation-frame.mjs', '/presentation-vendor.js'}:
                 from pubnexus import presentation_preview
                 frame = u.path == '/presentation-frame'
@@ -2501,6 +2568,9 @@ class Api:
             if text_view is not None:
                 from pubnexus import text_source as source_text
                 return dict(source_text.search(text_view, query), path=str(original))
+            if original.suffix.lower() in {'.hwp', '.hwpx'}:
+                from pubnexus import hwp_preview
+                return dict(hwp_preview.search(original, query), path=str(original))
             from pubnexus import native_preview
             native_result = native_preview.search(original, query)
             if native_result is not None:
@@ -2545,7 +2615,8 @@ class Api:
 
     def reveal(self, path: str) -> dict:
         try:
-            os.startfile(str(Path(path).parent))     # noqa: S606 — 탐색기 열기
+            selected = Path(path)
+            os.startfile(str(selected if selected.is_dir() else selected.parent))  # noqa: S606 — 탐색기 열기
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "why": str(e)}
         return {"ok": True}

@@ -1,0 +1,13 @@
+{
+  "distribution": "striprtf",
+  "version": "0.0.34",
+  "license": "BSD-3-Clause",
+  "project": "https://github.com/joshy/striprtf",
+  "release": "https://pypi.org/project/striprtf/0.0.34/",
+  "wheel": "striprtf-0.0.34-py3-none-any.whl",
+  "wheel_bytes": 8457,
+  "wheel_sha256": "32113e70a99d00e7f0f64d4850c3ad11126501e200aeb29c5270526a6eba52e2",
+  "parser_sha256": "4d03d30ac6d6080dbe205a3a149be73200d7d370f866b76a65792910e79274f4",
+  "modifications": "The installed upstream parser is unmodified. The application invokes its public text parser and standard Unicode codecs.",
+  "notice_packaging": "tools/collect_licenses.py includes the selected distribution's original BSD notice from PyInstaller Analysis."
+}

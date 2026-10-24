@@ -10,6 +10,7 @@ python-docx==1.2.0   # Word native 구조
 python-pptx==1.0.2   # PowerPoint native 구조
 openpyxl==3.1.5      # Excel native 셀/수식
 markdown-it-py==4.2.0 # Markdown 구문/로컬 이미지
+striprtf==0.0.34     # BSD-3-Clause; Office 없이 RTF 원문 내용 읽기
 
 numpy>=1.26          # 청킹/검색 벡터 연산 (flat 인덱스 폴백에도 필요)
 

@@ -1,6 +1,6 @@
 # "PDF Extractor.exe" 빌드 — pywebview 화면(app.py)을 단일 실행파일로 묶는다.
 #
-#   powershell -ExecutionPolicy Bypass -File build_exe.ps1
+#   & .\build_exe.ps1
 #
 # 왜 로컬 cache_root에서 빌드하나
 #   PyInstaller 는 작업폴더에 수만 개 임시파일을 쓴다. Dropbox 안에서 하면
@@ -104,6 +104,7 @@ try {
         "--hidden-import", "pythonnet",
         "--hidden-import", "bottle",
         "--hidden-import", "markdown_it",
+        '--copy-metadata', 'striprtf',
         # 안 쓰는 무거운 것들 — 넣으면 exe 가 수백 MB 로 붇는다
         "--exclude-module", "torch",
         "--exclude-module", "transformers",

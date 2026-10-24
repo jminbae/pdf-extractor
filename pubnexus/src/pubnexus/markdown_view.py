@@ -12,7 +12,7 @@ import re
 from markdown_it import MarkdownIt
 
 
-def to_html(markdown: str, blocks=(), *, asset_url=None, safe_table=None) -> str:
+def to_html(markdown: str, blocks=(), *, asset_url=None, safe_table=None, source_lines=False) -> str:
     parser = MarkdownIt('commonmark', {'html': True}).enable('table')
     offsets = [0]
     for line in markdown.splitlines(keepends=True):
@@ -27,6 +27,8 @@ def to_html(markdown: str, blocks=(), *, asset_url=None, safe_table=None) -> str
     for token in tokens:
         if token.hidden or token.type not in {'list_item_open', 'paragraph_open', 'heading_open', 'table_open', 'fence', 'code_block', 'html_block'} or not token.map:
             continue
+        if source_lines:
+            token.attrSet('data-source-line', str(token.map[0] + 1))
         begin, end = (offsets[min(n, len(offsets) - 1)] for n in token.map)
         # Intersect official character ranges with markdown-it's own line map.
         index = max(0, bisect_right(starts, begin) - 1)
@@ -60,7 +62,7 @@ def to_html(markdown: str, blocks=(), *, asset_url=None, safe_table=None) -> str
         fragment = token.content
         shown = (safe_table(fragment) if safe_table and re.match(r'\s*<table\b', fragment, re.I)
                  else html.escape(fragment))
-        if token.attrGet('data-block-id'):
+        if token.attrGet('data-block-id') or token.attrGet('data-source-line'):
             return f'<div{parser.renderer.renderAttrs(token)}>{shown}</div>\n'
         return shown
 
@@ -74,7 +76,7 @@ def to_html(markdown: str, blocks=(), *, asset_url=None, safe_table=None) -> str
             shown = base(tokens, index, options, env)
             token = tokens[index]
             return (f'<div{parser.renderer.renderAttrs(token)}>{shown}</div>\n'
-                    if token.attrGet('data-block-id') else shown)
+                    if token.attrGet('data-block-id') or token.attrGet('data-source-line') else shown)
         parser.renderer.rules[name] = marked_code
     parser.renderer.rules['image'] = image_rule
     parser.renderer.rules['html_block'] = html_block_rule

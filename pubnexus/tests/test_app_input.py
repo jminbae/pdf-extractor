@@ -53,6 +53,16 @@ class AppInputTests(unittest.TestCase):
             self.assertEqual(self.app.start([text]), [])
         self.assertFalse(self.app._pending_paths)
 
+    def test_reveal_current_folder_opens_that_folder_in_explorer(self):
+        document = self.file('documents/notes.txt')
+        api = support.app_module.Api(self.app)
+        with patch.object(support.app_module.os, 'startfile') as opened:
+            self.assertTrue(api.reveal(str(document.parent))['ok'])
+            opened.assert_called_once_with(str(document.parent))
+            opened.reset_mock()
+            self.assertTrue(api.reveal(str(document))['ok'])
+            opened.assert_called_once_with(str(document.parent))
+
     def test_individual_files_keep_same_names_from_different_folders(self):
         first = self.file("one/report.pdf")
         second = self.file("two/report.PDF")

@@ -28,6 +28,7 @@ PyYAML==6.0.3
 RapidFuzz==3.14.5
 requests==2.34.2
 setuptools==83.0.0
+striprtf==0.0.34
 typing_extensions==4.16.0
 urllib3==2.7.0
 xlsxwriter==3.3.0

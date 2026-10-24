@@ -7,8 +7,8 @@ version source link, dependency versions, original notices and source metadata.
 
 ## Source corresponding to a release
 
-For version 1.2.6, check out the public `v1.2.6` tag in
-[jminbae/pdf-extractor](https://github.com/jminbae/pdf-extractor/tree/v1.2.6).
+For version 1.2.7, use the matching `v1.2.7` release tag in
+[jminbae/pdf-extractor](https://github.com/jminbae/pdf-extractor/tree/v1.2.7).
 The release provides the installer, SHA256 checksum and source archive at the
 same location. No user PDFs, extracted text, images or model caches are included
 in the application source archive.
@@ -30,6 +30,9 @@ and provenance. It does not modify installed upstream library code.
   `engines/tessdata/models.json` records the exact checksums and source.
 - Kiwi 0.24.1, model 0.24.0, local `cong` model. Original Apache and nested
   third-party notices are copied, together with the model data.
+- RTF content preview: striprtf 0.0.34, BSD-3-Clause. Its metadata and original
+  license must ship with the frozen app; the exact wheel and parser hashes are
+  recorded in `tools/third_party_licenses/striprtf/PROVENANCE.json`.
 
 Create two virtual environments outside the source checkout and install the
 corresponding lock files with `python -m pip install -r <lock-file>`. Place the
@@ -46,7 +49,7 @@ produce explicit warnings; a complete release must include both.
 
 ```powershell
 python -B -m unittest discover -s pubnexus/tests -p 'test_*.py'
-powershell -ExecutionPolicy Bypass -File build_exe.ps1 -Python <main-python.exe>
+& .\build_exe.ps1 -Python <main-python.exe>
 ```
 
 The installer and checksum remain in the configured project cache. The main
@@ -58,6 +61,15 @@ packaging exceptions are documented under
 `tools/third_party_licenses/flatbuffers/PROVENANCE.json`, and checked by source
 hash. Two empty PyMuPDF compatibility distributions retain their metadata and
 an explicit no-code explanation; the executable code's AGPL notices are separate.
+
+The viewer uses the pinned upstream libraries without modifying their installed
+source: PyMuPDF for PDF pages, the bundled PPTX browser renderer for slides,
+python-docx for DOCX content, openpyxl's ExcelReader and WorkSheetParser for bounded
+XLSX cell windows, striprtf for RTF, and rHWP's official render-tree, export-png
+and page-numbered export-text commands for HWP/HWPX. A preview does not require
+Markdown extraction or an Office installation. DOCX content preview does not
+promise full layout, shapes or formula fidelity; an explicit PDF alternative
+requires a compatible local conversion engine.
 
 ## AGPL upstream sources
 
