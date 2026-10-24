@@ -24,6 +24,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="pnx-ui-background-") as temporary:
         root = Path(temporary)
         presentation_bytes = None
+        long_presentation_bytes = None
         if args.presentation_vendor:
             from pptx import Presentation
             from pptx.util import Inches, Pt
@@ -41,6 +42,12 @@ def main():
                 slide.shapes.add_picture(io.BytesIO(image_bytes.getvalue()), Inches(1), Inches(2), width=Inches(7))
             deck.save(root / "frame-deck.pptx")
             presentation_bytes = (root / "frame-deck.pptx").read_bytes()
+            for number in range(4, 72):
+                slide = deck.slides.add_slide(deck.slide_layouts[6])
+                slide.shapes.add_textbox(Inches(.5), Inches(.3), Inches(9), Inches(1)).text_frame.text = f"CONTINUOUS_SLIDE_{number:02d}_7391"
+                slide.shapes.add_picture(io.BytesIO(image_bytes.getvalue()), Inches(1), Inches(2), width=Inches(7))
+            deck.save(root / "long-frame-deck.pptx")
+            long_presentation_bytes = (root / "long-frame-deck.pptx").read_bytes()
         files = [{"name": "A.pdf", "path": str(root / "A.pdf"), "done": False, "md_ready": False, "status": "ready", "pages": 30},
                  {"name": "B.pdf", "path": str(root / "B.pdf"), "done": True, "md_ready": True, "status": "complete", "pages": 30,
                   "markdown": str(root / "Markdown" / "B.md")},
@@ -88,6 +95,9 @@ return Promise.resolve({ok:true,n:1});}})};</script>""".replace("STATE", json.du
                         "blocks": [{"id":"b-old", "mapping":"exact", "locations":[{"page":0,"bbox":[20,30,100,60],"width":400,"height":500}]}]}), "application/json"
                 elif url.path == "/page":
                     data, mime = '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="500"><rect width="400" height="500" fill="white"/></svg>', "image/svg+xml"
+                elif url.path in ("/workflow-regression", "/folders-regression", "/reader-actions-regression", "/presentation-continuous-regression"):
+                    filename = {"/workflow-regression":"ui_workflow.js", "/folders-regression":"ui_folders.js", "/reader-actions-regression":"ui_reader_actions.js", "/presentation-continuous-regression":"ui_presentation_continuous.js"}[url.path]
+                    data, mime = Path(__file__).with_name(filename).read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
                 elif url.path == "/regression":
                     data, mime = Path(__file__).with_suffix(".js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
                 elif url.path == "/queue-regression":
@@ -110,8 +120,17 @@ return Promise.resolve({ok:true,n:1});}})};</script>""".replace("STATE", json.du
                     data, mime = Path(__file__).with_name("ui_presentation_suspend.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
                 elif url.path == "/keyboard-regression":
                     data, mime = Path(__file__).with_name("ui_keyboard.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
+                elif url.path == "/frozen-visual-probe":
+                    import frozen_smoke
+                    import re
+                    expression = getattr(frozen_smoke, "_PRESENTATION_VISUAL_EXPRESSION", None)
+                    if expression is None:
+                        expression = next(value for value in re.findall(r'frameEvaluate\("([^"\n]+)"\)', frozen_smoke._CDP_SCRIPT) if value.startswith("({page:Number(document.querySelector('.slide-slot')"))
+                    data, mime = expression, "text/plain; charset=utf-8"
                 elif url.path == "/presentation-test-host":
                     data, mime = '<!doctype html><html><body style="margin:0"><div id="host" style="width:1000px;height:700px"></div></body></html>', "text/html; charset=utf-8"
+                elif url.path == "/presentation-long-data" and long_presentation_bytes is not None:
+                    data, mime = long_presentation_bytes, "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 elif url.path == "/presentation-data" and presentation_bytes is not None:
                     if parse_qs(url.query).get("r", [""])[0] != "fixture-source-v1":
                         self.send_error(409)

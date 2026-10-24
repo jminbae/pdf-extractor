@@ -142,6 +142,42 @@ class AppInputTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.app.start.assert_called_once_with([now], force=True)
 
+    def test_opening_one_file_navigates_to_its_folder_and_returns_the_source_to_open(self):
+        old = self.file('old/old.pdf')
+        picked = self.file('new/picked.pdf')
+        neighbour = self.file('new/neighbour.pdf')
+        self.app.folder, self.app.pdfs = old.parent, [old]
+        self.app.window = Mock()
+        self.app.window.create_file_dialog.return_value = [str(picked)]
+        result = support.app_module.Api(self.app).pick_files()
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.app.folder, picked.parent)
+        self.assertEqual(set(self.app.pdfs), {picked, neighbour})
+        self.assertEqual(result.get('open_path'), str(picked))
+        self.assertEqual(result.get('selected_paths'), [str(picked)])
+        self.assertEqual(result['files'], self.app.file_rows())
+
+    def test_opening_multiple_files_selects_them_without_opening_an_arbitrary_reader(self):
+        files = [self.file('documents/one.pdf'), self.file('documents/two.pdf')]
+        self.file('documents/other.pdf')
+        self.app.window = Mock()
+        self.app.window.create_file_dialog.return_value = list(map(str, files))
+        result = support.app_module.Api(self.app).pick_files()
+        self.assertEqual(result.get('selected_paths'), list(map(str, files)))
+        self.assertFalse(result.get('open_path'))
+        self.assertEqual(len(result['files']), 3)
+
+    def test_folder_navigation_exposes_shortcuts_without_scanning_drives(self):
+        from pubnexus import output_location
+        self.assertTrue(callable(getattr(output_location, 'known_directory', None)))
+        with patch.object(output_location, 'known_directory', side_effect=lambda kind: self.root / kind), \
+             patch.object(support.app_module.os, 'listdrives', return_value=['C:\\', 'Z:\\'], create=True), \
+             patch.object(Path, 'is_dir', side_effect=AssertionError('Navigation roots must not probe drives')):
+            navigation = self.app.folder_state()['navigation']
+        self.assertEqual([row['path'] for row in navigation['shortcuts']],
+                         [str(self.root / name) for name in ('documents', 'desktop', 'downloads')])
+        self.assertEqual([row['path'] for row in navigation['drives']], ['C:\\', 'Z:\\'])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,7 @@ async function uiViewerRegression(page, baseURL) {
           source_unit_label:'슬라이드',source_label:'원본 슬라이드'}});
       }else await route.continue();}catch(error){if(!closing)throw error;}});
     await p.route('**/document-map?*',async route=>{try{await gate;await route.continue();}catch(error){if(!closing)throw error;}});
+    await p.evaluate(()=>window.pnx.on({kind:'folder',...window.__fixture,files:window.__fixture.files.map((f,i)=>({...f,...(i===1?{needs_refresh:true}:{})}))}));
     const firstResult=p.waitForRequest(r=>new URL(r.url()).searchParams.get('mode')==='result');
     await p.locator('.file-row[data-index="1"] [data-action=read]').click();
     await firstResult;await p.locator('#code-tab').click();await p.waitForTimeout(80);
@@ -65,7 +66,7 @@ async function uiViewerRegression(page, baseURL) {
     if(preparing.extractDisabled||!preparing.back.includes('목록'))throw new Error('UI_VIEWER_PREVIEW_BLOCKS_ACTIONS_RED '+JSON.stringify(preparing));
     await p.locator('#reader-extract').click();
     const extraction=await p.evaluate(() => window.__calls.filter(c=>c.name==='extract_selected').at(-1));
-    if(JSON.stringify(extraction?.args)!==JSON.stringify([[1],true]))throw new Error('UI_VIEWER_WRONG_DOCUMENT_RED '+JSON.stringify(extraction));
+    if(JSON.stringify(extraction?.args)!==JSON.stringify([[1],true,[await p.evaluate(()=>window.__fixture.files[1].path)]]))throw new Error('UI_VIEWER_WRONG_DOCUMENT_RED '+JSON.stringify(extraction));
     await p.evaluate(()=>{window.pnx.on({kind:'run',on:true});window.pnx.on({kind:'prog',path:window.__fixture.files[1].path,
       name:'B.pdf',file_pct:37,pct:12,stage:'본문 추출'});});
     const running=await p.locator('#reader-extract').evaluate(n=>({disabled:n.disabled,text:n.textContent}));

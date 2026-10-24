@@ -13,7 +13,7 @@ async function uiBackgroundRegression(page, baseURL) {
     });
     const busy = await p.evaluate(() => ({
       addFilesDisabled:document.querySelector('[data-action=add-files]').disabled,
-      addFolderDisabled:document.querySelector('[data-action=add-folder]').disabled,
+      legacyFolderButton:!!document.querySelector('[data-action=add-folder]'),
       checkboxes:[...document.querySelectorAll('[data-check]')].map(n=>n.disabled),
       otherSavedMdDisabled:document.querySelector('.file-row[data-index="1"] [data-action=read]').disabled,
       readerSourceOnly:document.querySelector('#reader').classList.contains('source-only'),
@@ -89,7 +89,7 @@ async function uiBackgroundRegression(page, baseURL) {
     const staleSearch = await p.locator('#search-results').textContent();
     const proof={busy,beforeRunComplete:before,afterAppend,afterRunComplete:after,sourceControls:source,forcedRetrySavedMd:retry,failure,oldMapping,staleSearch};
     const violations={
-      fileInputBlocked:busy.addFilesDisabled||busy.addFolderDisabled,
+      fileInputBlocked:busy.addFilesDisabled||busy.legacyFolderButton,
       newDocumentSelectionBlocked:busy.checkboxes[2],
       unrelatedReaderReset:before.query!==after.query||before.scroll!==after.scroll,
       appendClosesReader:!afterAppend.readerVisible||before.query!==afterAppend.query||before.scroll!==afterAppend.scroll,

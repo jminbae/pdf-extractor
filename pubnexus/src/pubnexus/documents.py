@@ -37,6 +37,7 @@ MAX_PART_BYTES = 64 * 1024 * 1024
 MAX_ZIP_MEMBERS = 20_000
 MAX_MAIL_PARTS = 2_000
 MAX_MAIL_MESSAGES = 10_000
+PPTX_IMAGE_OCR_VERSION = 1
 _R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 _S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 _O = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
@@ -51,6 +52,12 @@ class DocumentExtractionError(RuntimeError):
     def __init__(self, message: str, code: str = "malformed"):
         super().__init__(message)
         self.code = code
+
+
+def current(doc: dict) -> bool:
+    """PPTX cache freshness records the attempted image-text pipeline version."""
+    return (doc.get('source') == 'document_pptx' and
+            (doc.get('extraction_report') or {}).get('image_ocr_version') == PPTX_IMAGE_OCR_VERSION)
 
 
 def _decode(data: bytes) -> str:
@@ -147,9 +154,13 @@ def _save_asset(builder: _Builder, data: bytes, extension: str) -> str:
 
 
 class _Builder:
-    def __init__(self, path: Path, asset_dir: str | Path | None, timeout: float, cancel=None):
+    def __init__(self, path: Path, asset_dir: str | Path | None, timeout: float, cancel=None,
+                 progress=None, default_timeout=False):
+        self.started = time.monotonic()
         self.deadline = time.monotonic() + timeout
         self.cancel = cancel
+        self.progress = progress
+        self.default_timeout = default_timeout
         self.check()
         self.sha1 = store.file_sha1(path)
         self.check()
@@ -335,11 +346,24 @@ def _pptx(builder: _Builder, path: Path):
     parts = _guard_zip(path)
     native = Presentation(utils.long_path(path))
     builder.doc["source_map"]["ordering"] = "slide_shape_tree"
+    builder.doc['extraction_report']['image_ocr_version'] = PPTX_IMAGE_OCR_VERSION
+    pictures, slide_sections = [], {}
+
+    def transform(shape, shape_path):
+        nodes = shape._element.xpath('./p:spPr/a:xfrm | ./p:grpSpPr/a:xfrm')
+        node = nodes[0] if nodes else None
+        return {'shape': shape_path, 'rotation_degrees': float(shape.rotation),
+                'flip_h': node is not None and node.get('flipH') in ('1', 'true'),
+                'flip_v': node is not None and node.get('flipV') in ('1', 'true'),
+                'components': ({etree.QName(child).localname: dict(child.attrib) for child in node}
+                               if node is not None else {})}
+
     for slide_number, slide in enumerate(native.slides, 1):
         section = builder.unit(f"슬라이드 {slide_number}", "slide", slide=slide_number,
                                width_emu=int(native.slide_width), height_emu=int(native.slide_height))
+        slide_sections[slide_number] = section
 
-        def shapes(items, prefix=""):
+        def shapes(items, prefix="", groups=()):
             for index, shape in enumerate(items, 1):
                 builder.check()
                 shape_path = f"{prefix}/{index}" if prefix else str(index)
@@ -347,7 +371,7 @@ def _pptx(builder: _Builder, path: Path):
                             "shape_bbox_emu": [int(shape.left), int(shape.top),
                                                int(shape.left + shape.width), int(shape.top + shape.height)]}
                 if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
-                    shapes(shape.shapes, shape_path)
+                    shapes(shape.shapes, shape_path, (*groups, transform(shape, shape_path)))
                 elif shape.has_table:
                     native_table = shape.table
                     rows, cols = len(native_table.rows), len(native_table.columns)
@@ -365,11 +389,17 @@ def _pptx(builder: _Builder, path: Path):
                 elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                     image = shape.image
                     relative = _save_asset(builder, image.blob, "." + image.ext)
-                    origin = builder.origin(section, "image", **location)
-                    builder.doc["figures"].append({"id": origin["block_id"], "caption": shape.name,
-                                                   "image": relative, "source": origin})
+                    geometry = {'image_crop_fraction': [shape.crop_left, shape.crop_top, shape.crop_right, shape.crop_bottom],
+                                'shape_transform': transform(shape, shape_path), 'group_transforms': list(groups),
+                                'shape_bbox_space': 'shape_parent_emu'}
+                    origin = builder.origin(section, "image", **location, **geometry)
+                    figure = {"id": origin["block_id"], "caption": shape.name,
+                              "image": relative, "source": origin}
+                    builder.doc["figures"].append(figure)
                     anchor = builder.paragraph(section, "", **location)
                     anchor["refs_figure"] = [origin["block_id"]]
+                    pictures.append({'blob': image.blob, 'section': section, 'figure': figure,
+                                     'anchor': anchor, 'location': {**location, **geometry}})
                 elif shape.has_text_frame:
                     for pindex, paragraph in enumerate(shape.text_frame.paragraphs, 1):
                         builder.paragraph(section, paragraph.text, paragraph=pindex,
@@ -383,10 +413,125 @@ def _pptx(builder: _Builder, path: Path):
                 notes = builder.unit(f"슬라이드 {slide_number} 발표자 노트", "speaker_notes", slide=slide_number)
                 for index, paragraph in enumerate(frame.paragraphs, 1):
                     builder.paragraph(notes, paragraph.text, paragraph=index)
+        if builder.progress:
+            builder.progress(slide_number, len(native.slides), 'document_native')
+    _pptx_image_text(builder, pictures, slide_sections)
     if any("vbaProject" in p or "/embeddings/" in p for p in parts):
         builder.warn("내장 실행체·매크로·OLE 개체는 실행하거나 추출하지 않았습니다.")
     if any("/comments/" in p for p in parts):
         builder.warn("PPTX 검토 주석은 추출하지 않았습니다.")
+
+
+def _pptx_image_text(builder, pictures, slide_sections):
+    from . import image_ocr, local_ocr
+    if not pictures:
+        builder.doc['extraction_report']['image_ocr'] = {'status': 'no_images', 'images': 0}
+        return
+    report = {'status': 'processed', 'images': len(pictures), 'unique_images': 0, 'cache_reused': 0,
+              'recognized_images': 0, 'empty_images': 0, 'failed_images': [],
+              'native_duplicate_lines': 0, 'unlocated_lines': 0, 'text_characters': 0, 'records': []}
+    builder.doc['extraction_report']['image_ocr'] = report
+    if builder.default_timeout:
+        count = len({(hashlib.sha256(item['blob']).hexdigest(),
+                      tuple(item['location']['image_crop_fraction'])) for item in pictures})
+        builder.deadline = max(builder.deadline, builder.started + min(1800, 30 + 10 * count))
+    builder.check()
+    provider = local_ocr.discover()
+    builder.check()
+    if provider is None:
+        report.update(status='unavailable', unrecognized_images=len(pictures))
+        builder.warn('로컬 OCR 모델이 없어 PPTX 그림 안 글자를 읽지 못했습니다. 원본 그림은 보존했습니다.')
+        return
+    report.update(engine=provider['engine'], language=provider['language'], engine_identity=provider['identity'])
+    images, prepared_cache, slide_images = {}, {}, {number: set() for number in slide_sections}
+    prepared_bytes = 0
+    for item in pictures:
+        builder.check()
+        fingerprint = (hashlib.sha256(item['blob']).hexdigest(), tuple(item['location']['image_crop_fraction']))
+        try:
+            prepared = prepared_cache.get(fingerprint)
+            if prepared is None:
+                if len(images) >= local_ocr.MAX_BATCH_IMAGES:
+                    raise local_ocr.LocalOCRError('OCR 그림 묶음 개수 예산을 초과했습니다.', 'limit')
+                prepared = image_ocr.prepare_picture(item['blob'], fingerprint[1])
+                if prepared['id'] not in images:
+                    if prepared_bytes + len(prepared['png']) > local_ocr.MAX_BATCH_BYTES:
+                        raise local_ocr.LocalOCRError('OCR 그림 묶음 PNG 크기 예산을 초과했습니다.', 'limit')
+                    prepared_bytes += len(prepared['png'])
+                prepared['png'] = images.get(prepared['id'], prepared['png'])
+                prepared_cache[fingerprint] = prepared
+            item['prepared'] = prepared
+            images.setdefault(prepared['id'], prepared['png'])
+            slide_images[item['section']['source']['slide']].add(prepared['id'])
+        except local_ocr.LocalOCRError as error:
+            item['error'] = {'code': error.code, 'error': str(error)}
+    report['unique_images'] = len(images)
+    report['cache_reused'] = sum('prepared' in item for item in pictures) - len(images)
+    completed = set()
+
+    def notify(key=None):
+        if key is not None:
+            completed.add(key)
+        builder.check()
+        if builder.progress:
+            count = sum(keys.issubset(completed) for keys in slide_images.values())
+            builder.progress(count, len(slide_sections), 'document_ocr')
+
+    notify()
+    try:
+        results = (local_ocr.extract_images(images, provider, cancel=builder.cancel,
+                   timeout=max(.001, builder.deadline - time.monotonic()), progress=notify) if images else {})
+    except local_ocr.LocalOCRError as error:
+        results = {key: {'ok': False, 'code': error.code, 'error': str(error)} for key in images}
+    builder.check()
+    native_lines = {number: {' '.join(line.split()).casefold() for paragraph in section['paragraphs']
+                            for line in paragraph['text'].splitlines() if line.strip()}
+                    for number, section in slide_sections.items()}
+    text_bytes = sum(len(p['text'].encode('utf-8')) for section in builder.doc['body_text'] for p in section['paragraphs'])
+    for item in pictures:
+        builder.check()
+        prepared = item.get('prepared')
+        record = results.get(prepared['id']) if prepared else None
+        diagnostic = {'slide': item['section']['source']['slide'], 'shape': item['location']['shape'],
+                      'image_id': item['figure']['id'], 'image': item['figure']['image']}
+        report['records'].append(diagnostic)
+        if not record or not record.get('ok'):
+            error = item.get('error') or record or {'code': 'ocr', 'error': 'OCR 결과가 없습니다.'}
+            diagnostic.update(status='failed', code=error.get('code'), error=error.get('error'))
+            report['failed_images'].append(dict(diagnostic))
+            continue
+        recovered = []
+        for text, origin in image_ocr.lines(record):
+            if ' '.join(text.split()).casefold() in native_lines[diagnostic['slide']]:
+                report['native_duplicate_lines'] += 1
+                continue
+            text_bytes += len(text.encode('utf-8'))
+            if text_bytes > MAX_TEXT_BYTES:
+                raise DocumentExtractionError('PPTX 그림 OCR 본문 크기 예산을 초과했습니다.', 'limit')
+            metadata = {key: value for key, value in prepared.items() if key not in ('id', 'png')}
+            if origin['geometry_status'] == 'unlocated_ocr':
+                report['unlocated_lines'] += 1
+            paragraph = builder.paragraph(item['section'], text, image_id=item['figure']['id'],
+                                          **{**item['location'], **metadata, **origin})
+            item['section']['paragraphs'].pop()
+            recovered.append(paragraph)
+        paragraphs = item['section']['paragraphs']
+        position = next(index for index, paragraph in enumerate(paragraphs) if paragraph is item['anchor']) + 1
+        paragraphs[position:position] = recovered
+        count = sum(len(p['text']) for p in recovered)
+        diagnostic.update(status='recognized' if record['words'] else 'empty', text_characters=count,
+                          image_sha256=prepared['image_sha256'])
+        report['recognized_images' if record['words'] else 'empty_images'] += 1
+        report['text_characters'] += count
+    if report['text_characters']:
+        builder.warn('PPTX 그림 안 글자를 로컬 OCR로 읽었습니다. 오인식·누락과 숫자는 원본 그림을 대조해 주세요.')
+    if report['unlocated_lines']:
+        builder.warn('일부 OCR 단어 좌표가 그림 밖으로 나와 해당 글자는 그림 단위 출처만 제공합니다. 원본 그림을 대조해 주세요.')
+    if report['failed_images']:
+        report['status'] = 'partial'
+        builder.warn(f"PPTX 그림 {len(report['failed_images'])}개의 글자를 읽지 못했습니다. 원본 그림은 보존했습니다.")
+    completed.update(images)
+    notify()
 
 
 def _xlsx(builder: _Builder, path: Path):
@@ -1370,12 +1515,13 @@ def _finish(builder: _Builder) -> dict:
 
 
 def extract_document(path: str | Path, *, asset_dir: str | Path | None = None,
-                     timeout: float = 120, cancel=None) -> dict:
+                     timeout: float | None = None, cancel=None, progress=None) -> dict:
     """형식에 맞는 native parser로 추출한다. 의존성·암호·제한 오류는 명시한다."""
-    if timeout <= 0:
+    if timeout is not None and timeout <= 0:
         raise ValueError("timeout은 양수여야 합니다.")
     try:
-        return _extract_document(path, asset_dir=asset_dir, timeout=timeout, cancel=cancel)
+        return _extract_document(path, asset_dir=asset_dir, timeout=120 if timeout is None else timeout,
+                                 cancel=cancel, progress=progress, default_timeout=timeout is None)
     except DocumentExtractionError:
         raise
     except RecursionError as exc:
@@ -1387,11 +1533,11 @@ def extract_document(path: str | Path, *, asset_dir: str | Path | None = None,
 
 
 def _extract_document(path: str | Path, *, asset_dir: str | Path | None,
-                      timeout: float, cancel) -> dict:
+                      timeout: float, cancel, progress=None, default_timeout=False) -> dict:
     source = Path(path).resolve(strict=True)
     if not source.is_file() or source.stat().st_size > MAX_INPUT_BYTES:
         raise DocumentExtractionError("파일이 아니거나 문서 크기 제한을 초과했습니다.", "limit")
-    builder = _Builder(source, asset_dir, timeout, cancel)
+    builder = _Builder(source, asset_dir, timeout, cancel, progress, default_timeout)
     adapters = {".docx": _docx, ".pptx": _pptx, ".xlsx": _xlsx, ".txt": _text, ".md": _markdown,
                 ".html": _html, ".htm": _html, ".epub": _epub, ".odt": _odf, ".ods": _odf, ".odp": _odf,
                 ".eml": _eml, ".mbox": _mbox}

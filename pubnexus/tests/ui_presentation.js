@@ -39,6 +39,8 @@ async function uiPresentationRegression(page, baseURL) {
     await p.evaluate(()=>window.__send('highlight',{result:0,search_epoch:window.__packets.find(m=>m.id==='search-third').search_epoch},'highlight-third'));
     await p.waitForFunction(()=>window.__packets.some(m=>m.type==='response'&&m.id==='highlight-third'&&m.ok));
     const highlighted=await frame.locator('[data-pptx-search-highlight]').count();
+    const highlightedSlide=await frame.locator('[data-pptx-search-highlight]').evaluate(n=>n.closest('.slide-slot')?.dataset.slideIndex);
+    if(highlightedSlide!=='2')throw new Error('UI_PRESENTATION_HIGHLIGHT_WRONG_SLIDE_RED '+highlightedSlide);
     if(!highlighted||!(await frame.locator('body').innerText()).includes('FAST_FRAME_THIRD_7391'))throw new Error('UI_PRESENTATION_HIGHLIGHT_RED');
     const beforeResize=await p.evaluate(()=>window.__packets.filter(m=>m.type==='rendered').length);
     await p.locator('#host').evaluate(n=>n.style.width='0px');await p.waitForTimeout(80);await p.locator('#host').evaluate(n=>n.style.width='1000px');await p.waitForTimeout(100);

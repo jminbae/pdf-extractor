@@ -23,6 +23,8 @@ MAX_SIDE = 4096
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_WORDS = 100_000
+MAX_BATCH_IMAGES = 500
+MAX_BATCH_BYTES = 256 * 1024 * 1024
 _MODELS = {
     "eng": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
     "kor": "6b85e11d9bbf07863b97b3523b1b112844c43e713df8b66418a081fd1060b3b2",
@@ -91,7 +93,7 @@ def _check(cancel, deadline):
         raise LocalOCRError("로컬 OCR 제한 시간을 초과했습니다.", "timeout")
 
 
-def _run(request: Path, output: Path, cancel, deadline):
+def _run(request: Path, output: Path, cancel, deadline, *, on_event=None, item_timeout=None):
     arguments = ([sys.executable, "--ocr-worker", str(request)] if getattr(sys, "frozen", False) else
                  [sys.executable, "-B", "-m", "pubnexus.local_ocr", "--worker", str(request)])
     environment = os.environ.copy()
@@ -105,8 +107,23 @@ def _run(request: Path, output: Path, cancel, deadline):
                                    stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                                    shell=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         try:
+            position, last_activity = 0, time.monotonic()
             while True:
                 _check(cancel, deadline)
+                events = request.parent / 'events.jsonl'
+                if on_event and events.is_file():
+                    if events.stat().st_size > MAX_OUTPUT_BYTES:
+                        raise LocalOCRError('OCR 진행 출력 예산을 초과했습니다.', 'limit')
+                    with events.open('rb') as stream:
+                        stream.seek(position)
+                        while line := stream.readline(MAX_OUTPUT_BYTES + 1):
+                            if not line.endswith(b'\n'):
+                                break
+                            on_event(json.loads(line))
+                            position = stream.tell()
+                            last_activity = time.monotonic()
+                if item_timeout is not None and time.monotonic() - last_activity > item_timeout:
+                    raise LocalOCRError('로컬 OCR 그림 한 건의 제한 시간을 초과했습니다.', 'timeout')
                 if any((request.parent / name).stat().st_size > 65536 for name in ("stdout.log", "stderr.log")):
                     raise LocalOCRError("OCR 진단 출력 예산을 초과했습니다.", "limit")
                 if output.exists() and output.stat().st_size > MAX_OUTPUT_BYTES:
@@ -124,18 +141,125 @@ def _run(request: Path, output: Path, cancel, deadline):
     return record
 
 
+def _selected_models(provider):
+    if not isinstance(provider, dict) or provider.get('engine') != 'pymupdf_builtin_tesseract':
+        raise LocalOCRError('지원하는 로컬 OCR provider가 아닙니다.', 'dependency')
+    language = str(provider.get('language', ''))
+    selected = language.split('+')
+    if not selected or len(set(selected)) != len(selected) or any(item not in _MODELS for item in selected):
+        raise LocalOCRError('검증된 OCR 언어 모델이 필요합니다.', 'dependency')
+    return language, selected
+
+
+def _copy_models(work, provider, selected, cancel, deadline):
+    if not str(work).isascii():
+        raise LocalOCRError('내장 OCR에는 ASCII 임시 경로가 필요합니다. 이 기기의 TEMP 경로를 확인해 주세요.', 'dependency')
+    models = work / 'models'
+    models.mkdir()
+    for item in selected:
+        _check(cancel, deadline)
+        source = Path(provider['tessdata']) / (item + '.traineddata')
+        if not source.is_file() or source.stat().st_size > MAX_IMAGE_BYTES or _hash(source) != _MODELS[item]:
+            raise LocalOCRError('로컬 OCR 언어 모델이 없거나 변경됐습니다.', 'dependency')
+        target = models / source.name
+        shutil.copyfile(utils.long_path(source), target)
+        if _hash(target) != _MODELS[item]:
+            raise LocalOCRError('OCR 모델 복사 무결성을 확인하지 못했습니다.', 'io')
+
+
+def _png_size(data):
+    if (len(data) < 24 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[8:16] != b'\0\0\0\rIHDR'):
+        raise LocalOCRError('OCR 입력은 유효한 PNG IHDR가 있어야 합니다.')
+    width, height = int.from_bytes(data[16:20], 'big'), int.from_bytes(data[20:24], 'big')
+    if width <= 0 or height <= 0 or width * height > MAX_PIXELS or max(width, height) > MAX_SIDE:
+        raise LocalOCRError('OCR PNG 픽셀 예산이 올바르지 않습니다.', 'limit')
+    return width, height
+
+
+def extract_images(images: dict[str, bytes], provider: dict, *, cancel=None, timeout=900,
+                   progress=None) -> dict:
+    """OCR bounded PNGs in one owned worker; copy verified models once per batch.
+
+    Results are image-pixel words, never PDF/slide coordinates. Completed image
+    records survive a later OCR error; cancellation always propagates.
+    """
+    if timeout <= 0:
+        raise ValueError('timeout은 양수여야 합니다.')
+    deadline = time.monotonic() + timeout
+    _check(cancel, deadline)
+    language, selected = _selected_models(provider)
+    if (not images or len(images) > MAX_BATCH_IMAGES or
+            sum(len(data) for data in images.values()) > MAX_BATCH_BYTES):
+        raise LocalOCRError('OCR 그림 묶음 예산을 초과했습니다.', 'limit')
+    entries, results = [], {}
+    for key, data in images.items():
+        _check(cancel, deadline)
+        if not re.fullmatch(r'[a-f0-9]{64}', key) or len(data) > MAX_IMAGE_BYTES:
+            raise LocalOCRError('OCR 그림 키 또는 크기 제한이 올바르지 않습니다.', 'limit')
+        width, height = _png_size(data)
+        entries.append({'id': key, 'width': width, 'height': height})
+
+    def receive(event):
+        if event.get('state') != 'complete':
+            return
+        key, record = event.get('id'), event.get('result')
+        if key not in images or not isinstance(record, dict):
+            raise LocalOCRError('OCR 그림 결과 주소가 올바르지 않습니다.')
+        results[key] = record
+        if progress:
+            progress(key)
+
+    with tempfile.TemporaryDirectory(prefix='pubnexus-image-ocr-') as temporary:
+        work = Path(temporary)
+        _copy_models(work, provider, selected, cancel, deadline)
+        for index, data in enumerate(images.values(), 1):
+            _check(cancel, deadline)
+            (work / f'image-{index:06d}.png').write_bytes(data)
+        request, output = work / 'request.json', work / 'result.json'
+        request.write_text(json.dumps({'language': language, 'images': entries}), encoding='utf-8')
+        try:
+            record = _run(request, output, cancel, deadline, on_event=receive, item_timeout=45)
+            for entry in record.get('images') or []:
+                if entry.get('id') not in results:
+                    receive({'state': 'complete', **entry})
+        except LocalOCRError as error:
+            for key in images:
+                results.setdefault(key, {'ok': False, 'code': error.code, 'error': str(error)[:1000]})
+    _check(cancel, deadline)
+    for entry in entries:
+        record = results.get(entry['id'])
+        if not isinstance(record, dict):
+            raise LocalOCRError('OCR 그림 결과가 없습니다.')
+        if not record.get('ok'):
+            continue
+        words = record.get('words')
+        if not isinstance(words, list) or len(words) > MAX_WORDS:
+            results[entry['id']] = {'ok': False, 'code': 'limit', 'error': 'OCR 단어 결과 계약/예산이 올바르지 않습니다.'}
+            continue
+        invalid = False
+        for word in words:
+            if (not isinstance(word, list) or len(word) != 8 or not isinstance(word[4], str)
+                    or not all(type(v) in (int, float) and math.isfinite(v) for v in word[:4])
+                    or not word[0] < word[2] or not word[1] < word[3]
+                    or not all(type(word[index]) is int and word[index] >= 0 for index in (5, 6, 7))):
+                invalid = True
+                break
+        if invalid:
+            results[entry['id']] = {'ok': False, 'code': 'invalid_output',
+                                    'error': 'OCR 단어/그림 좌표 결과가 올바르지 않습니다.'}
+            continue
+        record.update(width=entry['width'], height=entry['height'], language=language,
+                      engine=provider['engine'], engine_identity=provider['identity'])
+    return results
+
+
 def extract_page(page, provider: dict, *, cancel=None, timeout=45) -> tuple[list, list, list]:
     """원본 회전을 변경하지 않고 한 쪽의 unrotated 문단/단어 좌표를 반환한다."""
     if timeout <= 0:
         raise ValueError("timeout은 양수여야 합니다.")
     deadline = time.monotonic() + timeout
     _check(cancel, deadline)
-    if not isinstance(provider, dict) or provider.get("engine") != "pymupdf_builtin_tesseract":
-        raise LocalOCRError("지원하는 로컬 OCR provider가 아닙니다.", "dependency")
-    language = str(provider.get("language", ""))
-    selected = language.split("+")
-    if not selected or len(set(selected)) != len(selected) or any(item not in _MODELS for item in selected):
-        raise LocalOCRError("검증된 OCR 언어 모델이 필요합니다.", "dependency")
+    language, selected = _selected_models(provider)
     rect = page.rect * page.derotation_matrix
     scale = min(150 / 72, math.sqrt(MAX_PIXELS / max(rect.get_area(), 1)),
                 MAX_SIDE / max(rect.width, rect.height, 1)) * 0.999
@@ -146,19 +270,7 @@ def extract_page(page, provider: dict, *, cancel=None, timeout=45) -> tuple[list
     _check(cancel, deadline)
     with tempfile.TemporaryDirectory(prefix="pubnexus-local-ocr-") as temporary:
         work = Path(temporary)
-        if not str(work).isascii():
-            raise LocalOCRError("내장 OCR에는 ASCII 임시 경로가 필요합니다. 이 기기의 TEMP 경로를 확인해 주세요.", "dependency")
-        models = work / "models"
-        models.mkdir()
-        for item in selected:
-            _check(cancel, deadline)
-            source = Path(provider["tessdata"]) / (item + ".traineddata")
-            if not source.is_file() or source.stat().st_size > MAX_IMAGE_BYTES or _hash(source) != _MODELS[item]:
-                raise LocalOCRError("로컬 OCR 언어 모델이 없거나 변경됐습니다.", "dependency")
-            target = models / source.name
-            shutil.copyfile(utils.long_path(source), target)
-            if _hash(target) != _MODELS[item]:
-                raise LocalOCRError("OCR 모델 복사 무결성을 확인하지 못했습니다.", "io")
+        _copy_models(work, provider, selected, cancel, deadline)
         image = work / "page.png"
         pix.save(str(image))
         if image.stat().st_size > MAX_IMAGE_BYTES:
@@ -201,6 +313,27 @@ def extract_page(page, provider: dict, *, cancel=None, timeout=45) -> tuple[list
     return paragraphs, mapped, warnings
 
 
+def _recognize_image(image, config, models, language):
+    if image.stat().st_size > MAX_IMAGE_BYTES:
+        raise LocalOCRError('OCR 그림 크기 제한을 초과했습니다.', 'limit')
+    with image.open('rb') as stream:
+        width, height = _png_size(stream.read(24))
+    if [width, height] != [config['width'], config['height']]:
+        raise LocalOCRError('OCR PNG 요청 크기가 올바르지 않습니다.', 'limit')
+    pix = fitz.Pixmap(str(image))
+    if [pix.width, pix.height] != [width, height]:
+        raise LocalOCRError('OCR 그림 픽셀 크기가 올바르지 않습니다.', 'limit')
+    with fitz.open() as pdf:
+        page = pdf.new_page(width=pix.width, height=pix.height)
+        page.insert_image(page.rect, stream=image.read_bytes())
+        textpage = page.get_textpage_ocr(language=language, dpi=72, full=True,
+                                       tessdata=fitz.get_tessdata(tessdata=str(models)))
+        words = page.get_text('words', textpage=textpage)
+        if len(words) > MAX_WORDS:
+            raise LocalOCRError('OCR 단어 예산을 초과했습니다.', 'limit')
+    return {'ok': True, 'words': words, 'engine_version': fitz.VersionBind}
+
+
 def worker_cli(request_json: str | Path) -> int:
     """앱 early CLI hook에서 호출. 고정된 private 파일 이름만 사용한다."""
     request = Path(request_json).resolve(strict=True)
@@ -217,30 +350,31 @@ def worker_cli(request_json: str | Path) -> int:
             model = models / (item + ".traineddata")
             if not model.is_file() or model.stat().st_size > MAX_IMAGE_BYTES or _hash(model) != _MODELS[item]:
                 raise LocalOCRError("검증된 로컬 OCR 모델이 필요합니다.", "dependency")
-        image = request.parent / "page.png"
-        if image.stat().st_size > MAX_IMAGE_BYTES:
-            raise LocalOCRError("OCR 그림 크기 제한을 초과했습니다.", "limit")
-        with open(image, "rb") as stream:
-            header = stream.read(24)
-        if len(header) != 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[8:16] != b"\0\0\0\rIHDR":
-            raise LocalOCRError("OCR 입력은 유효한 PNG IHDR가 있어야 합니다.")
-        width, height = int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
-        if (width <= 0 or height <= 0 or width * height > MAX_PIXELS or max(width, height) > MAX_SIDE
-                or [width, height] != [config["width"], config["height"]]):
-            raise LocalOCRError("OCR PNG 픽셀 예산/요청 크기가 올바르지 않습니다.", "limit")
-        pix = fitz.Pixmap(str(image))
-        if (pix.width * pix.height > MAX_PIXELS or max(pix.width, pix.height) > MAX_SIDE
-                or [pix.width, pix.height] != [config["width"], config["height"]]):
-            raise LocalOCRError("OCR 그림 픽셀 예산/크기가 올바르지 않습니다.", "limit")
-        with fitz.open() as pdf:
-            page = pdf.new_page(width=pix.width, height=pix.height)
-            page.insert_image(page.rect, stream=image.read_bytes())
-            textpage = page.get_textpage_ocr(language=language, dpi=72, full=True,
-                                           tessdata=fitz.get_tessdata(tessdata=str(models)))
-            words = page.get_text("words", textpage=textpage)
-            if len(words) > MAX_WORDS:
-                raise LocalOCRError("OCR 단어 예산을 초과했습니다.", "limit")
-        result = {"ok": True, "words": words, "engine_version": fitz.VersionBind}
+        if 'images' in config:
+            images = config['images']
+            if (not isinstance(images, list) or not 0 < len(images) <= MAX_BATCH_IMAGES or
+                    any(not isinstance(item, dict) or not isinstance(item.get('id'), str) or
+                        not re.fullmatch(r'[a-f0-9]{64}', item['id']) for item in images) or
+                    len({item['id'] for item in images}) != len(images)):
+                raise LocalOCRError('OCR 그림 묶음 요청이 올바르지 않습니다.', 'limit')
+            if sum((request.parent / f'image-{index:06d}.png').stat().st_size
+                   for index in range(1, len(images) + 1)) > MAX_BATCH_BYTES:
+                raise LocalOCRError('OCR 그림 묶음 크기 예산을 초과했습니다.', 'limit')
+            records = []
+            with (request.parent / 'events.jsonl').open('a', encoding='utf-8', buffering=1) as events:
+                for index, entry in enumerate(images, 1):
+                    events.write(json.dumps({'state': 'started', 'id': entry['id']}) + '\n')
+                    try:
+                        recognized = _recognize_image(request.parent / f'image-{index:06d}.png', entry, models, language)
+                    except Exception as error:
+                        recognized = {'ok': False, 'error': f'{type(error).__name__}: {error}'[:1000],
+                                      'code': getattr(error, 'code', 'ocr')}
+                    record = {'id': entry['id'], 'result': recognized}
+                    records.append(record)
+                    events.write(json.dumps({'state': 'complete', **record}, ensure_ascii=False) + '\n')
+            result = {'ok': True, 'images': records, 'engine_version': fitz.VersionBind}
+        else:
+            result = _recognize_image(request.parent / 'page.png', config, models, language)
         code = 0
     except Exception as error:
         result = {"ok": False, "error": f"{type(error).__name__}: {error}", "code": getattr(error, "code", "ocr")}

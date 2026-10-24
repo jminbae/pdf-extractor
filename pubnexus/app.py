@@ -944,13 +944,25 @@ class App:
             pass
 
     # ── 폴더 ────────────────────────────────────────────────────────
+    def navigation_roots(self) -> dict:
+        from pubnexus.output_location import known_directory
+        shortcuts = [{'name': label, 'path': str(known_directory(kind))}
+                     for kind, label in [('documents', '문서'), ('desktop', '바탕화면'), ('downloads', '다운로드')]]
+        # Listing drive names must not probe disconnected/network drive contents.
+        try:
+            drives = os.listdrives() if hasattr(os, 'listdrives') else [Path.home().anchor]
+        except OSError:
+            drives = [Path.home().anchor]
+        return {'shortcuts': shortcuts,
+                'drives': [{'name': str(path).rstrip('\\/'), 'path': str(path)} for path in drives if path]}
+
     def folder_state(self) -> dict:
         with self._operation_lock:
             parent = self.folder.parent if self.folder else None
             return {"path": str(self.folder or ""),
                     "parent": str(parent) if parent and parent != self.folder else None,
                     "folders": list(self._folders), "files": self.file_rows(),
-                    "output_dir": str(self.output_dir)}
+                    "output_dir": str(self.output_dir), "navigation": self.navigation_roots()}
 
     def folder_files(self, folder: Path) -> list[Path]:
         folder = Path(folder).resolve()
@@ -985,7 +997,7 @@ class App:
                 path = Path(raw)
                 paths.extend(self.folder_files(path) if path.is_dir() else [path])
             if not paths:
-                return {"ok": False, "why": "파일 경로를 받지 못했습니다. 파일 추가를 사용하세요."}
+                return {"ok": False, "why": "파일 경로를 받지 못했습니다. 열기를 사용하세요."}
             before = len(self.pdfs)
             self.add_files(paths)
             return {"ok": True, "n": len(self.pdfs) - before}
@@ -1104,6 +1116,9 @@ class App:
                     identity = output.get('pdf_conversion_attempt') or identity
                 needs_refresh = (source_type in ('pdf_general', 'pdf_sdk') and pdf_markdown.available()
                                  and identity != pdf_markdown.engine_id())
+            elif saved and p.suffix.lower() == '.pptx':
+                from pubnexus.documents import PPTX_IMAGE_OCR_VERSION
+                needs_refresh = output.get('image_ocr_version') != PPTX_IMAGE_OCR_VERSION
             state = "failed" if error else ("changed" if changed else (output.get("status", "complete") if saved else "ready"))
             progress = self._file_progress.get(key) or {}
             active = key in self._active_paths or (self._active_path is not None and _norm(self._active_path) == key)
@@ -1116,22 +1131,26 @@ class App:
                 state = 'paused'
             elif needs_refresh and not error:
                 state = 'ready'
-            readable = bool(saved and not needs_refresh)
-            ready = bool(readable and not error and not active and not waiting and state in ('complete', 'partial'))
+            readable = bool(saved and (not needs_refresh or p.suffix.lower() == '.pptx'))
+            ready = bool(readable and not needs_refresh and not error and not active and not waiting
+                         and state in ('complete', 'partial'))
             warnings = self._display_warnings(output)
             if needs_refresh:
-                warnings = ['본문·그림 배치 방식이 개선됐습니다. 선택 추출로 MD를 다시 저장하세요.'] + warnings
+                warnings = [('그림 속 글자를 포함하려면 다시 추출하세요.' if p.suffix.lower() == '.pptx' else
+                             '본문·그림 배치 방식이 개선됐습니다. 선택 추출로 MD를 다시 저장하세요.')] + warnings
             rows.append({"name": p.name, "path": str(p), "done": ready, 'md_ready': readable,
                          'needs_refresh': needs_refresh,
                          "cached": key in self.done, "status": state,
                          "size_bytes": current[0] if current else 0,
-                         "pages": progress.get('progress_pages') or output.get("pages"),
+                         "pages": None if p.suffix.lower() == '.pptx' else progress.get('progress_pages') or output.get("pages"),
                          'progress_pct': 100 if ready else (0 if needs_refresh and not active else progress.get('progress_pct', 0)),
                          'progress_stage': '다시 저장 필요' if needs_refresh and not active else progress.get('progress_stage', ''),
                          'progress_page': progress.get('progress_page'), 'progress_pages': progress.get('progress_pages'),
                          "warnings": warnings,
                          'warning_details': output.get('warning_details', output.get('warnings', [])),
-                         "unit_count": output.get('unit_count'), "unit_label": output.get('unit_label', ''),
+                         "unit_count": (progress.get('progress_pages') or output.get('unit_count'))
+                                       if p.suffix.lower() == '.pptx' else output.get('unit_count'),
+                         "unit_label": '장' if p.suffix.lower() == '.pptx' else output.get('unit_label', ''),
                          "markdown": output.get("markdown", ""), "assets": output.get('assets', ''), "error": error or ""})
         return rows
 
@@ -1689,13 +1708,17 @@ class App:
                               'sdk_layout': '문서 구조 추출', 'sdk_complete': '문서 구조 추출 완료',
                               'sdk_assets': '원본 그림 보존',
                               'sdk_recovery': '누락된 쪽 재추출', 'pdf_validation': '본문 보존 확인', 'done': '쪽 처리'}
+                    labels.update(document_native='본문 추출', document_ocr='그림 속 문자 추출')
                     labels['sdk_ocr'] = '문자 인식'
                     low, high = ((95, 98) if stage == 'pdf_validation' else
+                                 (5, 20) if stage == 'document_native' else
+                                 (20, 94) if stage == 'document_ocr' else
                                  (5, 50) if stage in ('native', 'ocr') else
                                  (5, 94) if stage in ('pdf_sdk', 'sdk_layout', 'sdk_complete', 'sdk_ocr', 'sdk_recovery', 'sdk_assets') else
                                  (85, 95) if stage in ('docling', 'docling_tables') else (50, 85))
                     measured = low + (high - low) * max(0, min(page / max(pages, 1), 1))
-                    self.prog(i, total, p.name, f'{labels.get(stage, stage)} · {page}/{pages}쪽', 0, times,
+                    unit = '장' if p.suffix.lower() in {'.pptx', '.odp'} else '쪽'
+                    self.prog(i, total, p.name, f'{labels.get(stage, stage)} · {page}/{pages}{unit}', 0, times,
                               path=p, file_pct=measured, page=page, pages=pages)
 
                 try:
@@ -1711,14 +1734,19 @@ class App:
                             from pubnexus import pdf_pipeline, pdf_markdown
                             if not pdf_pipeline.current(doc) and doc.get('pdf_conversion_attempt') != pdf_markdown.engine_id():
                                 doc = pdf_pipeline.extract(p, cancel=self.cancel.is_set, progress=page_progress)
+                        elif p.suffix.lower() == '.pptx':
+                            from pubnexus import documents
+                            if not documents.current(doc):
+                                doc = documents.extract_document(p, cancel=self.cancel.is_set, progress=page_progress)
                         doc["sha1"] = sha
                     elif p.suffix.lower() != '.pdf':
+                        self.prog(i, total, p.name, '문서 구조 추출', .1, times)
                         if p.suffix.lower() in EXTERNAL_DOCUMENT_EXTENSIONS:
                             from pubnexus.external_documents import extract_document
+                            doc = extract_document(p, cancel=self.cancel.is_set)
                         else:
                             from pubnexus.documents import extract_document
-                        self.prog(i, total, p.name, '문서 구조 추출', .1, times)
-                        doc = extract_document(p, cancel=self.cancel.is_set)
+                            doc = extract_document(p, cancel=self.cancel.is_set, progress=page_progress)
                     else:
                         from pubnexus import pdf_pipeline
                         doc = pdf_pipeline.extract(p, cancel=self.cancel.is_set, progress=page_progress)
@@ -1738,7 +1766,9 @@ class App:
                         raise RuntimeError("처리 중 원본이 변경됐습니다. 변경된 문서를 다시 추출하세요.")
                     if self.cancel.is_set():
                         break
+                    self.prog(i, total, p.name, '본문 정리', 0, times, path=p, file_pct=96)
                     doc = comparison.attach(doc, p)
+                    self.prog(i, total, p.name, '저장', 0, times, path=p, file_pct=97)
                     store.save(sha, doc, p)
                     for cached_key in list(self._comparison_cache):
                         if cached_key[0] == _norm(p):
@@ -1773,6 +1803,8 @@ class App:
                               'pdf_conversion_engine': doc.get('pdf_conversion_engine') or doc.get('sdk_engine'),
                               'pdf_conversion_attempt': doc.get('pdf_conversion_attempt'),
                               'source_type': doc.get('source'),
+                              'image_ocr_version': (doc.get('extraction_report') or {}).get('image_ocr_version'),
+                              'needs_refresh': False,
                               "status": "partial" if partial else "complete"}
                     output['warnings'] = self._display_warnings(output)
                     self.exported[_norm(p)] = output
@@ -2058,8 +2090,17 @@ class Api:
                                           file_types=("Documents (" + ';'.join('*' + ext for ext in sorted(DOCUMENT_EXTENSIONS)) + ")",))
         if not res:
             return {"ok": False}
-        a.add_files([Path(p) for p in res])
-        return {"ok": True, "n": len(a.pdfs)}
+        picked = list(dict.fromkeys(Path(path).resolve() for path in res))
+        picked = [path for path in picked if path.is_file() and path.suffix.lower() in DOCUMENT_EXTENSIONS]
+        if not picked:
+            return {'ok': False, 'why': '지원하는 문서를 선택하세요.'}
+        if len({path.parent for path in picked}) == 1:
+            a.browse_folder(picked[0].parent)
+        else:
+            a.add_files(picked)
+        return {**a.folder_state(), 'ok': True, 'n': len(picked),
+                'selected_paths': [str(path) for path in picked],
+                'open_path': str(picked[0]) if len(picked) == 1 else None}
 
     # ── 한국어 번역 ─────────────────────────────────────────────────
     def doc_lang(self, index: int, lang: str = "en") -> dict:
@@ -2374,14 +2415,12 @@ def build(folder: str | Path | None = None, *, hidden: bool = False):
     app._hidden = hidden
     port = serve(app)
     api = Api(app)
-    # 창을 **최대화해서** 띄운다. 세 칸을 나란히 보는 화면이라 넓을수록 좋고,
-    # 무엇보다 고해상도(175% 배율) 화면에서 요청한 크기가 배율만큼 부풀어
-    # 창 오른쪽이 화면 밖으로 나가는 일을 원천적으로 막는다.
+    # Keep the initial window compact; the reader also works with its folder panel closed.
     w, h = _screen()
     win = webview.create_window(
         "문서 추출기", url=f"http://127.0.0.1:{port}/", js_api=api,
-        width=min(1360, max(1120, w - 120)), height=min(860, max(660, h - 120)),
-        min_size=(1120, 660), maximized=not hidden, hidden=hidden,
+        width=min(1040, max(720, w - 120)), height=min(760, max(520, h - 120)),
+        min_size=(720, 520), maximized=False, hidden=hidden,
         background_color="#ffffff", text_select=True)
     app.window = win
     win.events.closing += app.request_close
@@ -2397,7 +2436,7 @@ def build(folder: str | Path | None = None, *, hidden: bool = False):
             body.on('dragover', DOMEventHandler(lambda event: None, prevent_default=True))
             body.on('drop', DOMEventHandler(dropped, prevent_default=True))
         except Exception:
-            utils.log('파일 끌어놓기를 연결하지 못했습니다. 파일/폴더 추가는 계속 사용할 수 있습니다.')
+            utils.log('파일 끌어놓기를 연결하지 못했습니다. 열기는 계속 사용할 수 있습니다.')
     win.events.loaded += bind_drop
 
     # 시작 폴더: 지난번에 열었던 곳 → 설정 → 없음.
