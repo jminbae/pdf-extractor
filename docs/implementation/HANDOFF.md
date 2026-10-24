@@ -1,8 +1,16 @@
 # 문서 추출기 구현 진행 기록
 
-## 진행 중 — 2026-10-24, 1.2.4 문서 보기와 목록 정리
+## 완료 — 2026-10-24, 1.2.4 간결한 UI·다크 모드 공개·설치
 
-사용자는 MD Ctrl+휠 확대/배율 표시, 보기 우상단 X, 검색 한 줄 통합과 불필요한 경로·안내·합계·리소스 줄 제거, 이어 다크 모드 전환을 요청했습니다. 구현 checkpoint `981de5ebbe2d971d64e5337a85e89de393fb2651`, UI SHA `c7a1fa5a…89bc8f1`입니다. **289 tests/88.980초·실제UI4종·두테마20화면·최종EXE book/scan·산출물 감사 PASS**, 아직1.2.4 공개·설치 완료는 아닙니다. 실제 EXE의 trusted MD wheel110%/100복귀·X·테마native저장/WebView reload복원과 책 중CSV독립저장/중지456ms를 확인했습니다.193파일 백업 후 기존1.2.3 앱PID3732를 작업 없는 상태에서 정상 닫았으며, 새 버전 게시/재다운로드/설치/실제 설치본 확인이 남았습니다. 원본·MD/그림과 실패 영수증을 보존하고 산출물은 DevCache에만 둡니다. 상세 근거는 [UI 개선 기록](./2026-10-24-minimal-reader.md)에 있습니다.
+**[v1.2.4 공개](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.4)·공개 파일 재다운로드·기존 HKCU 설치 갱신·실제 설치본 확인을 마쳤습니다.** 공개 tag/source commit `c7898134d0b5164f94b7bf10f0f7f6463a504ce6`, 구현 checkpoint `981de5ebbe2d971d64e5337a85e89de393fb2651`, UI SHA `c7a1fa5a…89bc8f1`입니다. Ctrl+휠50–250%/배율클릭100%, 보기X·파일명/검색한줄, 경로·합계·리소스·정상안내 제거와 native설정 라이트/다크 저장·복원을 적용했습니다. 추출 코어·메모리 진입 정책은 바꾸지 않았습니다.
+
+- **289 tests/88.980초·실제UI4종·두테마20화면·최종EXE book/scan·산출물 감사 PASS**. trusted MD wheel110%/100복귀·X·native테마저장/WebView reload복원과 책 중CSV독립저장/중지456ms 확인. 책 동시 실행은 부분 시험이며 모든 입력→paint 보장이나396쪽 재완주를 뜻하지 않습니다.
+- 공개 Setup243,140,721bytes/SHA `e989c2f995702bdf3f049e5206daf45ee63a75f6fe3c5bcd6246db51ab20b0cd`, source ZIP1,033,620bytes/SHA `5a42d0ae…dd1884`.147소스파일tag대응·공개3자산 직접재다운로드/독립검수 PASS. `releases/1.2.4/published-verification.json`.
+- 표준 CURRENTUSER 설치 exit0/HKCU1.2.4/HKLM양view없음. main `1daca99e…4c6bf`·worker `3ca3f950…5ef5b` 정확pin일치. 설치본 native PDF/CSV·MD확대/X/다크·실제공개업데이트 `up_to_date/1.2.4` PASS. `installed-1.2.4-verification.json`, `frozen-1.2.4-installed-native/receipt.json`.
+- backup193·일반실행전 사용자191파일 SHA/bytes불변/원본PDF동일·실제manifest186이미지/상대URL·source_map396쪽 독립검수 PASS. 정상앱PID31116/창문서추출기/Respondingtrue를 열어뒀고 실제책MD/396쪽/그림186/표18/가짜Page제목0·MD SHA `6878bed6…fe4f`/원본과MD불변을 확인했습니다. `installed-book-open-1.2.4.json`, `installed-1.2.4-independent-review.json`.
+- 검증+설치를 묶은 명령1건이 자동검토에서 상세사유없는 정책차단으로 실행전 거절됐지만, 각각 별도 승인된 검증과 표준설치가 완료됐습니다. 정책/계정/ACL변경없음. UAC=0/High 환경을 실제비승격 자동설치 검증으로 확대하지 않습니다. 기존실패영수증과1.2.3 rollback Setup은 보존합니다.
+
+상세 근거와 검증 한계는 [UI 개선·배포 기록](./2026-10-24-minimal-reader.md)에 있습니다. 이후 기록 커밋에서 공개 tag를 이동하지 않습니다.
 
 ## 완료 — 2026-10-24, 1.2.3 동시 백그라운드 추출 공개·설치
 

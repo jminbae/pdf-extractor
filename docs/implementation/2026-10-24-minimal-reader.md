@@ -2,7 +2,7 @@
 
 ## 진행 상태
 
-구현·실제 UI·실행 파일 검증을 마쳤습니다. 이 절은 공개·설치 전 상태이며 이후 실제 완료 근거를 덧붙입니다. 제품 코드 checkpoint는 `981de5ebbe2d971d64e5337a85e89de393fb2651`입니다. 이전1.2.3 설치·복구 근거는 `2026-10-24-release-1.2.3.md`에 보존합니다.
+**[v1.2.4 공개](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.4)·공개 파일 재다운로드 대조·기존 HKCU 설치 갱신·실제 설치본 검증을 마쳤습니다.** 제품 코드 checkpoint는 `981de5ebbe2d971d64e5337a85e89de393fb2651`, 공개 tag/source commit은 `c7898134d0b5164f94b7bf10f0f7f6463a504ce6`입니다. 이전1.2.3 설치·복구 근거는 `2026-10-24-release-1.2.3.md`에 보존합니다.
 
 ## 사용자 요구와 적용 범위
 
@@ -52,4 +52,23 @@ Windows 제목 표시줄은 공식 [DWMWINDOWATTRIBUTE](https://learn.microsoft.
 | main EXE | 11822697 | `1daca99e6bfabc48a845a7e44b03152d39b522d03d4499538950694acfb4c6bf` |
 | SDK worker | 10817172 | `3ca3f9504f64c9f25888112b9fffbfcb7d25cc0ea79451c6b7910f7d6ce5ef5b` |
 
-기존 프로그램·사용자 자료193개는 `deployment-backup-1.2.4/receipt.json`으로 SHA 대조 백업했습니다. 원본 PDF는 수정하지 않았으며,1.2.3 rollback Setup도 보존합니다. 새 버전의 공개·재다운로드·동일 HKCU 설치와 설치본 확인은 다음 단계입니다.
+기존 프로그램·사용자 자료193개는 `deployment-backup-1.2.4/receipt.json`으로 SHA 대조 백업했습니다. 원본 PDF는 수정하지 않았으며,1.2.3 rollback Setup도 보존합니다.
+
+## 공개·설치 완료 근거
+
+모든 증거 경로는 위와 같은 DevCache 루트입니다. 공개 tag는 최종 기록 커밋 뒤에도 이동하지 않습니다.
+
+| 단계 | 실제 결과 |
+| --- | --- |
+| 공개 릴리스 | stable/latest `v1.2.4`, draft/prerelease false, 원격 tag `c7898134…4ce6` |
+| 공개 파일 재다운로드 | `releases/1.2.4/published-verification.json ok=true`; Setup·checksum·source ZIP의 bytes/SHA와 GitHub asset metadata 일치, 독립 검수도 공개 URL에서 재대조 |
+| 소스 ZIP | 1,033,620 bytes, SHA256 `5a42d0aeea2af5e1002e52e497569a06419b097180314c800f3f6e1923dd1884`; CRC 정상, tag의147개 파일 대응. Git archive의 LF→CRLF 외 내용 차이 없음 |
+| 설치 | 공개 Setup을 `/CURRENTUSER`로 기존 LocalPrograms 경로에 설치, exit0. `install-1.2.4-user.log`와 `installed-1.2.4-verification.json`; HKCU1.2.4/HKLM 양view없음, 설치된 main/worker SHA가 위 후보 pin과 동일 |
+| 설치본 기능 | `frozen-1.2.4-installed-native/receipt.json ok=true`; PDF/CSV 독립2PID 추출·저장·원본대조·읽기전용, trusted Ctrl+휠110%/100복귀, X/간결한 화면, nativeDark저장/실제WebView reload복원·원본 흰종이/필터없음, 원본/TEMP정리 PASS |
+| 공개 업데이트 확인 | 설치본에서 실제 `up_to_date/1.2.4`; hidden QA의 자동 설치 차단과 구분 |
+| 사용자 자료 보존 | 독립검수에서 backup193개 SHA/bytes와 일반 앱 실행 전 사용자191개 동일, 변경0. 실제 manifest186이미지의 SHA/상대URL·source_map396쪽도 확인. `installed-1.2.4-independent-review.json` |
+| 정상 앱·실제 책 | `normal-window-1.2.4.json`, PID31116/창 `문서 추출기`/handle4066390/Responding true. `installed-book-open-1.2.4.json ok=true`,396쪽·MD준비/refresh=false·그림186/표18/가짜Page제목0·MD SHA `6878bed6…fe4f`·원본/저장MD불변 |
+
+정상 앱은 열어 두었습니다. 실행 뒤 UI/index 최근 보기 갱신은 실행 전 자료 불변 검증과 구분합니다. 책 상태는 기존 OCR·추출 검수 안내가 있는 `partial`을 유지하며, 전쪽 육안 검수나 OCR 무오류를 뜻하지 않습니다. 설치본 hidden QA의 목록 스크린샷은 timeout으로 미저장이고 비교 화면은 저장됐습니다. 기능 PASS와 분리합니다. 이 PC는 UAC=0/관리자 High 환경이므로 실제 비승격 자동 설치를 측정한 것은 아닙니다. 계정·정책·ACL은 변경하지 않았습니다.
+
+검증과 설치를 묶은 최초 명령은 자동 승인 검토에서 `rejected: blocked by policy`로 거절됐고 구체적인 이유는 없었습니다. 해당 명령은 실행되지 않았습니다. 파일 검증과 표준 설치를 분리한 명령은 각각 승인되어 완료됐으며, 우회 정책 변경은 없습니다.
