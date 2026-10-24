@@ -582,11 +582,13 @@ class PageRenderer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._docs: OrderedDict[int, tuple[Path, object, tuple[int, int]]] = OrderedDict()
+        self._page_sizes: dict[int, tuple[tuple[float, float], ...]] = {}
         self._imgs: OrderedDict[tuple, bytes] = OrderedDict()
         self._seq = 0
 
     def _retire(self, key: int) -> None:
         entry = self._docs.pop(key, None)
+        self._page_sizes.pop(key, None)
         if entry:
             entry[1].close()
         for cached in list(self._imgs):
@@ -604,7 +606,7 @@ class PageRenderer:
                 if p == path:
                     if previous == signature:
                         self._docs.move_to_end(k)
-                        return {"key": k, "pages": self._sizes(d)}
+                        return {"key": k, "pages": [list(size) for size in self._page_sizes[k]]}
                     self._retire(k)
             try:
                 doc = fitz.open(str(path))
@@ -614,10 +616,16 @@ class PageRenderer:
                     doc = fitz.open(stream=f.read(), filetype="pdf")
             self._seq += 1
             k = self._seq
+            try:
+                sizes = tuple(tuple(size) for size in self._sizes(doc))
+            except Exception:
+                doc.close()
+                raise
             self._docs[k] = (path, doc, signature)
+            self._page_sizes[k] = sizes
             while len(self._docs) > self.MAX_DOCS:
                 self._retire(next(iter(self._docs)))
-            return {"key": k, "pages": self._sizes(doc)}
+            return {"key": k, "pages": [list(size) for size in self._page_sizes[k]]}
 
     @staticmethod
     def _sizes(doc) -> list[list[float]]:
@@ -667,6 +675,7 @@ class PageRenderer:
                 except Exception:
                     pass
             self._docs.clear()
+            self._page_sizes.clear()
             self._imgs.clear()
 
 
@@ -768,6 +777,8 @@ class Grobid:
 class App:
     def __init__(self) -> None:
         from pubnexus.settings import Preferences
+        from pubnexus.preview_requests import PreviewRequests
+        self._preview_requests = PreviewRequests()
         self.preferences = Preferences()
         self.output_dir = self.preferences.output_dir
         self._operation_lock = threading.RLock()
@@ -1224,7 +1235,7 @@ class App:
         return {'error': str(error), **({'code': 'stale_selection'} if isinstance(error, StaleSelection) else {})}
 
     def source_view(self, i: int, *, renderer: str = '', expected_path: str | None = None,
-                    _source: Path | None = None) -> dict:
+                    _source: Path | None = None, cancel=None) -> dict:
         """Read the original preview without touching extraction, results or queue."""
         if renderer not in ('', 'presentation', 'pdf'):
             return {'error': '지원하지 않는 표시 방식입니다.'}
@@ -1240,39 +1251,56 @@ class App:
                                       '원본 PDF' if suffix == '.pdf' else '원본 문서'),
                      "source_unit_label": '슬라이드' if slides else '쪽'}
         try:
+            from pubnexus.preview_requests import PreviewCancelled
+            def check():
+                if cancel and cancel():
+                    raise PreviewCancelled('다른 문서로 이동했습니다.')
+            check()
             from pubnexus.preview import text_source
             text_view = text_source(pdf)
             if text_view is not None:
+                check()
                 res.update(text_view)
                 return res
             if renderer != 'pdf':
                 from pubnexus import native_preview
-                content = native_preview.view(pdf)
+                content = native_preview.view(pdf, cancel=cancel)
                 if content is not None:
+                    check()
                     res.update(content)
                     return res
             if suffix == '.pptx' and renderer != 'pdf':
                 from pubnexus import presentation_preview
                 if presentation_preview.available():
                     res.update(presentation_preview.describe(pdf, i))
+                    check()
                     return res
+            if suffix == '.pdf':
+                res.update(self.renderer.open(pdf))
+                res.update(source_converted=False, source_engine='PyMuPDF', source_kind='pdf')
+                check()
+                return res
             from pubnexus.preview import preview_path
-            original_view = preview_path(pdf)
+            original_view = preview_path(pdf, cancel=cancel)
+            check()
             res.update(self.renderer.open(original_view.path))
             res.update(source_converted=original_view.converted, source_engine=original_view.engine, source_kind='pdf')
+            check()
         except Exception as e:  # noqa: BLE001
+            if cancel and cancel():
+                res['code'] = 'cancelled'
             res["pdf_error"] = str(e)
             res['source_ready'] = False
             res["pages"] = []
         return res
 
-    def paper(self, i: int, *, expected_path: str | None = None) -> dict:
+    def paper(self, i: int, *, expected_path: str | None = None, cancel=None) -> dict:
         try:
             pdf = self.selected_source(i, expected_path)
         except ValueError as error:
             return self.selection_error(error)
-        res = self.source_view(i, _source=pdf)
-        if res.get('error'):
+        res = self.source_view(i, _source=pdf, cancel=cancel)
+        if res.get('error') or res.get('code') == 'cancelled':
             return res
         res["doc"] = self.doc_view(pdf)
         res['revision'] = res['doc'].get('revision')
@@ -1981,7 +2009,17 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj) -> None:
         self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8",
-                   **({'status': 409} if isinstance(obj, dict) and obj.get('code') == 'stale_selection' else {}))
+                   **({'status': 409} if isinstance(obj, dict) and obj.get('code') in {'stale_selection', 'cancelled'} else {}))
+
+    def _preview_work(self, query):
+        from pubnexus.preview_requests import PreviewCancelled
+        try:
+            generation = int(query['generation'][0]) if 'generation' in query else None
+        except (ValueError, IndexError) as error:
+            raise PreviewCancelled('미리보기 요청이 올바르지 않습니다.') from error
+        path = query.get('expected_path', [None])[0]
+        return self.app._preview_requests.work(query.get('viewer', [None])[0], generation,
+                                                _norm(path) if path else None)
 
     _IMG = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
@@ -1996,6 +2034,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(fp.read_bytes(), ctype, cache="max-age=600")
 
     def do_GET(self) -> None:  # noqa: N802
+        from pubnexus.preview_requests import PreviewCancelled
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         try:
@@ -2008,8 +2047,15 @@ class Handler(BaseHTTPRequestHandler):
                 mode = q.get('mode', [''])[0]
                 renderer = q.get('renderer', [''])[0]
                 identity = {'expected_path': q['expected_path'][0]} if 'expected_path' in q else {}
-                self._json(self.app.source_view(index, renderer=renderer, **identity) if mode == 'source' else
-                           self.app.result_view(index, **identity) if mode == 'result' else self.app.paper(index, **identity))
+                if mode == 'result':
+                    self._json(self.app.result_view(index, **identity))
+                else:
+                    with self._preview_work(q) as cancel:
+                        result = (self.app.source_view(index, renderer=renderer, cancel=cancel, **identity)
+                                  if mode == 'source' else self.app.paper(index, cancel=cancel, **identity))
+                        if cancel():
+                            raise PreviewCancelled('다른 문서로 이동했습니다.')
+                    self._json(result)
             elif u.path == "/document-map":
                 identity = {'expected_path': q['expected_path'][0]} if 'expected_path' in q else {}
                 self._json(self.app.document_map(int(q.get('p', ['-1'])[0]), renderer=q.get('renderer', [''])[0], **identity))
@@ -2023,13 +2069,19 @@ class Handler(BaseHTTPRequestHandler):
                     if not re.fullmatch(r'[0-9a-f]{64}', revision):
                         raise PreviewUnavailable('문서를 다시 여세요.')
                     if u.path == '/native-asset':
-                        body, mime = native_preview.read_asset(original, q.get('id', [''])[0], revision)
+                        with self._preview_work(q) as cancel:
+                            body, mime = native_preview.read_asset(original, q.get('id', [''])[0], revision, cancel=cancel)
+                            if cancel():
+                                raise PreviewCancelled('다른 문서로 이동했습니다.')
                         self._send(body, mime)
                     else:
                         fields = {'start': 0, 'count': 80, 'sheet_index': 0, 'start_row': 1,
                                   'start_col': 1, 'row_count': 60, 'col_count': 24}
                         options = {name: int(q.get(name, [str(default)])[0]) for name, default in fields.items()}
-                        result = native_preview.view(original, revision=revision, **options)
+                        with self._preview_work(q) as cancel:
+                            result = native_preview.view(original, revision=revision, cancel=cancel, **options)
+                            if cancel():
+                                raise PreviewCancelled('다른 문서로 이동했습니다.')
                         if result is None:
                             raise PreviewUnavailable('이 문서의 내용 보기를 지원하지 않습니다.')
                         self._json(dict(result, path=str(original), name=original.name))
@@ -2071,7 +2123,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error(404)
                     return
                 try:
-                    body = presentation_preview.read_data(original, q.get('r', [''])[0])
+                    with self._preview_work(q) as cancel:
+                        if cancel():
+                            raise PreviewCancelled('다른 문서로 이동했습니다.')
+                        body = presentation_preview.read_data(original, q.get('r', [''])[0])
+                        if cancel():
+                            raise PreviewCancelled('다른 문서로 이동했습니다.')
                 except (ValueError, OSError):
                     self.send_error(409)
                     return
@@ -2110,6 +2167,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(asset.read_bytes(), self._IMG[asset.suffix.lower()])
             else:
                 self.send_error(404)
+        except RuntimeError as error:
+            from pubnexus.preview_requests import PreviewCancelled
+            if isinstance(error, PreviewCancelled):
+                self._json({'error': str(error), 'code': 'cancelled'})
+            else:
+                utils.log(traceback.format_exc())
+                self.send_error(500)
         except Exception:  # noqa: BLE001
             utils.log(traceback.format_exc())
             try:
@@ -2136,6 +2200,14 @@ def serve(app: App) -> int:
 class Api:
     def __init__(self, app: App) -> None:
         self._app = app
+
+    def cancel_preview(self, viewer: str, generation: int) -> dict:
+        from pubnexus.preview_requests import PreviewCancelled
+        try:
+            self._app._preview_requests.cancel(viewer, generation)
+            return {'ok': True}
+        except PreviewCancelled as error:
+            return {'ok': False, 'why': str(error)}
 
     def list_folders(self, path: str) -> dict:
         if not isinstance(path, str) or not path or '\0' in path or not Path(path).is_absolute():
@@ -2581,7 +2653,7 @@ def build(folder: str | Path | None = None, *, hidden: bool = False):
     # Keep the initial window compact; the reader also works with its folder panel closed.
     w, h = _screen()
     win = webview.create_window(
-        "문서 추출기", url=f"http://127.0.0.1:{port}/", js_api=api,
+        "문서 뷰어", url=f"http://127.0.0.1:{port}/", js_api=api,
         width=min(1040, max(720, w - 120)), height=min(760, max(520, h - 120)),
         min_size=(720, 520), maximized=False, hidden=hidden,
         background_color="#ffffff", text_select=True)

@@ -73,6 +73,55 @@ class SelectionIdentityTests(unittest.TestCase):
                 handler.send_response.assert_called_once_with(409)
                 self.assertEqual(json.loads(handler.wfile.getvalue())['code'], 'stale_selection')
 
+    def test_cancelled_legacy_open_does_not_read_results_or_reorder_queue(self):
+        original, _ = self.inputs()
+        self.app.pdfs = [original]
+        with patch.object(self.app, 'doc_view', side_effect=AssertionError('Cancelled viewer must not read results')), \
+             patch.object(self.app, 'bump', side_effect=AssertionError('Cancelled viewer must not reorder queue')):
+            result = self.app.paper(0, expected_path=str(original), cancel=lambda: True)
+        self.assertEqual(result.get('code'), 'cancelled', result)
+
+    def test_late_old_http_preview_is_cancelled_before_reading(self):
+        original, _ = self.inputs()
+        support.app_module.Api(self.app).cancel_preview('reader', 2)
+        handler = object.__new__(support.app_module.Handler)
+        handler.app = self.app
+        handler.path = '/open?' + urllib.parse.urlencode({'p': 1, 'mode': 'source',
+            'viewer': 'reader', 'generation': 1, 'expected_path': str(original)})
+        handler._json = Mock()
+        with patch.object(self.app, 'source_view', side_effect=AssertionError('Old request must not parse')):
+            handler.do_GET()
+        self.assertEqual(handler._json.call_args.args[0]['code'], 'cancelled')
+
+    def test_reopening_pdf_does_not_walk_every_page_again(self):
+        source = support.AppExportTests.source(self)
+        self.app.pdfs = [source]
+        self.addCleanup(self.app.renderer.close_all)
+        with patch.object(self.app.renderer, '_sizes', wraps=self.app.renderer._sizes) as sizes:
+            first = self.app.source_view(0)
+            second = self.app.source_view(0)
+            self.assertEqual(first['pages'], second['pages'])
+            self.assertEqual(sizes.call_count, 1, 'Warm preview must reuse its known page dimensions')
+            self.app.renderer.close_all()
+            self.app.source_view(0)
+            self.assertEqual(sizes.call_count, 2, 'Retiring a document must also retire its page dimensions')
+
+    def test_failed_pdf_dimensions_do_not_poison_the_next_open(self):
+        source = support.AppExportTests.source(self)
+        self.app.pdfs = [source]
+        self.addCleanup(self.app.renderer.close_all)
+        with patch.object(self.app.renderer, '_sizes', side_effect=[RuntimeError('Broken first render'), [[612., 792.]]]):
+            self.assertFalse(self.app.source_view(0)['source_ready'])
+            self.assertTrue(self.app.source_view(0)['source_ready'])
+        self.assertEqual(set(self.app.renderer._docs), set(self.app.renderer._page_sizes))
+
+    def test_pdf_display_does_not_hash_the_entire_original_before_opening(self):
+        source = support.AppExportTests.source(self)
+        self.app.pdfs = [source]
+        self.addCleanup(self.app.renderer.close_all)
+        with patch('pubnexus.store.file_sha1', side_effect=AssertionError('Display must not index the whole PDF')):
+            self.assertTrue(self.app.source_view(0)['source_ready'])
+
 
 if __name__ == '__main__':
     unittest.main()
