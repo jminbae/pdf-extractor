@@ -18,3 +18,4 @@ numpy>=1.26          # 청킹/검색 벡터 연산 (flat 인덱스 폴백에도 
 # sentence-transformers>=3.0   # Qwen3-Embedding / Qwen3-Reranker 로딩
 # torch>=2.3                   # (CUDA 빌드는 각자 사양에 맞춰 설치)
 # lancedb>=0.13                # 벡터 DB (없으면 vectordb.backend: flat 로 동작)
+psutil==7.2.2

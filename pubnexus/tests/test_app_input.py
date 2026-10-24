@@ -51,11 +51,16 @@ class AppInputTests(unittest.TestCase):
         self.app.set_folder(self.root / 'documents')
         self.assertEqual(self.app.pdfs, [source])
 
-    def test_inputs_cannot_change_during_a_running_job(self):
+    def test_inputs_can_be_appended_without_changing_a_running_job(self):
         self.app.worker = Mock()
         self.app.worker.is_alive.return_value = True
-        with self.assertRaises(RuntimeError):
-            self.app.add_files([self.file("new.pdf")])
+        active = self.file('active.pdf')
+        extra = self.file('new.pdf')
+        self.app.pdfs = [active]
+        self.app._pending_paths = {support.app_module._norm(active)}
+        self.app.add_files([extra])
+        self.assertEqual(self.app.pdfs, [active, extra])
+        self.assertEqual(self.app._pending_paths, {support.app_module._norm(active)})
 
     def test_drop_uses_native_full_paths_and_folder_filter(self):
         source = self.file("drop/nested/book.pdf")
@@ -67,7 +72,7 @@ class AppInputTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(self.app.pdfs, [source])
 
-    def test_drop_during_extraction_keeps_input_list(self):
+    def test_empty_drop_does_not_change_list_during_extraction(self):
         self.app.worker = Mock()
         self.app.worker.is_alive.return_value = True
         result = self.app.add_dropped_files({"dataTransfer": {"files": []}})

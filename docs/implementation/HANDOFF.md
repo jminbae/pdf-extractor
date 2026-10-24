@@ -208,3 +208,15 @@
 3. 원문좌표↔MD블록의 실제 source map과 읽기 전용 검색/클릭/스크롤 연동을 구현합니다. 기존 PNG preview를 활용할 수 있으며 PDF.js 교체는 전제가 아닙니다.
 4. rHWP CLI, DOCX/PPTX/XLSX 등의 구조 어댑터와 미리보기 어댑터를 순차 추가하고 오프라인 회귀·긴 문서/폴더 안정성을 검증합니다.
 5. 새 cache_root 경로로 빌드하고 검토용 실행을 확인합니다. 기존 설치본을 검증 없이 덮어쓰지 않습니다.
+# 진행 중 — 2026-10-24, 1.2.3 동시 백그라운드 추출
+
+아래 1.2.2 기록보다 이 절이 우선합니다. **1.2.3은 최종 빌드/EXE QA 중이며 아직 공개·설치 완료가 아닙니다.**
+
+- 설치된 1.2.2의 실제 스택과 API timeout으로 근본 원인을 확인했습니다. GUI와 같은 Python 프로세스에서 native MuPDF/GIL 작업을 실행했고 모든 새 PDF에 논문 서지/GROBID 경로가 선행했습니다. 이제 모든 PDF는 공통 SDK 우선 경로이며 문서마다 별도 프로세스로 실행합니다.
+- 사용자는 여러 문서를 동시에 독립 실행하되 자원 한도를 요구했습니다. 최종 스케줄러는 CPU에 따른 동시 상한(이 PC 8, 절대 상한 10), psutil 실측과 예상 메모리 예약, 자원 부족 시 자동 대기/재개를 적용합니다. 이는 강제 메모리 상한이 아닌 신규 실행 기준입니다. 같은 내용 SHA는 직렬화하고 export commit은 OS 파일 잠금으로 보호합니다.
+- 전체 **284 tests PASS / 93.332초**. 실제 두 native GIL 자식 동시 실행·GUI 읽기/검색·동시 취소, 메모리 대기/재개, 같은 SHA/개수 제한, coordinator 예외 시 역압 교착 해소, 저장 경합·snapshot 검사를 포함합니다. 실제 UI 회귀 3종과 관련 독립 검수 모두 승인, 현재 알려진 P1/P2 없음입니다.
+- 실제 책 SDK/본문 재검증: **396쪽 / 440.109초 / 1,934블록 / 표18 / 그림186 / 전체 쪽 누락0**, MD SHA `6878bed61a231e362e3819032a31ced0f658e8a21e44468e41f4d93c2b4dfe4f`로 기존 승인 MD와 동일합니다. 원본·실제 Documents MD·AppData 정본 불변. 이 전체 실행 중 App/후속 export가 바뀌어 raw source gate는 false이며, 본문 코어4개 불변과 conversion 검증 true를 별도로 기록했습니다. 최종 동시 스케줄러/EXE 전체 실행으로 과장하지 않습니다.
+- source 전제/측정·오탐 원인/독립 검수는 [배경 추출 진단](./2026-10-24-background-extraction.md), DevCache의 `background-1.2.3-whole-book-final`에 있습니다. 책 자원 표본은 전체 440초 중 약284초/55표본: CPU 평균41.09%·관측최대94.92%(24논리CPU 전체 용량 기준), private 관측최대1.88GiB/RSS1.11GiB입니다. 순간 lifetime peak나 모든 문서의 평균은 아닙니다.
+- 최종 빌드 로그 `D:\DevCache\260725 PDF 추출\build-1.2.3-parallel-final.log`, 전체 시험 로그 `test-1.2.3-parallel-final.log`. 사용자 기존 프로그램/책 자료193개는 `deployment-backup-1.2.3/receipt.json`으로 SHA 대조 백업했고 원본 PDF는 수정하지 않았습니다.
+- 남은 작업: 최종 EXE native/scan + 실제 책 진행 중 다른 CSV 완료·읽기/검색·취소 → 소스/tag/archive·installer/checksum 게시/다운로드 대조 → 기존 HKCU 설치 갱신·실제 설치본 확인. 기존 1.2.2 릴리스/tag는 보존합니다.
+

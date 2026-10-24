@@ -53,12 +53,13 @@ class AppExportTests(unittest.TestCase):
         source = self.source()
         doc = self.extracted(source)
 
-        def extract(path, cfg, **kwargs):
+        def extract(path, **kwargs):
             store.save(doc["sha1"], doc, path)
             return doc
 
-        with patch("pubnexus.single.extract_one", side_effect=extract):
+        with patch("pubnexus.pdf_pipeline.extract", side_effect=extract) as extracted:
             self.app._work([source])
+        extracted.assert_called_once()
 
         markdown = source.parent / "Markdown" / "book.md"
         self.assertTrue(markdown.is_file(), "Successful app extraction must automatically save Markdown")
@@ -84,10 +85,14 @@ class AppExportTests(unittest.TestCase):
         self.assertFalse((two / 'Markdown').exists())
 
     def test_cache_is_exported_without_running_paper_pipeline_again(self):
+        from pubnexus import pdf_markdown
         source = self.source()
         doc = self.extracted(source)
+        # A validated current native fallback is reusable, unlike a legacy
+        # pre-SDK document with no current conversion identity/attempt.
+        doc['pdf_conversion_attempt'] = pdf_markdown.engine_id()
         store.save(doc["sha1"], doc, source)
-        with patch("pubnexus.single.extract_one", side_effect=AssertionError("Do not re-extract cached input")):
+        with patch("pubnexus.pdf_pipeline.extract", side_effect=AssertionError("Do not re-extract cached input")):
             self.app._work([source])
         self.assertTrue((self.root / "Markdown" / "book.md").is_file())
 
@@ -101,7 +106,7 @@ class AppExportTests(unittest.TestCase):
                 raise OSError("Synthetic disk failure")
             return real_export(doc, source, **kwargs)
 
-        with patch("pubnexus.single.extract_one", side_effect=lambda p, cfg, **kw: self.extracted(p)), \
+        with patch("pubnexus.pdf_pipeline.extract", side_effect=lambda p, **kw: self.extracted(p)), \
                 patch.object(export, "export_document", side_effect=save_result):
             self.app._work(sources)
 
@@ -130,7 +135,7 @@ class AppExportTests(unittest.TestCase):
         source = self.source()
         doc = self.extracted(source)
         doc["extraction_report"] = {"status": "failed", "warnings": ["Source unreadable"]}
-        with patch("pubnexus.single.extract_one", return_value=doc):
+        with patch("pubnexus.pdf_pipeline.extract", return_value=doc):
             self.app._work([source])
         completed = [payload for kind, payload in self.events if kind == "run" and not payload["on"]][-1]
         self.assertEqual(completed["nfail"], 1)

@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import copy
 import contextlib
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
+import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +37,52 @@ class ExportConflictError(ExportError):
 
 _BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
 _RESERVED = re.compile(r"^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)", re.I)
+
+
+@contextlib.contextmanager
+def _output_lock(dest: Path, timeout: float = 60.0):
+    """Serialize filename selection and the existing recoverable commit only.
+
+    Keep the lock file: unlinking it could let another process lock a different
+    inode. The OS releases this process-owned lock even after forced termination.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / '.pubnexus-export.lock'
+    if path.resolve().parent != dest:
+        raise ExportError('출력 잠금 파일이 저장 폴더 밖으로 연결되어 있습니다.')
+    descriptor = os.open(utils.long_path(path), os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(descriptor, 'r+b', buffering=0) as stream:
+        if path.resolve().parent != dest or os.fstat(stream.fileno()).st_ino != path.stat().st_ino:
+            raise ExportError('출력 잠금 파일의 경로가 변경되어 저장하지 않았습니다.')
+        if os.name == 'nt':
+            import msvcrt
+            def lock():
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            def unlock():
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            def lock():
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            def unlock():
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                lock()
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise ExportError('출력 폴더 잠금을 얻지 못해 저장하지 않았습니다.') from error
+                if time.monotonic() >= deadline:
+                    raise ExportError('다른 문서의 저장 잠금 대기 시간을 초과했습니다.') from error
+                time.sleep(.05)
+        try:
+            yield
+        finally:
+            unlock()
 
 
 def _truncate_name(text: str, units: int) -> str:
@@ -190,7 +238,10 @@ def export_document(doc: dict, source_path: str | Path, *,
     부모를 쓴다. 정본 JSON 저장은 호출부가 기존 store API로 계속 담당한다.
     """
     try:
-        return _export_document(doc, source_path, output_dir=output_dir, asset_base=asset_base)
+        source = Path(source_path).resolve(strict=True)
+        dest = Path(output_dir).resolve() if output_dir is not None else source.parent / 'Markdown'
+        with _output_lock(dest):
+            return _export_document(doc, source, output_dir=dest, asset_base=asset_base)
     except OSError as exc:
         raise ExportError(f"내보내기 저장 실패: {exc}") from exc
 
@@ -276,8 +327,11 @@ def _export_document(doc: dict, source_path: str | Path, *,
     unchanged = old_hash == markdown_hash
     revision = hashlib.sha256(json.dumps(doc, ensure_ascii=False, sort_keys=True,
                                         separators=(",", ":")).encode("utf-8")).hexdigest()
+    content_revision = hashlib.sha256(json.dumps({k: v for k, v in doc.items() if k != 'source_file'},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode('utf-8')).hexdigest()
     record = {"version": 1, "source_key": source_key,
               "markdown": path.name, "revision": revision,
+              "canonical_content_revision": content_revision,
               "markdown_sha256": markdown_hash,
               "assets": asset_hashes,
               "source_map": {

@@ -60,17 +60,9 @@ _setup_console()
 
 from pubnexus import utils  # noqa: E402
 
-GROBID_WARMUP_SEC = 180          # 콜드 기동 40~50초. 느린 디스크를 감안해 넉넉히.
 EXTERNAL_DOCUMENT_EXTENSIONS = {'.rtf', '.ipynb', '.xls', '.msg'}
 DOCUMENT_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.xlsx', '.csv', '.tsv', '.txt', '.md',
                        '.html', '.htm', '.hwp', '.hwpx', '.epub', '.odt', '.ods', '.odp', '.eml', '.mbox'} | EXTERNAL_DOCUMENT_EXTENSIONS
-
-# single.py 가 올려보내는 단계 이름 → 사람 말. 0%·100% 에 멈춰 보이지 않게 한다.
-_STAGE = {
-    "probe": "PDF 읽는 중", "doi": "DOI 확인", "metadata": "서지정보 조회",
-    "fulltext": "본문 추출", "assemble": "정리·수리", "done": "저장",
-}
-
 
 def _norm(p: str | Path) -> str:
     """경로 비교용 정규화. 대소문자·상대경로 차이로 짝을 놓치지 않게."""
@@ -773,6 +765,7 @@ class App:
         self._install_requested = False
         self._closing = False
         self._hidden = False
+        self._worker_mode = False
         self._update_applied = False
         self.window = None
         try:
@@ -803,6 +796,12 @@ class App:
         self._last_push = 0.0
         self._active_path: Path | None = None
         self._pending_paths: set[str] = set()
+        self._background_queue: list[tuple[Path, bool]] = []
+        self._background_total = 0
+        self._accepting_work = False
+        self._active_paths: set[str] = set()
+        self._worker_pids: dict[str, int] = {}
+        self._resource_state: dict = {}
         self._file_progress: dict[str, dict] = {}
         self._warning_cache: dict[tuple, list[str]] = {}
         self._legacy_reports: dict[tuple, dict] = {}
@@ -931,11 +930,14 @@ class App:
             return {}
 
     def ui_save(self, **kw) -> None:
+        if self._worker_mode:
+            return  # Only the GUI owner commits browsing/settings state.
         try:
-            d = self.ui_load()
-            d.update(kw)
-            self.ui_path().parent.mkdir(parents=True, exist_ok=True)
-            utils.write_json(self.ui_path(), d)
+            with self._operation_lock:
+                d = self.ui_load()
+                d.update(kw)
+                self.ui_path().parent.mkdir(parents=True, exist_ok=True)
+                utils.write_json(self.ui_path(), d)
         except Exception:  # noqa: BLE001 — 기억 못 해도 앱은 돌아간다
             pass
 
@@ -951,8 +953,6 @@ class App:
                       key=lambda p: (p.name.casefold(), str(p).casefold()))
 
     def add_files(self, paths: list[Path]) -> None:
-        if self.worker and self.worker.is_alive():
-            raise RuntimeError("추출을 마치거나 중지한 뒤 파일을 추가하세요.")
         known = {_norm(p) for p in self.pdfs}
         for raw in paths:
             p = Path(raw).resolve()
@@ -967,8 +967,6 @@ class App:
 
     def add_dropped_files(self, event: dict) -> dict:
         """Use WebView2's native file-drop paths; never guess from a file name."""
-        if self.worker and self.worker.is_alive():
-            return {"ok": False, "why": "추출을 마치거나 중지한 뒤 파일을 추가하세요."}
         paths = []
         try:
             for item in (event.get('dataTransfer') or {}).get('files') or []:
@@ -1081,21 +1079,22 @@ class App:
                                  and identity != pdf_markdown.engine_id())
             state = "failed" if error else ("changed" if changed else (output.get("status", "complete") if saved else "ready"))
             progress = self._file_progress.get(key) or {}
-            active = self._active_path is not None and _norm(self._active_path) == key
+            active = key in self._active_paths or (self._active_path is not None and _norm(self._active_path) == key)
             waiting = key in self._pending_paths
             if active:
                 state = 'running'
             elif waiting:
-                state = 'ready'
+                state = 'queued'
             elif progress.get('status') == 'paused' and not error:
                 state = 'paused'
             elif needs_refresh and not error:
                 state = 'ready'
-            ready = bool(saved and not error and not active and not waiting and not needs_refresh and state in ('complete', 'partial'))
+            readable = bool(saved and not needs_refresh)
+            ready = bool(readable and not error and not active and not waiting and state in ('complete', 'partial'))
             warnings = self._display_warnings(output)
             if needs_refresh:
                 warnings = ['본문·그림 배치 방식이 개선됐습니다. 선택 추출로 MD를 다시 저장하세요.'] + warnings
-            rows.append({"name": p.name, "path": str(p), "done": ready, 'md_ready': ready,
+            rows.append({"name": p.name, "path": str(p), "done": ready, 'md_ready': readable,
                          'needs_refresh': needs_refresh,
                          "cached": key in self.done, "status": state,
                          "size_bytes": current[0] if current else 0,
@@ -1156,6 +1155,7 @@ class App:
             return res
         pdf = self.pdfs[i]
         res["doc"] = self.doc_view(pdf)
+        res['revision'] = res['doc'].get('revision')
         if not res["doc"].get("extracted"):
             res["doc"]["queued"] = self.bump(pdf)
         return res
@@ -1175,12 +1175,52 @@ class App:
             return None
         return st if st in ("queued", "running") else None
 
+    def _saved_snapshot(self, source: Path, canonical: dict | None = None) -> dict | None:
+        """Read a saved MD/manifest pair; a newer canonical cannot borrow its map."""
+        output = dict(self.exported.get(_norm(source)) or {})
+        path = Path(output['markdown']) if output.get('markdown') else None
+        if path is None or not utils.path_exists(path):
+            return None
+        with open(utils.long_path(path), 'rb') as stream:
+            data = stream.read()
+        digest = hashlib.sha256(data).hexdigest()
+        manifest = {}
+        if output.get('assets'):
+            try:
+                manifest = utils.read_json(Path(output['assets']) / 'manifest.json') or {}
+            except (OSError, ValueError):
+                pass
+        content_identity = 'canonical_content_revision' in manifest
+        canonical_basis = ({k: v for k, v in canonical.items() if k != 'source_file'}
+                           if canonical is not None and content_identity else canonical)
+        canonical_revision = (hashlib.sha256(json.dumps(canonical_basis, ensure_ascii=False, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest() if canonical is not None else None)
+        identity = manifest.get('canonical_content_revision') if content_identity else manifest.get('revision')
+        valid = bool(canonical_revision and identity == canonical_revision
+                     and manifest.get('markdown_sha256') == digest)
+        reason = ('저장된 MD가 외부에서 변경되어 위치 연결을 껐습니다.'
+                  if manifest and manifest.get('markdown_sha256') != digest else
+                  '저장된 MD와 현재 정본이 달라 위치 연결을 껐습니다. 저장이 끝난 뒤 MD를 다시 여세요.')
+        # Coordinates may change even when MD bytes do not: include both identities.
+        revision = hashlib.sha256((digest + ':' + str(identity or '')).encode()).hexdigest()
+        return {'markdown': data.decode('utf-8-sig', errors='replace'), 'revision': revision,
+                'mapping_valid': valid, 'reason': reason}
+
     def doc_view(self, pdf: Path, lang: str = "en") -> dict:
         from pubnexus import store
         sha = self.sha_for(pdf, deep=True)
         if not sha:
             return {"extracted": False}
         d = store.load(sha)
+        snapshot = self._saved_snapshot(pdf, d)
+        output = self.exported.get(_norm(pdf)) or {}
+        previous_source = bool(output and output.get('source_sha1') != sha)
+        if snapshot and not previous_source and not snapshot['mapping_valid']:
+            index = next((i for i, p in enumerate(self.pdfs) if p == pdf), None)
+            return {'extracted': True, 'html': sdk_to_html(snapshot['markdown'], asset_index=index),
+                    'md_text': snapshot['markdown'], 'revision': snapshot['revision'], 'mapping_valid': False,
+                    'notes': [snapshot['reason']], 'note_details': [snapshot['reason']],
+                    'markdown': output.get('markdown', ''), 'sha1': sha}
         if d is None:
             return {"extracted": False}
         # 옛 산출물은 본문 키가 sections 다(정본 스키마는 body_text).
@@ -1204,9 +1244,9 @@ class App:
         else:
             html = md_to_html(render.to_markdown(view, source_markers=True),
                               chips_html(d.get("meta") or {}), sha, source_markers=True)
-        output = self.exported.get(_norm(pdf)) or {}
-        previous_source = bool(output and output.get('source_sha1') != sha)
-        saved = None if previous_source else self.saved_markdown(pdf)
+        # Keep the MD bytes and identity captured before rendering together.
+        # An export may publish a newer MD while this old canonical is rendered.
+        saved = (snapshot['markdown'], False) if snapshot and not previous_source else None
         if saved:
             md, externally_changed = saved
             if externally_changed:
@@ -1247,6 +1287,8 @@ class App:
             "markdown": (self.exported.get(_norm(pdf)) or {}).get("markdown", ""),
             "export_error": self.export_errors.get(_norm(pdf), ""),
             "md_text": md,
+            'revision': snapshot['revision'] if snapshot and not previous_source else None,
+            'mapping_valid': bool(snapshot and snapshot['mapping_valid'] and not previous_source),
         }
 
     def saved_markdown(self, source: Path):
@@ -1267,18 +1309,21 @@ class App:
         source = self.pdfs[index]
         source_stat = source.stat()
         output = self.exported.get(_norm(source)) or {}
+        sha = self.sha_for(source, deep=True)
+        doc = store.load(sha) if sha else None
+        snapshot = self._saved_snapshot(source, doc)
+        if snapshot and not snapshot['mapping_valid']:
+            raise ValueError(snapshot['reason'])
         md_path = Path(output['markdown']) if output.get('markdown') else None
         md_stat = md_path.stat() if md_path and md_path.is_file() else None
         cache_key = (_norm(source), source_stat.st_size, source_stat.st_mtime_ns,
                      md_stat.st_size if md_stat else None, md_stat.st_mtime_ns if md_stat else None,
-                     output.get('source_sha1'), renderer_identity(source))
+                     output.get('source_sha1'), snapshot['revision'] if snapshot else None, renderer_identity(source))
         hit = self._comparison_cache.get(cache_key)
         display_stat = hit[2].stat() if hit and hit[2].is_file() else None
         if hit and display_stat and hit[3] == (display_stat.st_size, display_stat.st_mtime_ns):
             self._comparison_cache.move_to_end(cache_key)
             return hit[0], hit[2]
-        sha = self.sha_for(source, deep=True)
-        doc = store.load(sha) if sha else None
         if not doc:
             raise ValueError('먼저 문서를 추출하세요.')
         if output and output.get('source_sha1') != sha:
@@ -1293,8 +1338,10 @@ class App:
         except RuntimeError:
             display_source = source
         doc = comparison.attach(doc, display_source)
+        doc['_reader_revision'] = snapshot['revision'] if snapshot else None
         display_stat = display_source.stat()
-        self._comparison_cache[cache_key] = (doc, comparison.document_map(doc, display_source), display_source,
+        mapping = dict(comparison.document_map(doc, display_source), revision=doc['_reader_revision'])
+        self._comparison_cache[cache_key] = (doc, mapping, display_source,
                                              (display_stat.st_size, display_stat.st_mtime_ns))
         while len(self._comparison_cache) > 4:
             self._comparison_cache.popitem(last=False)
@@ -1305,19 +1352,242 @@ class App:
         try:
             doc, source = self.comparison_doc(index)
             hit = next((value for value in self._comparison_cache.values() if value[0] is doc), None)
-            return hit[1] if hit else comparison.document_map(doc, source)
+            return dict(hit[1] if hit else comparison.document_map(doc, source), revision=doc.get('_reader_revision'))
         except (ValueError, OSError) as error:
-            return {'blocks': [], 'pages': [], 'error': str(error)}
+            return {'blocks': [], 'pages': [], 'error': str(error), 'revision': None}
 
     # ── 추출 ────────────────────────────────────────────────────────
-    def start(self, targets: list[Path], force: bool = False) -> None:
+    def start(self, targets: list[Path], force: bool = False) -> list[Path]:
         with self._operation_lock:
-            if self.extraction_busy() or self._closing:
-                return
-            self.cancel.clear()
-            self.worker = threading.Thread(target=self._work, args=(targets, force),
-                                           daemon=True)
-            self.worker.start()
+            busy = self.extraction_busy()
+            if self._closing or (busy and (not self._accepting_work or self.cancel.is_set())):
+                raise RuntimeError('현재 추출을 중지하거나 마무리하는 중입니다. 잠시 후 다시 추가하세요.')
+            if not busy:
+                self.cancel.clear()
+                self._background_queue = []
+                self._pending_paths = set()
+                self._background_total = 0
+                self._accepting_work = True
+            accepted = []
+            for path in targets:
+                key = _norm(path)
+                if key in self._pending_paths:
+                    continue
+                accepted.append(path)
+                self._pending_paths.add(key)
+                self._file_progress[key] = {'progress_pct': 0, 'progress_stage': '대기'}
+                self._background_queue.append((path, force))
+            self._background_total += len(accepted)
+            if not busy and accepted:
+                self.worker = threading.Thread(target=self._background_work,
+                                               args=(self.output_dir,), daemon=True)
+                self.worker.start()
+            elif not busy:
+                self._accepting_work = False
+        if busy and accepted:
+            self.push('queued', {'files': self.file_rows(), 'total': self._background_total,
+                                 'accepted_paths': [str(path) for path in accepted]})
+        return accepted
+
+    def _background_work(self, output_dir: Path) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        import queue as event_queue
+        from pubnexus import extraction_process, resource_budget, store
+        from pubnexus.general_pdf import ExtractionCancelled
+        policy = resource_budget.Policy()
+        events = event_queue.Queue(maxsize=2048)
+        coordinator_failed = threading.Event()
+        running = {}
+        saved_count = 0
+        partial_count = 0
+        completed_count = 0
+        fails = []
+        self.push('run', {'on': True, 'total': self._background_total})
+
+        def event(kind, payload, source):
+            nonlocal saved_count, partial_count
+            key = _norm(source)
+            if kind == 'prog' and payload.get('path'):
+                self._active_path = source
+                stage = payload.get('stage') or ''
+                if payload.get('elapsed_sec') is not None:
+                    stage += f" · {payload['elapsed_sec']}초 경과"
+                    payload = dict(payload, stage=stage)
+                self._file_progress[key] = {
+                    'progress_pct': payload.get('file_pct', 0), 'progress_stage': stage,
+                    'progress_page': payload.get('page'), 'progress_pages': payload.get('pages')}
+                payload = dict(payload, i=completed_count + 1, total=self._background_total,
+                               pct=100 * (completed_count + sum(
+                                   self._file_progress.get(k, {}).get('progress_pct', 0) / 100 for k in running))
+                                   / max(1, self._background_total))
+            elif kind == 'mark' and payload.get('path'):
+                key = _norm(payload['path'])
+                output = {k: v for k, v in payload.items() if k not in ('name', 'path', 'md_ready')}
+                self.exported[key] = output
+                if output.get('source_sha1'):
+                    self.done[key] = self.found[key] = output['source_sha1']
+                self.export_errors.pop(key, None)
+                self._file_progress[key] = {'progress_pct': 100, 'progress_stage': '저장 완료'}
+                for cache_key in list(self._comparison_cache):
+                    if cache_key[0] == key:
+                        self._comparison_cache.pop(cache_key, None)
+                self.ui_save(exports=self.exported)
+                saved_count += 1
+                partial_count += int(output.get('status') == 'partial')
+            elif kind == 'file_error' and payload.get('path'):
+                key = _norm(payload['path'])
+                self.export_errors[key] = payload.get('error') or '추출 실패'
+                fails.append({'name': Path(payload['path']).name, 'why': self.export_errors[key]})
+            elif kind == 'run':
+                if not payload.get('on'):
+                    if payload.get('stopped'):
+                        self.cancel.set()
+                    if payload.get('nfail'):
+                        if key not in self.export_errors:
+                            why = '; '.join(str(item.get('why') or '') for item in payload.get('fails', []))
+                            event('file_error', {'path': str(source), 'error': why or '추출 실패'}, source)
+                return  # A document child must never finish/reset the parent queue.
+            elif kind == 'worker_started':
+                self._worker_pids[key] = payload['pid']
+                payload = dict(payload, path=str(source))
+            self.push(kind, payload)
+
+        def send(kind, payload, source):
+            while not coordinator_failed.is_set():
+                try:
+                    events.put((kind, payload, source), timeout=.1)
+                    return
+                except event_queue.Full:
+                    continue
+
+        def run_document(source, force):
+            try:
+                extraction_process.run([source], output_dir, force=force, cancel=self.cancel.is_set,
+                                       on_event=lambda kind, payload: send(kind, payload, source))
+            except ExtractionCancelled:
+                send('document_cancel', {}, source)
+            except Exception as error:
+                send('document_error', {'error': f'{type(error).__name__}: {error}'}, source)
+            finally:
+                send('document_exit', {}, source)
+
+        snapshot = {}
+        next_sample = next_start = 0
+        waiting_reason = ''
+        identities = {}
+        try:
+            with ThreadPoolExecutor(max_workers=policy.max_workers, thread_name_prefix='document-monitor') as pool:
+                try:
+                    while True:
+                        # Only this coordinator changes result/progress state.
+                        # Native work and event-file monitoring stay in owned processes/threads.
+                        for _ in range(256):
+                            try:
+                                kind, payload, source = events.get_nowait()
+                            except event_queue.Empty:
+                                break
+                            key = _norm(source)
+                            if kind == 'document_exit':
+                                job = running.pop(key)
+                                policy.observe(source, job['peak'])
+                                with self._operation_lock:
+                                    self._active_paths.discard(key)
+                                    self._worker_pids.pop(key, None)
+                                    if not self.cancel.is_set():
+                                        self._pending_paths.discard(key)
+                                    self._active_path = next((item['source'] for item in running.values()), None)
+                                completed_count += 1
+                                self.push('queued', {'files': self.file_rows(), 'total': self._background_total})
+                            elif kind == 'document_cancel':
+                                self.cancel.set()
+                            elif kind == 'document_error':
+                                if key not in self.export_errors:
+                                    event('file_error', dict(payload, path=str(source), name=source.name), source)
+                                utils.log(f"[background] {source.name}: {payload['error']}")
+                            else:
+                                event(kind, payload, source)
+
+                        now = time.monotonic()
+                        if now >= next_sample:
+                            snapshot = resource_budget.sample(dict(self._worker_pids))
+                            for key, job in running.items():
+                                observed = (snapshot.get('jobs', {}).get(key) or {}).get('peak_bytes', 0)
+                                job['peak'] = max(job['peak'], observed)
+                            with self._operation_lock:
+                                queued_count = len(self._background_queue)
+                            self._resource_state = dict(snapshot, running=len(running), queued=queued_count,
+                                max_workers=policy.max_workers, total=self._background_total,
+                                memory_budget_bytes=int(snapshot.get('total_bytes', 0) * .5),
+                                waiting_reason=waiting_reason)
+                            self.push('resources', self._resource_state)
+                            next_sample = now + 1
+
+                        with self._operation_lock:
+                            candidates = list(self._background_queue)
+                            if not running and (self.cancel.is_set() or not candidates):
+                                self._accepting_work = False
+                                break
+                        if (not self.cancel.is_set() and len(running) < policy.max_workers and now >= next_start):
+                            for source, force in candidates:
+                                reservations = [max(job['estimate'], job['peak']) for job in running.values()]
+                                allowed, reason, estimate = policy.can_start(source, reservations, snapshot)
+                                if not allowed:
+                                    waiting_reason = reason
+                                    continue
+                                try:
+                                    stat = source.stat()
+                                    identity_key = (_norm(source), stat.st_size, stat.st_mtime_ns)
+                                    identity = identities.get(identity_key)
+                                    if identity is None:
+                                        identity = identities[identity_key] = store.file_sha1(source)
+                                except OSError:
+                                    # The document worker reports missing/unreadable originals in isolation.
+                                    identity = _norm(source)
+                                if any(job['identity'] == identity for job in running.values()):
+                                    waiting_reason = '같은 내용 문서의 저장이 끝나기를 기다립니다.'
+                                    continue
+                                key = _norm(source)
+                                with self._operation_lock:
+                                    if self.cancel.is_set():
+                                        break
+                                    self._background_queue.remove((source, force))
+                                    self._active_paths.add(key)
+                                    self._active_path = source
+                                    self.export_errors.pop(key, None)
+                                running[key] = {'source': source, 'identity': identity, 'estimate': estimate, 'peak': 0}
+                                event('prog', {'path': str(source), 'name': source.name, 'stage': '준비', 'file_pct': 0}, source)
+                                pool.submit(run_document, source, force)
+                                waiting_reason = ''
+                                next_start = now + (1 if estimate >= 1024 ** 3 else .05)
+                                break
+                        time.sleep(.025)
+                except BaseException:
+                    coordinator_failed.set()
+                    self.cancel.set()
+                    raise
+        except Exception as error:
+            fails.append({'name': '(작업 관리)', 'why': f'{type(error).__name__}: {error}'})
+            utils.log(f'[background coordinator] {type(error).__name__}: {error}')
+        finally:
+            with self._operation_lock:
+                self._accepting_work = False
+                if self.cancel.is_set():
+                    for key in self._pending_paths:
+                        progress = self._file_progress.setdefault(key, {})
+                        if progress.get('progress_pct') != 100:
+                            progress['status'] = 'paused'
+                self._pending_paths.clear()
+                self._background_queue.clear()
+                self._active_path = None
+                self._active_paths.clear()
+                self._worker_pids.clear()
+            self.scan_store()
+            self._resource_state = dict(self._resource_state, running=0, queued=0, waiting_reason='')
+            self.push('resources', self._resource_state)
+            self.push('run', {'on': False, 'stopped': self.cancel.is_set(),
+                              'done': saved_count, 'partial': partial_count,
+                              'total': self._background_total, 'nfail': len(fails),
+                              'fails': fails[:30], 'files': self.file_rows()})
 
     def _work(self, targets: list[Path], force: bool = False) -> None:
         from pubnexus import single, store, export, comparison
@@ -1334,9 +1604,7 @@ class App:
         i = 0
         saved_count = 0
         partial_count = 0
-        warmup_attempted = False
         try:
-            cfg = utils.load_config()
             # 처리 순서를 통에 담아 둔다. 원장이 목록 뒤쪽 논문을 클릭하면
             # paper() 가 그 논문을 맨 앞으로 당긴다(WorkQueue.bump).
             q = single.WorkQueue()
@@ -1352,24 +1620,17 @@ class App:
                 t0 = time.time()
                 self.prog(i, total, p.name, "준비", 0.0, times)
 
-                def prog(ev: dict, _i=i, _n=p.name) -> None:
-                    steps = max(ev.get("total") or 5, 1)
-                    self.prog(_i, total, _n, _STAGE.get(ev.get("stage") or "",
-                                                        ev.get("message") or ""),
-                              (ev.get("done") or 0) / steps, times, path=p,
-                              file_pct={'probe': 1, 'doi': 2, 'metadata': 4, 'fulltext': 5,
-                                        'assemble': 94, 'done': 95}.get(ev.get('stage'), 5))
-
                 def page_progress(page, pages, stage):
                     labels = {'native': '원문 확인', 'table': '표 추출', 'images': '이미지 보존',
                               'ocr': '문자 인식', 'docling': '표 구조 보완',
                               'docling_tables': '표 구조 보완', 'pdf_sdk': '문서 구조 추출',
                               'sdk_layout': '문서 구조 추출', 'sdk_complete': '문서 구조 추출 완료',
                               'sdk_assets': '원본 그림 보존',
-                              'sdk_recovery': '누락된 쪽 재추출', 'done': '쪽 처리'}
+                              'sdk_recovery': '누락된 쪽 재추출', 'pdf_validation': '본문 보존 확인', 'done': '쪽 처리'}
                     labels['sdk_ocr'] = '문자 인식'
-                    low, high = ((5, 50) if stage in ('native', 'ocr') else
-                                 (85, 97) if stage in ('pdf_sdk', 'sdk_layout', 'sdk_complete', 'sdk_ocr', 'sdk_recovery', 'sdk_assets') else
+                    low, high = ((95, 98) if stage == 'pdf_validation' else
+                                 (5, 50) if stage in ('native', 'ocr') else
+                                 (5, 94) if stage in ('pdf_sdk', 'sdk_layout', 'sdk_complete', 'sdk_ocr', 'sdk_recovery', 'sdk_assets') else
                                  (85, 95) if stage in ('docling', 'docling_tables') else (50, 85))
                     measured = low + (high - low) * max(0, min(page / max(pages, 1), 1))
                     self.prog(i, total, p.name, f'{labels.get(stage, stage)} · {page}/{pages}쪽', 0, times,
@@ -1382,15 +1643,13 @@ class App:
                     signature = (source_stat.st_size, source_stat.st_mtime_ns)
                     doc = None if force else store.load(sha)
                     if doc is not None:
-                        from pubnexus.general_pdf import ensure_fulltext
                         if not doc.get("body_text") and doc.get("sections"):
                             doc = dict(doc, body_text=doc["sections"])
-                        if p.suffix.lower() == '.pdf':
-                            from pubnexus.pdf_pipeline import current
-                            if not current(doc):
-                                doc, _ = ensure_fulltext(doc, p, cancel=self.cancel.is_set, progress=page_progress)
+                        if p.suffix.lower() == '.pdf' and doc.get('source') in ('pdf_general', 'pdf_sdk'):
+                            from pubnexus import pdf_pipeline, pdf_markdown
+                            if not pdf_pipeline.current(doc) and doc.get('pdf_conversion_attempt') != pdf_markdown.engine_id():
+                                doc = pdf_pipeline.extract(p, cancel=self.cancel.is_set, progress=page_progress)
                         doc["sha1"] = sha
-                        store.save(sha, doc, p)
                     elif p.suffix.lower() != '.pdf':
                         if p.suffix.lower() in EXTERNAL_DOCUMENT_EXTENSIONS:
                             from pubnexus.external_documents import extract_document
@@ -1399,16 +1658,8 @@ class App:
                         self.prog(i, total, p.name, '문서 구조 추출', .1, times)
                         doc = extract_document(p, cancel=self.cancel.is_set)
                     else:
-                        if not warmup_attempted and self.grobid.state in ("starting", "installing", "unknown"):
-                            self.prog(i, total, p.name, "논문 분석기 준비 중", 0.0, times)
-                            self.grobid.ensure_async()
-                            self.grobid.wait(GROBID_WARMUP_SEC, cancel=self.cancel.is_set)
-                            warmup_attempted = True
-                        if self.cancel.is_set():
-                            raise ExtractionCancelled('중지했습니다.')
-                        doc = single.extract_one(p, cfg, out_json=store.doc_path(sha),
-                                                 on_progress=prog, cancel=self.cancel.is_set,
-                                                 on_fulltext_progress=page_progress)
+                        from pubnexus import pdf_pipeline
+                        doc = pdf_pipeline.extract(p, cancel=self.cancel.is_set, progress=page_progress)
                     extraction_status = (doc.get("extraction_report") or {}).get("status")
                     if extraction_status == "failed":
                         raise RuntimeError("원본 내용을 확인하지 못했습니다. 본문을 확인한 뒤 다시 추출하세요.")
@@ -1445,6 +1696,7 @@ class App:
                     unit_kind = ('slide' if p.suffix.lower() in {'.pptx', '.odp'} else
                                  'sheet' if p.suffix.lower() in {'.xlsx', '.ods'} else None)
                     output = {"markdown": str(result.markdown_path),
+                              "revision": result.revision,
                               "markdown_sha256": hashlib.sha256(result.markdown_path.read_bytes()).hexdigest(),
                               "assets": str(result.assets_dir),
                               "source_stat": signature, "source_sha1": sha,
@@ -1475,6 +1727,7 @@ class App:
                     break
                 except Exception as e:  # noqa: BLE001 — 파일별 격리
                     self.export_errors[_norm(p)] = f"{type(e).__name__}: {e}"
+                    self.push('file_error', {'name': p.name, 'path': str(p), 'error': self.export_errors[_norm(p)]})
                     fails.append((p.name, f"{type(e).__name__}: {e}"))
                     utils.log(f"[app] 실패 {p.name}: {type(e).__name__}: {e}")
                 finally:
@@ -1683,8 +1936,6 @@ class Api:
     def pick_folder(self) -> dict:
         import webview
         w = self._app.window
-        if self._app.worker and self._app.worker.is_alive():
-            return {"ok": False, "why": "추출을 마치거나 중지한 뒤 폴더를 추가하세요."}
         res = w.create_file_dialog(webview.FOLDER_DIALOG,
                                    directory=str(self._app.folder or ""))
         if not res:
@@ -1697,8 +1948,6 @@ class Api:
     def pick_files(self) -> dict:
         import webview
         a = self._app
-        if a.worker and a.worker.is_alive():
-            return {"ok": False, "why": "추출을 마치거나 중지한 뒤 파일을 추가하세요."}
         res = a.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True,
                                           directory=str(a.folder or ""),
                                           file_types=("Documents (" + ';'.join('*' + ext for ext in sorted(DOCUMENT_EXTENSIONS)) + ")",))
@@ -1786,8 +2035,6 @@ class Api:
 
     def extract(self, which: str, index: int = -1) -> dict:
         a = self._app
-        if a.worker and a.worker.is_alive():
-            return {"ok": False, "why": "이미 처리 중입니다"}
         if which == "one":
             if not (0 <= index < len(a.pdfs)):
                 return {"ok": False, "why": "왼쪽에서 논문을 먼저 고르세요"}
@@ -1800,8 +2047,13 @@ class Api:
             a.status("", busy=False, force=True)
         if not targets:
             return {"ok": False, "why": "처리할 문서가 없습니다. 다시 추출할 문서를 선택하세요."}
-        a.start(targets, force=which == "one")
-        return {"ok": True, "n": len(targets)}
+        queued = a.extraction_busy()
+        try:
+            accepted = a.start(targets, force=which == "one")
+        except RuntimeError as error:
+            return {'ok': False, 'why': str(error)}
+        return {"ok": True, "n": len(accepted), 'queued': queued,
+                'accepted_paths': [str(path) for path in accepted]}
 
     def count_todo(self) -> dict:
         a = self._app
@@ -1810,8 +2062,6 @@ class Api:
 
     def extract_selected(self, indexes: list[int], force: bool = False) -> dict:
         a = self._app
-        if a.worker and a.worker.is_alive():
-            return {"ok": False, "why": "이미 처리 중입니다."}
         if not isinstance(indexes, list) or not isinstance(force, bool):
             return {"ok": False, "why": "문서 선택을 확인하세요."}
         rows = a.file_rows()
@@ -1819,8 +2069,13 @@ class Api:
         targets = [a.pdfs[i] for i in picked if force or not rows[i]["done"]]
         if not targets:
             return {"ok": False, "why": "추출할 문서를 선택하세요."}
-        a.start(targets, force=force)
-        return {"ok": True, "n": len(targets)}
+        queued = a.extraction_busy()
+        try:
+            accepted = a.start(targets, force=force)
+        except RuntimeError as error:
+            return {'ok': False, 'why': str(error)}
+        return {"ok": True, "n": len(accepted), 'queued': queued,
+                'accepted_paths': [str(path) for path in accepted]}
 
     def open_file(self, index: int, kind: str = "source") -> dict:
         a = self._app
@@ -1846,12 +2101,18 @@ class Api:
         self._app.cancel.set()
         return {"ok": True}
 
-    def search(self, index: int, query: str) -> dict:
+    def search(self, index: int, query: str, expected_revision: str | None = None) -> dict:
         from pubnexus import comparison
         try:
+            snapshot = self._app._saved_snapshot(self._app.pdfs[index])
+            if expected_revision is not None and (not snapshot or snapshot['revision'] != expected_revision):
+                return {'ok': False, 'code': 'stale_revision', 'why': '새 Markdown이 저장되었습니다. MD를 다시 열어 검색하세요.', 'results': []}
             doc, source = self._app.comparison_doc(index)
-            return comparison.search(doc, source, query, mapping=self._app.document_map(index))
-        except (ValueError, OSError) as error:
+            mapping = self._app.document_map(index)
+            if expected_revision is not None and mapping.get('revision') != expected_revision:
+                return {'ok': False, 'code': 'stale_revision', 'why': '새 Markdown이 저장되었습니다. MD를 다시 열어 검색하세요.', 'results': []}
+            return comparison.search(doc, source, query, mapping=mapping)
+        except (ValueError, OSError, IndexError) as error:
             return {'ok': False, 'why': str(error), 'results': []}
 
     def search_source(self, index: int, query: str) -> dict:
@@ -1869,20 +2130,24 @@ class Api:
         except (ValueError, OSError, RuntimeError) as error:
             return {'ok': False, 'why': str(error), 'results': []}
 
-    def location(self, index: int, block_id: str) -> dict:
+    def location(self, index: int, block_id: str, expected_revision: str | None = None) -> dict:
         data = self._app.document_map(index)
+        if expected_revision is not None and data.get('revision') != expected_revision:
+            return {'ok': False, 'code': 'stale_revision', 'why': '새 Markdown이 저장되었습니다. MD를 다시 열어 위치를 확인하세요.'}
         block = next((b for b in data['blocks'] if b['id'] == block_id), None)
         if not block or not block['locations']:
             return {'ok': False, 'why': data.get('error') or '이 부분의 원본 위치를 연결하지 못했습니다.'}
         return {'ok': True, 'locations': block['locations'], 'mapping': block['mapping'], **block['locations'][0]}
 
     def state(self) -> dict:
+        from pubnexus import pdf_markdown
         a = self._app
         ui = a.ui_load()
         last = ui.get("paper") if _norm(ui.get("folder") or "") == _norm(a.folder or "") else None
         return {"path": str(a.folder or ""), "grobid": a.grobid.state,
                 "sec": a.grobid.secs, "files": a.file_rows(), "last": last,
-                "output_dir": str(a.output_dir)}
+                "output_dir": str(a.output_dir), 'pdf_engine_available': pdf_markdown.available(),
+                'resources': dict(a._resource_state)}
 
     def remember(self, name: str) -> dict:
         """마지막에 보던 논문. 다음에 켜면 그 자리에서 이어 본다."""
@@ -2044,6 +2309,9 @@ def build(folder: str | Path | None = None, *, hidden: bool = False):
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == '--extract-worker':
+        from pubnexus.extraction_process import worker_cli
+        raise SystemExit(worker_cli(sys.argv[2], App))
     if len(sys.argv) == 3 and sys.argv[1] == '--ocr-worker':
         from pubnexus.local_ocr import worker_cli
         raise SystemExit(worker_cli(sys.argv[2]))

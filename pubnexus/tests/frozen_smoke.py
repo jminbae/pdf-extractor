@@ -53,12 +53,12 @@ try {
   }
   await command('Runtime.enable');await command('Page.enable');
   await until(()=>evaluate('!!(window.pywebview&&window.pywebview.api&&window.pywebview.api.state)'), 'pywebview bridge');
-  const state=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');return s.files?.length===2?s:null;},'two isolated inputs');
+  const state=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');return s.files?.length===cfg.names.length?s:null;},'isolated inputs');
   if(path.resolve(state.path).toLowerCase()!==path.resolve(cfg.inputs).toLowerCase())throw Error('Refusing to operate outside private fixture folder');
   if(path.resolve(state.output_dir||'').toLowerCase()!==path.resolve(cfg.output_dir).toLowerCase())throw Error('Refusing to save outside the explicit private output folder');
   if(JSON.stringify(state.files.map(f=>f.name))!==JSON.stringify(cfg.names))throw Error('Unexpected input list');
   if(state.files.some(f=>f.md_ready))throw Error('A private fixture was presented as saved Markdown before export');
-  await until(()=>evaluate("document.querySelectorAll('.file-row .row-actions [data-action=read]').length===2"),'always-present Markdown buttons');
+  await until(()=>evaluate(`document.querySelectorAll('.file-row .row-actions [data-action=read]').length===${cfg.names.length}`),'always-present Markdown buttons');
   const initialMdButtons=await evaluate("Array.from(document.querySelectorAll('.file-row .row-actions [data-action=read]')).map(b=>({label:b.textContent,disabled:b.disabled}))");
   if(initialMdButtons.some(b=>b.label!=='MD 보기'||!b.disabled))throw Error('Cached extraction enabled an unsaved Markdown button');
   const settings=await evaluate('window.pywebview.api.settings()');
@@ -83,13 +83,17 @@ try {
   original.search_hits=originalSearch.results.length;original.hidden_test_eager_load=true;
   if((await evaluate('window.pywebview.api.state()')).files.some(f=>f.md_ready))throw Error('Original view/search unexpectedly created saved Markdown');
   await evaluate("document.querySelector('[data-action=list]').click();true");
+  await evaluate("window.__documentWorkers=[];const initialOn=window.pnx.on;window.pnx.on=function(m){if(m.kind==='worker_started')window.__documentWorkers.push({pid:m.pid,path:m.path});return initialOn(m);};true");
   const started=await evaluate('window.pywebview.api.extract_selected([0,1])');
   if(!started?.ok||started.n!==2)throw Error('Native extraction did not start: '+JSON.stringify(started));
-  const finished=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');const failed=s.files?.find(f=>f.error||f.status==='failed');if(failed)throw Error('Native extraction failed: '+JSON.stringify(failed));return s.files?.length===2&&s.files.every(f=>f.done)?s:null;},'both portable Markdown files saved');
-  if(!finished.files.every(f=>f.md_ready===true))throw Error('Saved Markdown readiness was not verified by the backend');
+  const finished=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');const failed=s.files?.find(f=>f.error||f.status==='failed');if(failed)throw Error('Native extraction failed: '+JSON.stringify(failed));return s.files?.length===cfg.names.length&&s.files.slice(0,2).every(f=>f.done)?s:null;},'both portable Markdown files saved');
+  if(!finished.files.slice(0,2).every(f=>f.md_ready===true))throw Error('Saved Markdown readiness was not verified by the backend');
+  const documentWorkers=await evaluate('window.__documentWorkers');
+  if(documentWorkers.length!==2||new Set(documentWorkers.map(item=>item.pid)).size!==2)throw Error('Each document did not receive a separate extraction process: '+JSON.stringify(documentWorkers));
+  if(cfg.background_book&&finished.files[2].md_ready)throw Error('The unprocessed book must not have a Markdown result');
   if(cfg.scan_mode&&(finished.files[0].status!=='partial'||finished.files[1].status!=='complete'||!finished.files[0].warnings.some(w=>/OCR|오인식|인식/.test(String(w)))))throw Error('Scan must preserve its partial status and OCR warning');
   const labels=cfg.scan_mode?['확인 필요','저장 완료']:['저장 완료','저장 완료'];
-  await until(()=>evaluate(`(()=>{const nodes=Array.from(document.querySelectorAll('.file-row .status'));const expected=${JSON.stringify(labels)};return nodes.length===2&&nodes.every((node,i)=>node.textContent.includes(expected[i]));})()`),'rendered saved rows');
+  await until(()=>evaluate(`(()=>{const nodes=Array.from(document.querySelectorAll('.file-row .status'));const expected=${JSON.stringify(labels)};return nodes.length===${cfg.names.length}&&nodes.slice(0,2).every((node,i)=>node.textContent.includes(expected[i]));})()`),'rendered saved rows');
   await optionalScreenshot(cfg.listShot);
   await evaluate("document.querySelector('[data-action=read][data-index=\"1\"]').click();true");
   await until(()=>evaluate(`document.querySelector('#document')?.innerText.includes(${JSON.stringify(cfg.csvMarker)})&&document.querySelectorAll('#document table tr').length>=2`),'CSV reader table');
@@ -108,7 +112,50 @@ try {
   if(!compare.visible||compare.editable||compare.error_note||compare.page_errors)throw Error('PDF comparison has an error or is not a read-only view: '+JSON.stringify(compare));
   compare.hidden_test_eager_load=true;
   await optionalScreenshot(cfg.compareShot);
-  fs.writeFileSync(cfg.result,JSON.stringify({ok:true,target_url:target.url,bridge:true,settings,settings_ui:settingsUi,manual_update:manualUpdate,initial_md_buttons:initialMdButtons,original_before_export:original,start_response:started,state:finished,csv_ui:csvUi,raw_markdown:code,pdf_comparison:compare,screenshots},null,2),'utf8');
+  let background=null;
+  if(cfg.background_book){
+    await evaluate("window.__backgroundWorkers=[];const on=window.pnx.on;window.pnx.on=function(m){if(m.kind==='worker_started')window.__backgroundWorkers.push(m.pid);return on(m);};true");
+    const start=await evaluate('window.pywebview.api.extract_selected([2],true)');
+    if(!start?.ok)throw Error('Book background extraction did not start');
+    const running=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');const f=s.files?.[2];if(f?.error)throw Error(f.error);return f?.status==='running'&&f.progress_pct>=5?s:null;},'actual book SDK progress');
+    const measurements=[];
+    for(let index=0;index<4;index++){
+      const began=Date.now();const s=await evaluate('window.pywebview.api.state()');
+      const elapsed=Date.now()-began;
+      if(elapsed>2000||s.files[2].status!=='running'||!s.files[0].md_ready)throw Error('Book extraction blocked UI state or saved Markdown');
+      measurements.push({roundtrip_ms:elapsed,percent:s.files[2].progress_pct,stage:s.files[2].progress_stage,page:s.files[2].progress_page});
+      await pause(1000);
+    }
+    const begun=Date.now();
+    const hits=await evaluate(`window.pywebview.api.search_source(0,${JSON.stringify(cfg.pdfMarker)})`);
+    const searchMs=Date.now()-begun;
+    if(!hits?.ok||!hits.results?.length||searchMs>2000)throw Error('Original search blocked during actual book extraction');
+    const controls=await evaluate("({add_files:!document.querySelector('[data-action=add-files]').disabled,add_folder:!document.querySelector('[data-action=add-folder]').disabled,saved_md:!document.querySelector('#content-tab').disabled,reader_visible:!document.querySelector('#reader').hidden})");
+    if(!Object.values(controls).every(Boolean))throw Error('Reading/file controls were disabled during extraction: '+JSON.stringify(controls));
+    await evaluate(`document.querySelector('#search').value=${JSON.stringify(cfg.pdfMarker)};document.querySelector('#search-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));true`);
+    await until(()=>evaluate("document.querySelectorAll('.search-hit').length>0"),'MD/source search through actual busy reader');
+    const queryBefore=await evaluate("document.querySelector('#search').value");
+    const enqueued=await evaluate('window.pywebview.api.extract_selected([1],true)');
+    if(!enqueued?.ok||!enqueued.queued||enqueued.n!==1)throw Error('Cannot enqueue another document during book extraction: '+JSON.stringify(enqueued));
+    const duplicate=await evaluate('window.pywebview.api.extract_selected([2],true)');
+    if(!duplicate?.ok||duplicate.n!==0)throw Error('Queued/running document was duplicated: '+JSON.stringify(duplicate));
+    const queueState=await evaluate('window.pywebview.api.state()');
+    if(!['queued','running','complete'].includes(queueState.files[1].status)||!queueState.files[1].md_ready)throw Error('Another job made the existing Markdown unreadable');
+    const parallelFinished=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');if(s.files[1].error)throw Error(s.files[1].error);return s.files[1].done&&s.files[2].status==='running'?s:null;},'CSV completes in its own process while the book keeps extracting');
+    const cancelBegan=Date.now();
+    const cancelled=await evaluate('window.pywebview.api.cancel()');
+    if(!cancelled?.ok)throw Error('Cancel was not accepted');
+    const stopped=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');return s.files?.[2]?.status==='paused'?s:null;},'owned background process cancelled');
+    const cancelMs=Date.now()-cancelBegan;
+    if(cancelMs>4500)throw Error('Cancellation did not stop the native child promptly: '+cancelMs);
+    const queryAfter=await evaluate("document.querySelector('#search').value");
+    if(queryBefore!==queryAfter||!stopped.files[0].md_ready||stopped.files[2].md_ready)throw Error('Cancellation reset the reader or promoted an unfinished book');
+    const workers=await evaluate('window.__backgroundWorkers');
+    if(!workers.length)throw Error('No actual extraction child PID was observed');
+    if(!stopped.files[1].done||!stopped.files[1].md_ready||workers.length!==2||new Set(workers).size!==2)throw Error('The independent completed CSV or two worker PIDs were not preserved');
+    background={ok:true,measurements,source_search_ms:searchMs,controls,cancel_ms:cancelMs,worker_pids:workers,reader_query_preserved:true,enqueue:enqueued,duplicate,parallel_completed:parallelFinished.files[1],resources:parallelFinished.resources,book_final:stopped.files[2]};
+  }
+  fs.writeFileSync(cfg.result,JSON.stringify({ok:true,target_url:target.url,bridge:true,settings,settings_ui:settingsUi,manual_update:manualUpdate,initial_md_buttons:initialMdButtons,original_before_export:original,start_response:started,document_workers:documentWorkers,state:finished,csv_ui:csvUi,raw_markdown:code,pdf_comparison:compare,background,screenshots},null,2),'utf8');
 } finally {if(ws)ws.close();}
 '''
 
@@ -244,6 +291,7 @@ def main() -> int:
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--scan", action="store_true", help="Use a raster-only PDF and an empty canonical cache")
     parser.add_argument("--check-update", action="store_true", help="Explicitly query the real release manifest; never install")
+    parser.add_argument("--background-book", type=Path, help="Copy a real PDF into private TEMP and verify browsing/search/cancel during its extraction")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("This harness requires Windows WebView2")
@@ -270,6 +318,18 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="pubnexus-frozen-") as temporary:
             root = Path(temporary)
             fixtures = _fixtures(root, scan=args.scan)
+            if args.background_book:
+                original = args.background_book.resolve(strict=True)
+                before = _digest(original)
+                book = Path(fixtures['inputs']) / '03-book.pdf'
+                shutil.copy2(original, book)
+                if _digest(book) != before:
+                    raise AssertionError('Private book copy failed integrity verification')
+                book.chmod(stat.S_IREAD)
+                fixtures['names'].append(book.name)
+                fixtures['source_digests_before'][str(book)] = before
+                fixtures['background_book'] = True
+                receipt['book_original'] = {'path': str(original), 'sha256_before': before}
             sources = [Path(path) for path in fixtures["source_digests_before"]]
             try:
                 receipt.update(fixtures=fixtures, isolated_root=str(root), source_readonly=True)
@@ -343,6 +403,11 @@ def main() -> int:
                 receipt.update(source_digests_after=after, sources_unchanged=after == fixtures["source_digests_before"])
                 if not receipt["sources_unchanged"]:
                     raise AssertionError("A synthetic original changed")
+                if args.background_book:
+                    checksum = _digest(args.background_book)
+                    receipt['book_original']['sha256_after'] = checksum
+                    if checksum != receipt['book_original']['sha256_before']:
+                        raise AssertionError('Original book changed during background validation')
             finally:
                 if process:
                     receipt["exe_returncode_before_cleanup"] = process.poll()

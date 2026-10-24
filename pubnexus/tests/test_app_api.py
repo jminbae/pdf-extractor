@@ -9,7 +9,7 @@ class AppApiTests(support.AppExportTests):
         one = self.source("one.pdf")
         two = self.source("two.pdf")
         self.app.pdfs = [one, two]
-        self.app.start = Mock()
+        self.app.start = Mock(return_value=[two])
         api = support.app_module.Api(self.app)
         result = api.extract_selected([1, 1])
         self.assertTrue(result["ok"])
@@ -38,7 +38,7 @@ class AppApiTests(support.AppExportTests):
         source.write_text('Name,Value\nSample,3.14\n', encoding='utf-8')
         self.app.add_files([source])
         self.assertEqual(self.app.pdfs, [source])
-        with patch('pubnexus.single.extract_one', side_effect=AssertionError('Not PDF')), \
+        with patch('pubnexus.pdf_pipeline.extract', side_effect=AssertionError('Not PDF')), \
              patch.object(self.app.grobid, 'wait', side_effect=AssertionError('No paper engine')):
             self.app._work([source])
         self.assertTrue(self.app.file_rows()[0]['done'])
@@ -51,7 +51,7 @@ class AppApiTests(support.AppExportTests):
         paragraph = doc['body_text'][0]['paragraphs'][0]
         paragraph['source'] = {'page': 1, 'bbox': [72, 60, 200, 80]}
         api = support.app_module.Api(self.app)
-        with patch('pubnexus.single.extract_one', return_value=doc):
+        with patch('pubnexus.pdf_pipeline.extract', return_value=doc):
             self.app._work([source], force=True)
             self.assertEqual(api.location(0, 'p-1')['bbox'][0], 72)
             paragraph['source']['bbox'][0] = 80
@@ -67,7 +67,7 @@ class AppApiTests(support.AppExportTests):
         original = source.read_bytes()
         self.app.add_files([source])
         self.assertIn(source, self.app.pdfs)
-        with patch('pubnexus.single.extract_one', side_effect=AssertionError('Not PDF')):
+        with patch('pubnexus.pdf_pipeline.extract', side_effect=AssertionError('Not PDF')):
             self.app._work([source])
         self.assertTrue(self.app.file_rows()[0]['done'])
         self.assertIn('Original RTF content 9137.', (self.root / 'Markdown' / 'external.md').read_text(encoding='utf-8'))
@@ -79,13 +79,15 @@ class AppApiTests(support.AppExportTests):
         source = self.source()
         self.app.pdfs = [source]
         original = self.extracted(source)
+        from pubnexus import pdf_markdown
+        original['pdf_conversion_attempt'] = pdf_markdown.engine_id()
         store.save(original['sha1'], original, source)
         enhanced = copy.deepcopy(original)
         enhanced['tables'] = [{'id': 't1', 'caption': 'Table 1', 'markdown': '| Name | Value |\n| --- | --- |\n| Sample | 9173 |'}]
         enhanced['extraction_report'] = {'status': 'partial', 'warnings': ['Synthetic table review warning']}
         with patch('pubnexus.general_pdf.ensure_fulltext', return_value=(original, {})), \
              patch('pubnexus.docling_tables.enhance_document', return_value=enhanced) as enhance, \
-             patch('pubnexus.single.extract_one', side_effect=AssertionError('Cached PDF')):
+             patch('pubnexus.pdf_pipeline.extract', side_effect=AssertionError('Cached PDF')):
             self.app._work([source])
         enhance.assert_called_once()
         self.assertIn('| Sample | 9173 |', (self.root / 'Markdown' / 'book.md').read_text(encoding='utf-8'))
@@ -99,7 +101,7 @@ class AppApiTests(support.AppExportTests):
         self.app.pdfs = [source]
         original = self.extracted(source)
         failed = dict(original, extraction_report={'status': 'failed', 'warnings': ['Source changed']})
-        with patch('pubnexus.single.extract_one', return_value=original), \
+        with patch('pubnexus.pdf_pipeline.extract', return_value=original), \
              patch('pubnexus.docling_tables.enhance_document', return_value=failed):
             self.app._work([source], force=True)
         self.assertFalse((self.root / 'Markdown' / 'book.md').exists())
@@ -143,7 +145,7 @@ class AppApiTests(support.AppExportTests):
         from pubnexus.general_pdf import ExtractionCancelled
         source = self.source()
         self.app.pdfs = [source]
-        with patch('pubnexus.single.extract_one', side_effect=ExtractionCancelled('Stopped')):
+        with patch('pubnexus.pdf_pipeline.extract', side_effect=ExtractionCancelled('Stopped')):
             self.app._work([source], force=True)
         final = [payload for kind, payload in self.events if kind == 'run'][-1]
         self.assertTrue(final['stopped'])
@@ -159,7 +161,7 @@ class AppApiTests(support.AppExportTests):
             pdf[0].set_rotation(90)
             pdf.save(rotated)
         self.app.pdfs = [source]
-        with patch('pubnexus.single.extract_one', return_value=self.extracted(source)):
+        with patch('pubnexus.pdf_pipeline.extract', return_value=self.extracted(source)):
             self.app._work([source], force=True)
         state = {'revision': 'first', 'path': source}
         with patch('pubnexus.preview.renderer_identity', side_effect=lambda path: state['revision']), \

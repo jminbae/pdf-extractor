@@ -368,9 +368,11 @@ def _merge_fragments(frags: list[Line]) -> list[Line]:
 
 def _page_lines(page, pno: int) -> list[Line]:
     from collections import Counter
+    from pymupdf import TEXTFLAGS_DICT, TEXT_PRESERVE_IMAGES
 
     out: list[Line] = []
-    d = page.get_text("dict")
+    # Caption evidence is text/font/bbox only; never allocate embedded images.
+    d = page.get_text("dict", flags=TEXTFLAGS_DICT & ~TEXT_PRESERVE_IMAGES)
     for bi, blk in enumerate(d.get("blocks", ())):
         if blk.get("type") != 0:
             continue
