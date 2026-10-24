@@ -2,7 +2,7 @@
 import {PptxViewer, parseZipLazyMedia, buildPresentation, buildTextIndex, RECOMMENDED_ZIP_LIMITS} from '/presentation-vendor.js';
 
 const CHANNEL='pubnexus.presentation.v1',nonce=location.hash.slice(1),viewport=document.getElementById('viewport'),stage=document.getElementById('stage');
-let alive=true,revision=null,parentOrigin='*',viewer=null,model=null,handle=null,highlightHandle=null,activeHighlight=null,renderGeneration=0,renderedViewportWidth=0,pageIndex=0,zoom=100,searchEpoch=0,results=[],readySent=false,resizeFrame=0;
+let alive=true,initialized=false,revision=null,parentOrigin='*',viewer=null,model=null,handle=null,highlightHandle=null,activeHighlight=null,renderGeneration=0,renderedViewportWidth=0,pageIndex=0,zoom=100,searchEpoch=0,results=[],readySent=false,resizeFrame=0;
 const warnings=new Set();
 const layoutWaiters=new Set();
 const safeError=e=>String(e?.message||e||'슬라이드를 열지 못했습니다.').slice(0,1200);
@@ -42,7 +42,8 @@ async function render(index,{point,keepAnchor=false}={}){
   document.getElementById('message').textContent='';if(!readySent){readySent=true;post('ready',data);}post('rendered',data);return data;
 }
 async function initialize(message,event){
-  if(revision!==null||!message.revision||!(message.buffer instanceof ArrayBuffer)||!message.buffer.byteLength||message.buffer.byteLength>256*1024*1024)throw new Error('슬라이드 입력이 올바르지 않습니다.');
+  if(initialized||revision!==null&&revision!==message.revision||!message.revision||!(message.buffer instanceof ArrayBuffer)||!message.buffer.byteLength||message.buffer.byteLength>256*1024*1024)throw new Error('슬라이드 입력이 올바르지 않습니다.');
+  initialized=true;
   revision=String(message.revision);parentOrigin=event.origin==='null'?'*':event.origin;zoom=Math.max(50,Math.min(250,Number(message.zoom)||100));
   let parentBlocked=false;try{void parent.document.body;}catch{parentBlocked=true;}
   if(!parentBlocked||window.pywebview?.api)throw new Error('슬라이드 보안 격리를 확인하지 못했습니다. PDF 보기로 열어주세요.');
@@ -62,6 +63,7 @@ async function command(message){
     const query=String(message.query||'').slice(0,2000);searchEpoch++;activeHighlight=null;viewer.clearSearchHighlights();results=query?viewer.searchText(query,{useRegex:false,snippetRadius:100}):[];
     return {search_epoch:searchEpoch,results:results.slice(0,500).map(publicResult),truncated:results.length>500};
   }
+  if(message.type==='clear-highlight'){searchEpoch++;results=[];activeHighlight=null;viewer.clearSearchHighlights();highlightHandle=null;return {};}
   if(message.type==='highlight'){
     if(message.search_epoch!==undefined&&message.search_epoch!==searchEpoch)throw new Error('검색 결과가 바뀌었습니다.');
     const result=results[Number(message.result)];if(!result)throw new Error('검색 결과를 찾지 못했습니다.');
@@ -87,11 +89,13 @@ async function command(message){
 function destroy(){if(!alive)return;renderGeneration++;for(const cancel of [...layoutWaiters])cancel();cancelAnimationFrame(resizeFrame);observer.disconnect();disposeHandle();viewer?.destroy();viewer=null;model=null;results=[];alive=false;window.removeEventListener('message',receive);}
 async function receive(event){
   const message=event.data;if(!alive||event.source!==parent||message?.channel!==CHANNEL||message.nonce!==nonce||!nonce||nonce.length>128)return;
+  if(message.type==='context'){if(!initialized&&revision===null&&typeof message.revision==='string'&&message.revision){revision=message.revision;parentOrigin=event.origin==='null'?'*':event.origin;}return;}
   if(message.type!=='init'&&message.revision!==revision)return;
   try{if(message.type==='destroy'){response(message.id);destroy();return;}const result=message.type==='init'?await initialize(message,event):await command(message);if(message.id)response(message.id,result);}
   catch(error){if(!alive)return;if(message.id)post('response',{id:message.id,ok:false,code:safeError(error)==='superseded'?'superseded':'render_error',error:safeError(error)});else if(safeError(error)!=='superseded'){document.getElementById('message').textContent=safeError(error);post('error',{error:safeError(error)});}}
 }
 window.addEventListener('message',receive);
+window.addEventListener('keydown',event=>{const action=event.key==='Escape'?'escape':event.ctrlKey&&!event.altKey&&!event.shiftKey&&event.key.toLowerCase()==='f'?'find':null;if(!action||!alive)return;event.preventDefault();post('shortcut',{action});},true);
 viewport.addEventListener('wheel',event=>{if(!event.ctrlKey)return;event.preventDefault();if(!viewer||!event.deltaY)return;const r=viewport.getBoundingClientRect();post('wheel',{delta:event.deltaY<0?1:-1,point:{x:event.clientX-r.left,y:event.clientY-r.top},trusted:event.isTrusted,prevented:event.defaultPrevented});},{passive:false});
 viewport.addEventListener('click',event=>{if(event.target.closest('a')){event.preventDefault();event.stopImmediatePropagation();}if(!handle||window.getSelection()?.toString())return;const r=handle.element.getBoundingClientRect();const x=(event.clientX-r.left)/r.width*model.width,y=(event.clientY-r.top)/r.height*model.height;if(x<0||y<0||x>model.width||y>model.height)return;const entries=buildTextIndex(model).filter(entry=>entry.slideIndex===pageIndex&&x>=entry.bounds.x&&x<=entry.bounds.x+entry.bounds.w&&y>=entry.bounds.y&&y<=entry.bounds.y+entry.bounds.h);post('click',{page:pageIndex+1,x,y,entries:entries.map(entry=>({text:entry.text,bounds:entry.bounds,nodeId:entry.nodeId}))});},true);
 const observer=new ResizeObserver(()=>{if(!viewer||!readySent||resizeFrame||viewport.clientWidth<=26||viewport.clientWidth===renderedViewportWidth)return;resizeFrame=requestAnimationFrame(()=>{resizeFrame=0;if(alive&&viewport.clientWidth>26&&viewport.clientWidth!==renderedViewportWidth)render(pageIndex,{keepAnchor:true}).catch(error=>{if(safeError(error)!=='superseded')post('error',{error:safeError(error)});});});});observer.observe(viewport);

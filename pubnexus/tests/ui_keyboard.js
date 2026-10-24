@@ -1,0 +1,55 @@
+async function uiKeyboardRegression(page,baseURL){
+  const context=await page.context().browser().newContext({viewport:{width:1336,height:900}}),p=await context.newPage();
+  let releaseRaw=()=>{};
+  const errors=[];p.on('pageerror',error=>errors.push(String(error)));
+  try{
+    await p.goto(baseURL);await p.waitForSelector('.file-row');await p.locator('.file-row[data-index="1"]').dblclick();await p.waitForSelector('.pdf-page');
+    await p.locator('#search').fill('needle');await p.locator('#source-scroll').click({position:{x:150,y:150}});await p.keyboard.press('Control+f');
+    const sourceFind=await p.evaluate(()=>({id:document.activeElement.id,start:document.querySelector('#search').selectionStart,end:document.querySelector('#search').selectionEnd}));
+    if(sourceFind.id!=='search'||sourceFind.start!==0||sourceFind.end!==6)throw new Error('UI_KEYBOARD_SOURCE_FIND_RED '+JSON.stringify(sourceFind));
+    await p.locator('#search-form').evaluate(n=>n.requestSubmit());await p.waitForSelector('.pdf-highlight');
+    await p.evaluate(()=>{window.pnx.on({kind:'run',on:true});});await p.keyboard.press('Escape');
+    const sourceEscape=await p.evaluate(()=>({reader:!document.querySelector('#reader').hidden,resultsHidden:document.querySelector('#search-results').hidden,query:document.querySelector('#search').value,highlights:document.querySelectorAll('.pdf-highlight,.mapped-active').length,stopEnabled:!document.querySelector('#stop').disabled}));
+    if(!sourceEscape.reader||!sourceEscape.resultsHidden||sourceEscape.query!=='needle'||sourceEscape.highlights||!sourceEscape.stopEnabled)throw new Error('UI_KEYBOARD_SEARCH_ESCAPE_RED '+JSON.stringify(sourceEscape));
+    await p.keyboard.press('Escape');await p.waitForFunction(()=>!document.querySelector('#list-view').hidden);
+    await p.evaluate(()=>{const onFind=event=>{if(!event.ctrlKey||event.key.toLowerCase()!=='f')return;window.__listFindPrevented=event.defaultPrevented;document.removeEventListener('keydown',onFind);};document.addEventListener('keydown',onFind);});await p.keyboard.press('Control+f');
+    const listFind=await p.evaluate(()=>({prevented:window.__listFindPrevented,readerHidden:document.querySelector('#reader').hidden}));
+    if(listFind.prevented!==false||!listFind.readerHidden)throw new Error('UI_KEYBOARD_LIST_SCOPE_RED '+JSON.stringify(listFind));
+    await p.locator('.file-row[data-index="1"] [data-action=read]').click();await p.waitForSelector('#document h1');await p.locator('#result-scroll').click({position:{x:80,y:100}});await p.keyboard.press('Control+f');
+    const resultFind=await p.evaluate(()=>document.activeElement.id);if(resultFind!=='search')throw new Error('UI_KEYBOARD_RESULT_FIND_RED');
+    await p.locator('#settings-open').click();await p.waitForFunction(()=>document.querySelector('#settings-dialog').open);await p.keyboard.press('Escape');
+    const modalEscape=await p.evaluate(()=>({dialog:document.querySelector('#settings-dialog').open,reader:!document.querySelector('#reader').hidden}));
+    if(modalEscape.dialog||!modalEscape.reader)throw new Error('UI_KEYBOARD_MODAL_PRIORITY_RED '+JSON.stringify(modalEscape));
+    await p.keyboard.press('Escape');await p.waitForFunction(()=>!document.querySelector('#list-view').hidden);
+    const cancels=await p.evaluate(()=>window.__calls.filter(c=>c.name==='cancel').length);if(cancels)throw new Error('UI_KEYBOARD_CANCELLED_EXTRACTION_RED');
+    await p.route('**/open?*',async route=>{if(new URL(route.request().url()).searchParams.get('mode')==='result')return route.continue();return route.fulfill({json:{source_kind:'presentation',source_ready:true,pages:[[960,720],[960,720],[960,720]],source_revision:'fixture-source-v1',source_data_url:'/presentation-data?p=1&r=fixture-source-v1',source_frame_url:'/presentation-frame',source_unit_label:'슬라이드'}});});
+    const rawGate=new Promise(resolve=>releaseRaw=resolve);let rawCount=0;
+    await p.route('**/presentation-data?*',async route=>{if(++rawCount===1)await rawGate;await route.continue().catch(()=>{});});
+    const loadingRaw=p.waitForRequest(r=>r.url().includes('/presentation-data?'));await p.locator('.file-row[data-index="1"]').dblclick();await loadingRaw;
+    const loadingFrame=p.frames().find(frame=>frame.url().includes('/presentation-frame#'));
+    await p.locator('#search').fill('pending');await loadingFrame.locator('#viewport').click({position:{x:80,y:100}});await p.keyboard.press('Control+f');
+    await p.waitForFunction(()=>document.activeElement.id==='search',null,{timeout:2000});
+    const loadingFind=await p.evaluate(()=>({id:document.activeElement.id,start:document.querySelector('#search').selectionStart,end:document.querySelector('#search').selectionEnd}));
+    if(loadingFind.id!=='search'||loadingFind.start!==0||loadingFind.end!==7)throw new Error('UI_KEYBOARD_LOADING_FRAME_FIND_RED '+JSON.stringify(loadingFind));
+    await loadingFrame.locator('#viewport').click({position:{x:80,y:100}});await p.keyboard.press('Escape');await p.waitForFunction(()=>!document.querySelector('#list-view').hidden);releaseRaw();
+    await p.locator('.file-row[data-index="1"]').dblclick();await p.waitForFunction(()=>document.querySelector('#presentation-frame')?.dataset.ready==='true');
+    const frame=p.frames().find(frame=>frame.url().includes('/presentation-frame#'));
+    await p.locator('#search').fill('THIRD');await frame.locator('#viewport').click({position:{x:100,y:150}});await p.keyboard.press('Control+f');
+    await p.waitForFunction(()=>document.activeElement.id==='search',null,{timeout:2000});
+    const frameFind=await p.evaluate(()=>({id:document.activeElement.id,start:document.querySelector('#search').selectionStart,end:document.querySelector('#search').selectionEnd}));
+    if(frameFind.id!=='search'||frameFind.start!==0||frameFind.end!==5)throw new Error('UI_KEYBOARD_FRAME_FIND_RED '+JSON.stringify(frameFind));
+    await p.locator('#search-form').evaluate(n=>n.requestSubmit());await frame.waitForFunction(()=>document.querySelectorAll('[data-pptx-search-highlight]').length===1);
+    await frame.locator('#viewport').click({position:{x:100,y:300}});await p.keyboard.press('Escape');
+    await p.waitForFunction(()=>document.querySelector('#search-results').hidden);await frame.waitForFunction(()=>!document.querySelector('[data-pptx-search-highlight]'));
+    const frameEscape=await p.evaluate(()=>({reader:!document.querySelector('#reader').hidden,query:document.querySelector('#search').value,stopEnabled:!document.querySelector('#stop').disabled}));
+    if(!frameEscape.reader||frameEscape.query!=='THIRD'||!frameEscape.stopEnabled)throw new Error('UI_KEYBOARD_FRAME_ESCAPE_RED '+JSON.stringify(frameEscape));
+    await frame.evaluate(()=>{const decode=HTMLImageElement.prototype.decode;window.__holdKeyboardDecode=true;HTMLImageElement.prototype.decode=function(){const result=decode.call(this);if(!window.__holdKeyboardDecode)return result;window.__holdKeyboardDecode=false;return result.then(()=>new Promise(resolve=>window.__releaseKeyboardDecode=resolve));};});
+    await p.locator('#search').fill('FIRST');await p.locator('#search-form').evaluate(n=>n.requestSubmit());await frame.waitForFunction(()=>typeof window.__releaseKeyboardDecode==='function');
+    await frame.locator('#viewport').click({position:{x:100,y:300}});await p.keyboard.press('Escape');await p.waitForFunction(()=>document.querySelector('#search-results').hidden);await frame.evaluate(()=>window.__releaseKeyboardDecode());await p.waitForTimeout(100);
+    const lateEscape=await p.evaluate(()=>({note:document.querySelector('#location-note').textContent,resultsHidden:document.querySelector('#search-results').hidden,query:document.querySelector('#search').value}));
+    if(lateEscape.note||!lateEscape.resultsHidden||lateEscape.query!=='FIRST'||await frame.locator('[data-pptx-search-highlight]').count())throw new Error('UI_KEYBOARD_LATE_HIGHLIGHT_RED '+JSON.stringify(lateEscape));
+    await p.keyboard.press('Escape');await p.waitForFunction(()=>!document.querySelector('#list-view').hidden);
+    if(await p.evaluate(()=>window.__calls.some(c=>c.name==='cancel'))||errors.length)throw new Error('UI_KEYBOARD_LIFETIME_RED '+JSON.stringify(errors));
+    return{ok:true,sourceFind,sourceEscape,listFind,resultFind,modalEscape,loadingFind,frameFind,frameEscape,lateEscape,cancels,errors};
+  }finally{releaseRaw();await context.close();}
+}
