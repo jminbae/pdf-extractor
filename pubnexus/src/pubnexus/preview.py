@@ -35,6 +35,35 @@ class Preview:
 _locks_guard = threading.Lock()
 _locks = {}
 _PRESENTATIONS = frozenset({'.pptx', '.ppt', '.odp'})
+_TEXT_SOURCES = frozenset({'.txt', '.md', '.csv', '.tsv'})
+
+
+def text_source(source: str | Path) -> dict | None:
+    """Show original decoded text directly; never extract, convert, or persist it."""
+    source = Path(source)
+    if source.suffix.lower() not in _TEXT_SOURCES:
+        return None
+    from . import documents
+    try:
+        source = source.resolve(strict=True)
+        before = source.stat()
+        if not source.is_file() or before.st_size > documents.MAX_TEXT_BYTES:
+            raise PreviewUnavailable('텍스트 원본 미리보기 크기 제한을 초과했습니다.')
+        with open(utils.long_path(source), 'rb') as stream:
+            data = stream.read(documents.MAX_TEXT_BYTES + 1)
+        if len(data) > documents.MAX_TEXT_BYTES:
+            raise PreviewUnavailable('텍스트 원본 미리보기 크기 제한을 초과했습니다.')
+        text, encoding = documents.decode_text(data)
+        after = source.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise PreviewUnavailable('미리보기 생성 중 원본이 변경됐습니다. 다시 여세요.')
+    except (OSError, UnicodeError, documents.DocumentExtractionError) as error:
+        raise PreviewUnavailable(str(error)) from error
+    revision = hashlib.sha256(data).hexdigest()
+    return {'source_kind': 'text', 'source_ready': True, 'text': text, 'encoding': encoding,
+            'source_revision': revision, 'revision': revision, 'source_label': '원본',
+            'source_unit_label': '줄', 'pages': [], 'coordinate_space': 'text_codepoints',
+            'line_starts': [0] + [index + 1 for index, char in enumerate(text) if char == '\n']}
 
 
 @contextmanager
@@ -88,6 +117,8 @@ def find_engine(name: str) -> Path | None:
 
 
 def renderer_identity(source: str | Path) -> str:
+    if Path(source).suffix.lower() in _TEXT_SOURCES:
+        return 'native-text-v1'
     if Path(source).suffix.lower() == '.pdf':
         return 'PyMuPDF:' + fitz.VersionBind
     engine = find_engine('rhwp' if Path(source).suffix.lower() in {'.hwp', '.hwpx'} else 'soffice')

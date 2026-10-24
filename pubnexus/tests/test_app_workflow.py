@@ -221,7 +221,7 @@ class WorkflowTests(unittest.TestCase):
                 source.write_bytes(b'Synthetic source for label only')
                 self.app.pdfs = [source]
                 with patch('pubnexus.preview.preview_path', return_value=Preview(display, suffix != '.pdf', 'synthetic', 'sha')):
-                    result = self.app.source_view(0)
+                    result = self.app.source_view(0, renderer='pdf')
                 self.assertEqual(result.get('source_label'), label)
                 self.assertEqual(result.get('source_unit_label'), unit)
                 self.assertTrue(result.get('source_ready'))

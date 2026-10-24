@@ -64,12 +64,19 @@ EXTERNAL_DOCUMENT_EXTENSIONS = {'.rtf', '.ipynb', '.xls', '.msg'}
 DOCUMENT_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.xlsx', '.csv', '.tsv', '.txt', '.md',
                        '.html', '.htm', '.hwp', '.hwpx', '.epub', '.odt', '.ods', '.odp', '.eml', '.mbox'} | EXTERNAL_DOCUMENT_EXTENSIONS
 
+def _extractable(path: Path) -> bool:
+    return path.suffix.lower() in DOCUMENT_EXTENSIONS - {'.txt', '.md'}
+
 def _norm(p: str | Path) -> str:
     """경로 비교용 정규화. 대소문자·상대경로 차이로 짝을 놓치지 않게."""
     try:
         return os.path.normcase(os.path.abspath(str(p)))
     except Exception:  # noqa: BLE001
         return str(p).lower()
+
+
+class StaleSelection(ValueError):
+    """The selected list row now belongs to a different document."""
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -548,12 +555,16 @@ def md_to_html(md: str, chips: str = "", sha1: str = "", *, source_markers: bool
     return "\n".join(out)
 
 
-def sdk_to_html(md: str, blocks=(), sha1: str = '', *, asset_index: int | None = None) -> str:
+def sdk_to_html(md: str, blocks=(), sha1: str = '', *, asset_index: int | None = None,
+                asset_source: str | None = None) -> str:
     from pubnexus.markdown_view import to_html
 
     def asset_url(destination):
         if asset_index is not None:
-            return ('/asset?' + urllib.parse.urlencode({'p': asset_index, 'f': destination}), None)
+            params = {'p': asset_index, 'f': destination}
+            if asset_source is not None:
+                params['expected_path'] = asset_source
+            return ('/asset?' + urllib.parse.urlencode(params), None)
         path = fig_path(sha1, destination)
         if path is None:
             return None
@@ -1007,8 +1018,8 @@ class App:
     def set_folder(self, folder: Path) -> None:
         self.browse_folder(folder)
 
-    def browse_folder(self, folder: Path) -> dict:
-        """Change the visible directory; running jobs retain their captured paths."""
+    def _directory_entries(self, folder: Path) -> tuple[Path, list[dict], list[Path]]:
+        """Read one directory for both tree expansion and file-list navigation."""
         folder = Path(folder).resolve(strict=True)
         if not folder.is_dir():
             raise ValueError('폴더를 선택하세요.')
@@ -1016,6 +1027,12 @@ class App:
         in_output = folder.is_relative_to(output)
         folders, files = [], []
         for entry in folder.iterdir():
+            try:
+                # Match Explorer's normal view of hidden/system entries.
+                if getattr(entry.stat(follow_symlinks=False), 'st_file_attributes', 0) & 0x6:
+                    continue
+            except OSError:
+                continue
             resolved = entry.resolve()
             if not in_output and resolved.is_relative_to(output):
                 continue
@@ -1026,6 +1043,15 @@ class App:
                 files.append(resolved)
         folders.sort(key=lambda row: (row['name'].casefold(), row['path'].casefold()))
         files.sort(key=lambda path: (path.name.casefold(), str(path).casefold()))
+        return folder, folders, files
+
+    def list_folders(self, folder: Path) -> dict:
+        folder, folders, _ = self._directory_entries(folder)
+        return {'path': str(folder), 'folders': folders}
+
+    def browse_folder(self, folder: Path) -> dict:
+        """Change the visible directory; running jobs retain their captured paths."""
+        folder, folders, files = self._directory_entries(folder)
         with self._operation_lock:
             ui = self.ui_load()
             last = ui.get('paper') if _norm(ui.get('folder') or '') == _norm(folder) else None
@@ -1139,6 +1165,7 @@ class App:
                 warnings = [('그림 속 글자를 포함하려면 다시 추출하세요.' if p.suffix.lower() == '.pptx' else
                              '본문·그림 배치 방식이 개선됐습니다. 선택 추출로 MD를 다시 저장하세요.')] + warnings
             rows.append({"name": p.name, "path": str(p), "done": ready, 'md_ready': readable,
+                         'extractable': _extractable(p),
                          'needs_refresh': needs_refresh,
                          "cached": key in self.done, "status": state,
                          "size_bytes": current[0] if current else 0,
@@ -1179,13 +1206,32 @@ class App:
         return self._warning_cache[key]
 
     # ── 문서 한 편 ──────────────────────────────────────────────────
-    def source_view(self, i: int, *, renderer: str = '') -> dict:
+    def selected_source(self, index: int, expected_path: str | None = None) -> Path:
+        """Capture identity under the list lock; never hold it while reading/rendering."""
+        with self._operation_lock:
+            if type(index) is not int or not 0 <= index < len(self.pdfs):
+                if expected_path is not None:
+                    raise StaleSelection('폴더가 변경됐습니다. 문서를 다시 선택하세요.')
+                raise ValueError('문서를 선택하세요.')
+            source = self.pdfs[index]
+            if expected_path is not None and (not isinstance(expected_path, str)
+                    or not expected_path or _norm(source) != _norm(expected_path)):
+                raise StaleSelection('폴더가 변경됐습니다. 문서를 다시 선택하세요.')
+            return source
+
+    @staticmethod
+    def selection_error(error: ValueError) -> dict:
+        return {'error': str(error), **({'code': 'stale_selection'} if isinstance(error, StaleSelection) else {})}
+
+    def source_view(self, i: int, *, renderer: str = '', expected_path: str | None = None,
+                    _source: Path | None = None) -> dict:
         """Read the original preview without touching extraction, results or queue."""
         if renderer not in ('', 'presentation', 'pdf'):
             return {'error': '지원하지 않는 표시 방식입니다.'}
-        if not (0 <= i < len(self.pdfs)):
-            return {"error": "없는 항목"}
-        pdf = self.pdfs[i]
+        try:
+            pdf = _source if _source is not None else self.selected_source(i, expected_path)
+        except ValueError as error:
+            return self.selection_error(error)
         suffix = pdf.suffix.lower()
         slides = suffix in {'.pptx', '.ppt', '.odp'}
         sheets = suffix in {'.xlsx', '.xls', '.ods'}
@@ -1194,6 +1240,17 @@ class App:
                                       '원본 PDF' if suffix == '.pdf' else '원본 문서'),
                      "source_unit_label": '슬라이드' if slides else '쪽'}
         try:
+            from pubnexus.preview import text_source
+            text_view = text_source(pdf)
+            if text_view is not None:
+                res.update(text_view)
+                return res
+            if renderer != 'pdf':
+                from pubnexus import native_preview
+                content = native_preview.view(pdf)
+                if content is not None:
+                    res.update(content)
+                    return res
             if suffix == '.pptx' and renderer != 'pdf':
                 from pubnexus import presentation_preview
                 if presentation_preview.available():
@@ -1204,26 +1261,31 @@ class App:
             res.update(self.renderer.open(original_view.path))
             res.update(source_converted=original_view.converted, source_engine=original_view.engine, source_kind='pdf')
         except Exception as e:  # noqa: BLE001
-            res["pdf_error"] = f"{type(e).__name__}: {e}"
+            res["pdf_error"] = str(e)
+            res['source_ready'] = False
             res["pages"] = []
         return res
 
-    def paper(self, i: int) -> dict:
-        res = self.source_view(i)
+    def paper(self, i: int, *, expected_path: str | None = None) -> dict:
+        try:
+            pdf = self.selected_source(i, expected_path)
+        except ValueError as error:
+            return self.selection_error(error)
+        res = self.source_view(i, _source=pdf)
         if res.get('error'):
             return res
-        pdf = self.pdfs[i]
         res["doc"] = self.doc_view(pdf)
         res['revision'] = res['doc'].get('revision')
         if not res["doc"].get("extracted"):
             res["doc"]["queued"] = self.bump(pdf)
         return res
 
-    def result_view(self, i: int) -> dict:
+    def result_view(self, i: int, *, expected_path: str | None = None) -> dict:
         """Read a saved result without preparing its original preview or queue."""
-        if not (0 <= i < len(self.pdfs)):
-            return {"error": "없는 항목"}
-        source = self.pdfs[i]
+        try:
+            source = self.selected_source(i, expected_path)
+        except ValueError as error:
+            return self.selection_error(error)
         doc = self.doc_view(source)
         return {"name": source.name, "path": str(source), "doc": doc,
                 "revision": doc.get('revision'), "source_ready": False, "pages": []}
@@ -1285,7 +1347,7 @@ class App:
         previous_source = bool(output and output.get('source_sha1') != sha)
         if snapshot and not previous_source and not snapshot['mapping_valid']:
             index = next((i for i, p in enumerate(self.pdfs) if p == pdf), None)
-            return {'extracted': True, 'html': sdk_to_html(snapshot['markdown'], asset_index=index),
+            return {'extracted': True, 'html': sdk_to_html(snapshot['markdown'], asset_index=index, asset_source=str(pdf)),
                     'md_text': snapshot['markdown'], 'revision': snapshot['revision'], 'mapping_valid': False,
                     'notes': [snapshot['reason']], 'note_details': [snapshot['reason']],
                     'markdown': output.get('markdown', ''), 'sha1': sha}
@@ -1319,7 +1381,7 @@ class App:
             md, externally_changed = saved
             if externally_changed:
                 index = next((i for i, p in enumerate(self.pdfs) if p == pdf), None)
-                html = sdk_to_html(md, asset_index=index)
+                html = sdk_to_html(md, asset_index=index, asset_source=str(pdf))
 
         secs = d.get("body_text") or []
         npar = sum(len(s.get("paragraphs") or []) for s in secs)
@@ -1369,14 +1431,14 @@ class App:
         changed = hashlib.sha256(data).hexdigest() != output.get('markdown_sha256')
         return data.decode('utf-8-sig', errors='replace'), changed
 
-    def comparison_doc(self, index: int, *, renderer: str = '') -> tuple[dict, Path]:
+    def comparison_doc(self, index: int, *, renderer: str = '', expected_path: str | None = None,
+                       _source: Path | None = None) -> tuple[dict, Path]:
         if renderer not in ('', 'presentation', 'pdf'):
             raise ValueError('지원하지 않는 표시 방식입니다.')
         from pubnexus import store, comparison
-        from pubnexus.preview import preview_path, renderer_identity
-        if type(index) is not int or not 0 <= index < len(self.pdfs):
-            raise ValueError('문서를 선택하세요.')
-        source = self.pdfs[index]
+        from pubnexus.preview import preview_path, renderer_identity, text_source
+        source = _source if _source is not None else self.selected_source(index, expected_path)
+        text_view = text_source(source)
         from pubnexus import presentation_preview
         fast_presentation = source.suffix.lower() == '.pptx' and renderer != 'pdf' and presentation_preview.available()
         source_stat = source.stat()
@@ -1391,7 +1453,8 @@ class App:
         cache_key = (_norm(source), source_stat.st_size, source_stat.st_mtime_ns,
                      md_stat.st_size if md_stat else None, md_stat.st_mtime_ns if md_stat else None,
                      output.get('source_sha1'), snapshot['revision'] if snapshot else None,
-                     'presentation:' + presentation_preview.VERSION if fast_presentation else renderer_identity(source))
+                     ('text:' + text_view['source_revision'] if text_view is not None else
+                      'presentation:' + presentation_preview.VERSION if fast_presentation else renderer_identity(source)))
         hit = self._comparison_cache.get(cache_key)
         display_stat = hit[2].stat() if hit and hit[2].is_file() else None
         if hit and display_stat and hit[3] == (display_stat.st_size, display_stat.st_mtime_ns):
@@ -1407,7 +1470,7 @@ class App:
         if not doc.get('body_text') and doc.get('sections'):
             doc = dict(doc, body_text=doc['sections'])
         header = presentation_preview.describe(source, index) if fast_presentation else None
-        if fast_presentation:
+        if fast_presentation or text_view is not None:
             display_source = source
         else:
             try:
@@ -1417,8 +1480,12 @@ class App:
         doc = comparison.attach(doc, display_source)
         doc['_reader_revision'] = snapshot['revision'] if snapshot else None
         display_stat = display_source.stat()
-        mapping = dict(presentation_preview.document_map(doc, header) if header else
-                       comparison.document_map(doc, display_source), revision=doc['_reader_revision'])
+        if text_view is not None:
+            from pubnexus import text_source as source_text
+            mapping = source_text.document_map(doc, text_view)
+        else:
+            mapping = presentation_preview.document_map(doc, header, source) if header else comparison.document_map(doc, display_source)
+        mapping = dict(mapping, revision=doc['_reader_revision'])
         current_stat = source.stat()
         if (source_stat.st_size, source_stat.st_mtime_ns) != (current_stat.st_size, current_stat.st_mtime_ns):
             raise ValueError('원본이 변경됐습니다. 다시 여세요.')
@@ -1428,14 +1495,17 @@ class App:
             self._comparison_cache.popitem(last=False)
         return doc, display_source
 
-    def document_map(self, index: int, *, renderer: str = '') -> dict:
+    def document_map(self, index: int, *, renderer: str = '', expected_path: str | None = None,
+                     _source: Path | None = None) -> dict:
         from pubnexus import comparison
         try:
-            doc, source = self.comparison_doc(index, renderer=renderer) if renderer else self.comparison_doc(index)
+            original = _source if _source is not None else self.selected_source(index, expected_path)
+            doc, source = self.comparison_doc(index, renderer=renderer, _source=original)
             hit = next((value for value in self._comparison_cache.values() if value[0] is doc), None)
-            return dict(hit[1] if hit else comparison.document_map(doc, source), revision=doc.get('_reader_revision'))
+            return dict(hit[1] if hit else comparison.document_map(doc, source), revision=doc.get('_reader_revision'),
+                        path=str(original), source_path=str(original))
         except (ValueError, OSError) as error:
-            return {'blocks': [], 'pages': [], 'error': str(error), 'revision': None}
+            return {'blocks': [], 'pages': [], **self.selection_error(error), 'revision': None}
 
     # ── 추출 ────────────────────────────────────────────────────────
     def start(self, targets: list[Path], force: bool = False) -> list[Path]:
@@ -1451,6 +1521,8 @@ class App:
                 self._accepting_work = True
             accepted = []
             for path in targets:
+                if not _extractable(path):
+                    continue
                 key = _norm(path)
                 if key in self._pending_paths:
                     continue
@@ -1891,8 +1963,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_a) -> None:      # 콘솔을 더럽히지 않는다
         pass
 
-    def _send(self, body: bytes, ctype: str, cache: str = "no-store", *, headers: dict | None = None) -> None:
-        self.send_response(200)
+    def _send(self, body: bytes, ctype: str, cache: str = "no-store", *, headers: dict | None = None,
+              status: int = 200) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
@@ -1907,7 +1980,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, obj) -> None:
         self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
-                   "application/json; charset=utf-8")
+                   "application/json; charset=utf-8",
+                   **({'status': 409} if isinstance(obj, dict) and obj.get('code') == 'stale_selection' else {}))
 
     _IMG = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
@@ -1933,10 +2007,51 @@ class Handler(BaseHTTPRequestHandler):
                 index = int(q.get('p', ['-1'])[0])
                 mode = q.get('mode', [''])[0]
                 renderer = q.get('renderer', [''])[0]
-                self._json(self.app.source_view(index, renderer=renderer) if mode == 'source' else
-                           self.app.result_view(index) if mode == 'result' else self.app.paper(index))
+                identity = {'expected_path': q['expected_path'][0]} if 'expected_path' in q else {}
+                self._json(self.app.source_view(index, renderer=renderer, **identity) if mode == 'source' else
+                           self.app.result_view(index, **identity) if mode == 'result' else self.app.paper(index, **identity))
             elif u.path == "/document-map":
-                self._json(self.app.document_map(int(q.get('p', ['-1'])[0]), renderer=q.get('renderer', [''])[0]))
+                identity = {'expected_path': q['expected_path'][0]} if 'expected_path' in q else {}
+                self._json(self.app.document_map(int(q.get('p', ['-1'])[0]), renderer=q.get('renderer', [''])[0], **identity))
+            elif u.path in {'/native-preview', '/native-asset'}:
+                from pubnexus import native_preview
+                from pubnexus.preview import PreviewUnavailable
+                index = int(q.get('p', ['-1'])[0])
+                try:
+                    original = self.app.selected_source(index, q.get('expected_path', [None])[0])
+                    revision = q.get('r', [''])[0]
+                    if not re.fullmatch(r'[0-9a-f]{64}', revision):
+                        raise PreviewUnavailable('문서를 다시 여세요.')
+                    if u.path == '/native-asset':
+                        body, mime = native_preview.read_asset(original, q.get('id', [''])[0], revision)
+                        self._send(body, mime)
+                    else:
+                        fields = {'start': 0, 'count': 80, 'sheet_index': 0, 'start_row': 1,
+                                  'start_col': 1, 'row_count': 60, 'col_count': 24}
+                        options = {name: int(q.get(name, [str(default)])[0]) for name, default in fields.items()}
+                        result = native_preview.view(original, revision=revision, **options)
+                        if result is None:
+                            raise PreviewUnavailable('이 문서의 내용 보기를 지원하지 않습니다.')
+                        self._json(dict(result, path=str(original), name=original.name))
+                except StaleSelection as error:
+                    self._json(self.app.selection_error(error))
+                except (ValueError, OSError, PreviewUnavailable) as error:
+                    self._json({'error': str(error), 'code': 'preview_unavailable'})
+            elif u.path == '/thumbnail':
+                from pubnexus import thumbnails
+                try:
+                    original = self.app.selected_source(int(q.get('p', ['-1'])[0]), q.get('expected_path', [None])[0])
+                except StaleSelection as error:
+                    self._json(self.app.selection_error(error))
+                    return
+                except ValueError:
+                    self.send_error(404)
+                    return
+                result = thumbnails.read(original)
+                if result is None:
+                    self.send_error(404)
+                else:
+                    self._send(*result)
             elif u.path in {'/presentation-frame', '/presentation-frame.mjs', '/presentation-vendor.js'}:
                 from pubnexus import presentation_preview
                 frame = u.path == '/presentation-frame'
@@ -1947,11 +2062,16 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == '/presentation-data':
                 from pubnexus import presentation_preview
                 index = int(q.get('p', ['-1'])[0])
-                if not 0 <= index < len(self.app.pdfs):
+                try:
+                    original = self.app.selected_source(index, q.get('expected_path', [None])[0])
+                except StaleSelection as error:
+                    self._json(self.app.selection_error(error))
+                    return
+                except ValueError:
                     self.send_error(404)
                     return
                 try:
-                    body = presentation_preview.read_data(self.app.pdfs[index], q.get('r', [''])[0])
+                    body = presentation_preview.read_data(original, q.get('r', [''])[0])
                 except (ValueError, OSError):
                     self.send_error(409)
                     return
@@ -1967,10 +2087,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._fig(q.get("s", [""])[0], q.get("f", [""])[0])
             elif u.path == '/asset':
                 index = int(q.get('p', ['-1'])[0])
-                if not 0 <= index < len(self.app.pdfs):
+                try:
+                    original = self.app.selected_source(index, q.get('expected_path', [None])[0])
+                except StaleSelection as error:
+                    self._json(self.app.selection_error(error))
+                    return
+                except ValueError:
                     self.send_error(404)
                     return
-                output = self.app.exported.get(_norm(self.app.pdfs[index])) or {}
+                output = self.app.exported.get(_norm(original)) or {}
                 markdown = output.get('markdown')
                 if not markdown or not Path(markdown).is_file():
                     self.send_error(404)
@@ -2011,6 +2136,14 @@ def serve(app: App) -> int:
 class Api:
     def __init__(self, app: App) -> None:
         self._app = app
+
+    def list_folders(self, path: str) -> dict:
+        if not isinstance(path, str) or not path or '\0' in path or not Path(path).is_absolute():
+            return {'ok': False, 'why': '폴더를 선택하세요.'}
+        try:
+            return dict(self._app.list_folders(Path(path)), ok=True)
+        except (OSError, ValueError, RuntimeError) as error:
+            return {'ok': False, 'why': str(error)}
 
     def browse_folder(self, path: str) -> dict:
         if not isinstance(path, str) or not path or '\0' in path or not Path(path).is_absolute():
@@ -2191,6 +2324,7 @@ class Api:
             a.status("이미 처리된 것이 있는지 확인하는 중…", busy=True, force=True)
             targets = [p for p, row in zip(a.pdfs, a.file_rows()) if not row["done"]]
             a.status("", busy=False, force=True)
+        targets = [path for path in targets if _extractable(path)]
         if not targets:
             return {"ok": False, "why": "처리할 문서가 없습니다. 다시 추출할 문서를 선택하세요."}
         queued = a.extraction_busy()
@@ -2203,7 +2337,7 @@ class Api:
 
     def count_todo(self) -> dict:
         a = self._app
-        todo = [p for p in a.pdfs if a.sha_for(p) is None]
+        todo = [p for p in a.pdfs if _extractable(p) and a.sha_for(p) is None]
         return {"todo": len(todo), "total": len(a.pdfs)}
 
     def extract_selected(self, indexes: list[int], force: bool = False,
@@ -2220,7 +2354,7 @@ class Api:
                     return {'ok': False, 'why': '폴더가 변경됐습니다. 현재 목록에서 문서를 선택하세요.'}
             rows = a.file_rows()
             picked = list(dict.fromkeys(i for i in indexes if type(i) is int and 0 <= i < len(a.pdfs)))
-            targets = [a.pdfs[i] for i in picked if force or not rows[i]["done"]]
+            targets = [a.pdfs[i] for i in picked if _extractable(a.pdfs[i]) and (force or not rows[i]["done"])]
             if not targets:
                 return {"ok": False, "why": "추출할 문서를 선택하세요."}
             queued = a.extraction_busy()
@@ -2255,43 +2389,72 @@ class Api:
         self._app.cancel.set()
         return {"ok": True}
 
-    def search(self, index: int, query: str, expected_revision: str | None = None, renderer: str = '') -> dict:
+    def search(self, index: int, query: str, expected_revision: str | None = None, renderer: str = '',
+               expected_path: str | None = None) -> dict:
         from pubnexus import comparison
         try:
-            snapshot = self._app._saved_snapshot(self._app.pdfs[index])
+            original = self._app.selected_source(index, expected_path)
+            snapshot = self._app._saved_snapshot(original)
             if expected_revision is not None and (not snapshot or snapshot['revision'] != expected_revision):
                 return {'ok': False, 'code': 'stale_revision', 'why': '새 Markdown이 저장되었습니다. MD를 다시 열어 검색하세요.', 'results': []}
-            doc, source = self._app.comparison_doc(index, renderer=renderer) if renderer else self._app.comparison_doc(index)
-            mapping = self._app.document_map(index, renderer=renderer) if renderer else self._app.document_map(index)
+            doc, source = self._app.comparison_doc(index, renderer=renderer, _source=original)
+            mapping = self._app.document_map(index, renderer=renderer, _source=original)
             if expected_revision is not None and mapping.get('revision') != expected_revision:
                 return {'ok': False, 'code': 'stale_revision', 'why': '새 Markdown이 저장되었습니다. MD를 다시 열어 검색하세요.', 'results': []}
-            return comparison.search(doc, source, query, mapping=mapping)
-        except (ValueError, OSError, IndexError) as error:
-            return {'ok': False, 'why': str(error), 'results': []}
+            result = comparison.search(doc, source, query, mapping=mapping)
+            if mapping.get('coordinate_space') == 'text_codepoints':
+                from pubnexus.preview import text_source
+                from pubnexus import text_source as source_text
+                current = text_source(source)
+                if current is None or current['source_revision'] != mapping.get('source_revision'):
+                    return {'ok': False, 'code': 'stale_source', 'why': '원본이 변경되었습니다. 다시 여세요.', 'results': []}
+                hits = source_text.search(current, query)
+                combined = result['results'] + hits['results']
+                result['results'] = combined[:200]
+                result['truncated'] = result['truncated'] or hits['truncated'] or len(combined) > 200
+                result['source_revision'] = hits['source_revision']
+            return dict(result, path=str(original))
+        except (ValueError, OSError, IndexError, RuntimeError) as error:
+            return {'ok': False, 'why': str(error), 'results': [],
+                    **({'code': 'stale_selection'} if isinstance(error, StaleSelection) else {})}
 
-    def search_source(self, index: int, query: str) -> dict:
+    def search_source(self, index: int, query: str, expected_path: str | None = None) -> dict:
         """Search the preview itself even when no Markdown result exists."""
         from pubnexus import comparison
-        from pubnexus.preview import preview_path
+        from pubnexus.preview import preview_path, text_source
         import fitz
         try:
-            if type(index) is not int or not 0 <= index < len(self._app.pdfs):
-                raise ValueError('문서를 선택하세요.')
-            source = preview_path(self._app.pdfs[index]).path
+            original = self._app.selected_source(index, expected_path)
+            text_view = text_source(original)
+            if text_view is not None:
+                from pubnexus import text_source as source_text
+                return dict(source_text.search(text_view, query), path=str(original))
+            from pubnexus import native_preview
+            native_result = native_preview.search(original, query)
+            if native_result is not None:
+                return dict(native_result, path=str(original))
+            source = preview_path(original).path
             with fitz.open(utils.long_path(source)) as pdf:
                 pages = [{'width': p.rect.width, 'height': p.rect.height} for p in pdf]
-            return comparison.search({}, source, query, mapping={'blocks': [], 'pages': pages})
+            return dict(comparison.search({}, source, query, mapping={'blocks': [], 'pages': pages}), path=str(original))
         except (ValueError, OSError, RuntimeError) as error:
-            return {'ok': False, 'why': str(error), 'results': []}
+            return {'ok': False, 'why': str(error), 'results': [],
+                    **({'code': 'stale_selection'} if isinstance(error, StaleSelection) else {})}
 
-    def location(self, index: int, block_id: str, expected_revision: str | None = None, renderer: str = '') -> dict:
-        data = self._app.document_map(index, renderer=renderer) if renderer else self._app.document_map(index)
+    def location(self, index: int, block_id: str, expected_revision: str | None = None, renderer: str = '',
+                 expected_path: str | None = None) -> dict:
+        data = self._app.document_map(index, renderer=renderer, expected_path=expected_path)
+        if data.get('code') == 'stale_selection':
+            return {'ok': False, 'code': data['code'], 'why': data['error']}
         if expected_revision is not None and data.get('revision') != expected_revision:
             return {'ok': False, 'code': 'stale_revision', 'why': '새 Markdown이 저장되었습니다. MD를 다시 열어 위치를 확인하세요.'}
         block = next((b for b in data['blocks'] if b['id'] == block_id), None)
         if not block or not block['locations']:
             return {'ok': False, 'why': data.get('error') or '이 부분의 원본 위치를 연결하지 못했습니다.'}
-        return {'ok': True, 'locations': block['locations'], 'mapping': block['mapping'], **block['locations'][0]}
+        return {'ok': True, 'locations': block['locations'], 'mapping': block['mapping'],
+                'path': data.get('path'),
+                **({'source_revision': data['source_revision']} if data.get('source_revision') else {}),
+                **block['locations'][0]}
 
     def state(self) -> dict:
         from pubnexus import pdf_markdown

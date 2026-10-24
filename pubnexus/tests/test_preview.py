@@ -24,6 +24,57 @@ class PreviewTests(unittest.TestCase):
         self.engine = self.root / 'soffice.exe'
         self.engine.write_bytes(b'synthetic engine')
 
+    def test_plain_source_decodes_existing_encodings_without_extracting_or_rendering(self):
+        method = getattr(preview, 'text_source', None)
+        self.assertTrue(callable(method), 'Text originals need a direct read-only preview entry')
+        text = '한글 원문\r\n<script>literal source</script>\t값\n😀 끝'
+        for encoding, expected in (('utf-8-sig', 'utf-8-sig'), ('utf-16', 'utf-16'),
+                                   ('cp949', 'cp949')):
+            with self.subTest(encoding=encoding):
+                value = text if encoding != 'cp949' else text.replace('😀 ', '')
+                path = self.root / ('plain-' + encoding + '.txt')
+                payload = value.encode(encoding)
+                path.write_bytes(payload)
+                before = path.stat()
+                with patch.object(preview, 'find_engine', side_effect=AssertionError('No renderer for text')), \
+                        patch('pubnexus.documents.extract_document', side_effect=AssertionError('No extraction for source preview')):
+                    result = method(path)
+                self.assertEqual(result['text'], value)
+                self.assertEqual(result['encoding'], expected)
+                self.assertEqual(result['source_kind'], 'text')
+                self.assertEqual(result['pages'], [])
+                self.assertEqual(result['source_label'], '원본')
+                self.assertEqual(result['source_revision'], hashlib.sha256(payload).hexdigest())
+                self.assertEqual(result['revision'], result['source_revision'])
+                self.assertEqual(result['line_starts'], [0, value.index('<script>'), value.index('끝') - (2 if encoding != 'cp949' else 0)])
+                self.assertEqual(path.read_bytes(), payload)
+                self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+                self.assertFalse((store.root() / 'docs').exists())
+
+    def test_plain_source_csv_tsv_markdown_are_raw_text_and_other_formats_use_existing_preview(self):
+        method = getattr(preview, 'text_source', None)
+        self.assertTrue(callable(method), 'Text source preview must be available before conversion')
+        for suffix in ('.csv', '.tsv', '.md'):
+            path = self.root / ('source' + suffix)
+            path.write_bytes(b'# source\r\na,b\r\n1,2\r\n')
+            result = method(path)
+            self.assertEqual(result['text'], '# source\r\na,b\r\n1,2\r\n')
+        self.assertIsNone(method(self.root / 'not-read.pdf'))
+
+    def test_plain_source_binary_or_oversized_input_fails_without_replacement_text(self):
+        from pubnexus import documents
+        method = getattr(preview, 'text_source', None)
+        self.assertTrue(callable(method), 'Text source preview must reject invalid inputs explicitly')
+        path = self.root / 'binary.txt'
+        path.write_bytes(b'secret\0binary')
+        with self.assertRaises(preview.PreviewUnavailable):
+            method(path)
+        path.write_bytes(b'A' * 17)
+        with patch.object(documents, 'MAX_TEXT_BYTES', 16):
+            with self.assertRaises(preview.PreviewUnavailable):
+                method(path)
+        self.assertEqual(path.read_bytes(), b'A' * 17)
+
     def test_missing_engine_reports_dependency_without_touching_original(self):
         with patch.object(preview, 'find_engine', return_value=None):
             with self.assertRaisesRegex(preview.PreviewUnavailable, 'LibreOffice'):

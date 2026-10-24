@@ -60,17 +60,22 @@ def current(doc: dict) -> bool:
             (doc.get('extraction_report') or {}).get('image_ocr_version') == PPTX_IMAGE_OCR_VERSION)
 
 
-def _decode(data: bytes) -> str:
+def decode_text(data: bytes) -> tuple[str, str]:
+    """Decode supported local text without newline or replacement-character repair."""
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return data.decode("utf-16")
+        return data.decode("utf-16"), 'utf-16'
     if b"\0" in data:
         raise DocumentExtractionError("텍스트 파일에 이진 데이터가 있습니다.")
-    for encoding in ("utf-8-sig", "cp949"):
+    for encoding in ('utf-8-sig' if data.startswith(b'\xef\xbb\xbf') else 'utf-8', 'cp949'):
         try:
-            return data.decode(encoding)
+            return data.decode(encoding), encoding
         except UnicodeError:
             pass
     raise DocumentExtractionError("텍스트 인코딩을 읽을 수 없습니다(UTF-8/UTF-16/CP949 지원).")
+
+
+def _decode(data: bytes) -> str:
+    return decode_text(data)[0]
 
 
 def _guard_zip(path: Path) -> list[str]:
@@ -353,6 +358,7 @@ def _pptx(builder: _Builder, path: Path):
         nodes = shape._element.xpath('./p:spPr/a:xfrm | ./p:grpSpPr/a:xfrm')
         node = nodes[0] if nodes else None
         return {'shape': shape_path, 'rotation_degrees': float(shape.rotation),
+                'source_shape_id': str(shape.shape_id),
                 'flip_h': node is not None and node.get('flipH') in ('1', 'true'),
                 'flip_v': node is not None and node.get('flipV') in ('1', 'true'),
                 'components': ({etree.QName(child).localname: dict(child.attrib) for child in node}
@@ -367,7 +373,8 @@ def _pptx(builder: _Builder, path: Path):
             for index, shape in enumerate(items, 1):
                 builder.check()
                 shape_path = f"{prefix}/{index}" if prefix else str(index)
-                location = {"shape": shape_path,
+                location = {"shape": shape_path, 'source_shape_id': str(shape.shape_id),
+                            'group_shape_ids': [group['source_shape_id'] for group in groups],
                             "shape_bbox_emu": [int(shape.left), int(shape.top),
                                                int(shape.left + shape.width), int(shape.top + shape.height)]}
                 if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
@@ -390,6 +397,7 @@ def _pptx(builder: _Builder, path: Path):
                     image = shape.image
                     relative = _save_asset(builder, image.blob, "." + image.ext)
                     geometry = {'image_crop_fraction': [shape.crop_left, shape.crop_top, shape.crop_right, shape.crop_bottom],
+                                'image_sha256': hashlib.sha256(image.blob).hexdigest(),
                                 'shape_transform': transform(shape, shape_path), 'group_transforms': list(groups),
                                 'shape_bbox_space': 'shape_parent_emu'}
                     origin = builder.origin(section, "image", **location, **geometry)

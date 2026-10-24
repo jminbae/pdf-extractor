@@ -74,10 +74,10 @@ class ReaderSnapshotTests(unittest.TestCase):
         replacement = copy.deepcopy(doc)
         replacement['body_text'][0]['paragraphs'][0]['source']['bbox'] = [180, 100, 300, 130]
         original_comparison = self.app.comparison_doc
-        def publish_then_compare(index):
+        def publish_then_compare(index, **kwargs):
             store.save(doc['sha1'], replacement, source)
             export.export_document(replacement, source, output_dir=self.app.output_dir)
-            return original_comparison(index)
+            return original_comparison(index, **kwargs)
         with patch.object(self.app, 'comparison_doc', side_effect=publish_then_compare):
             mapping = self.app.document_map(0)
         self.assertEqual(mapping['revision'], self.app.paper(0)['revision'])

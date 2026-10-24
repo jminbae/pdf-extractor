@@ -29,6 +29,30 @@ class AppInputTests(unittest.TestCase):
         p.write_bytes(b"input")
         return p.resolve()
 
+    def test_text_and_markdown_are_viewable_but_never_extraction_targets(self):
+        text = self.file('notes.txt')
+        markdown = self.file('notes.MD')
+        document = self.file('book.pdf')
+        self.app.pdfs = [text, markdown, document]
+        api = support.app_module.Api(self.app)
+        with patch.object(self.app, 'start', return_value=[document]) as start:
+            result = api.extract_selected([0, 1, 2], force=True,
+                                          expected_paths=[str(p) for p in self.app.pdfs])
+        self.assertTrue(result['ok'], result)
+        start.assert_called_once_with([document], force=True)
+        self.assertFalse(self.app.file_rows()[0]['extractable'])
+        self.assertFalse(self.app.file_rows()[1]['extractable'])
+        self.assertTrue(self.app.file_rows()[2]['extractable'])
+        with patch.object(self.app, 'start', side_effect=AssertionError('Already textual')):
+            self.assertFalse(api.extract('one', 0)['ok'])
+            self.assertFalse(api.extract_selected([0, 1], force=True)['ok'])
+
+    def test_direct_admission_does_not_launch_workers_for_text_files(self):
+        text = self.file('notes.txt')
+        with patch('threading.Thread', side_effect=AssertionError('Text needs no worker')):
+            self.assertEqual(self.app.start([text]), [])
+        self.assertFalse(self.app._pending_paths)
+
     def test_individual_files_keep_same_names_from_different_folders(self):
         first = self.file("one/report.pdf")
         second = self.file("two/report.PDF")
@@ -177,6 +201,35 @@ class AppInputTests(unittest.TestCase):
         self.assertEqual([row['path'] for row in navigation['shortcuts']],
                          [str(self.root / name) for name in ('documents', 'desktop', 'downloads')])
         self.assertEqual([row['path'] for row in navigation['drives']], ['C:\\', 'Z:\\'])
+
+    def test_expanding_a_tree_folder_does_not_navigate_or_change_background_work(self):
+        source = self.file('current/active.csv')
+        child = self.file('elsewhere/child/readme.txt')
+        self.file('elsewhere/second/nested/readme.txt')
+        self.file('elsewhere/not-a-document.exe')
+        self.app.folder, self.app.pdfs = source.parent, [source]
+        self.app._folders = [{'name': 'kept', 'path': str(source.parent)}]
+        self.app._pending_paths = {support.app_module._norm(source)}
+        self.app._background_queue = [(source, True)]
+        before = (self.app.folder, list(self.app.pdfs), list(self.app._folders), self.app.output_dir)
+        api = support.app_module.Api(self.app)
+        self.assertTrue(callable(getattr(api, 'list_folders', None)), 'Tree expansion must be read-only')
+        self.app.ui_save = Mock(side_effect=AssertionError('Expanding a tree must not navigate'))
+        result = api.list_folders(str(child.parent.parent))
+        self.assertTrue(result['ok'])
+        self.assertEqual([row['name'] for row in result['folders']], ['child', 'second'])
+        self.assertEqual((self.app.folder, self.app.pdfs, self.app._folders, self.app.output_dir), before)
+        self.assertEqual(self.app._pending_paths, {support.app_module._norm(source)})
+        self.assertEqual(self.app._background_queue, [(source, True)])
+
+    def test_invalid_tree_expansion_does_not_replace_the_current_folder(self):
+        source = self.file('current/report.pdf')
+        self.app.folder, self.app.pdfs = source.parent, [source]
+        api = support.app_module.Api(self.app)
+        self.assertTrue(callable(getattr(api, 'list_folders', None)))
+        for path in ('', 'relative', str(source), str(self.root / 'missing')):
+            self.assertFalse(api.list_folders(path)['ok'])
+        self.assertEqual(self.app.pdfs, [source])
 
 
 if __name__ == "__main__":
