@@ -1,6 +1,18 @@
 # 문서 추출기 구현 진행 기록
 
-## 진행 중 — 2026-10-24, 1.2.5 공통 확대·PPTX 대기와 보기 UX
+## 배포 준비 — 2026-10-24, 1.2.5 빠른 PPTX·공통 문서 UX
+
+**최종 UX·실제 EXE·artifact 감사 완료, 공개·설치는 다음 단계입니다.** production checkpoint `53576a8a533041737c9bf49764709e9048a7278e`, UI `ae821c660e87417a68d0c30d85de6309e4f537f8187f28acdaf5a6b2e4866e92`, frame `8d243f0d4d939d22b9694c22e50faa56ed380b9657cad3f7f9c8009ac6d93952`입니다. Setup243625715B/SHA`f68c965a2f1f3477d36429afa8ff73e99db8ab4454efdaa6f7bb818d805cc3ba`, main`8737bc4a10a3a793fabacdddbd0394db0e65e5def3216c6621a1740d6a7b3758`, worker`255045959bbec6819b4aa34dd633f9d2aea33c013d9fa23b2aaa7f17a6d1d652`입니다. DevCache `build-pins-1.2.5-ux-final.json`, `build-1.2.5-ux-artifacts-verification.json`이 최종 기준이며 이전 pins/감사·실패 기록은 baseline으로 보존합니다.
+
+합성71장17,565,219B의 실제 새 EXE 첫슬라이드는 실폭1306/iframe1347에서 그림decode·fonts·2RAF **1182ms**, 마지막장별도2024ms입니다. 숨긴WebView의test-onlyfocus조건이며OSpaint/실제사용자PPTX 보증과구분합니다. `frozen-1.2.5-presentation71-keyboard-v3/receipt.json`과 `pdf-ux-final`/`scan-ux-final`이 동일main/외부4자산에묶인 native3QA입니다. 전체312시험95.407초/독립UI11종/UX실입력·lightdark픽셀/45main·4worker·모델·고지·PPTX소스동봉 검사 PASS입니다. Ctrl+F현재문서검색·Esc dialog→검색→목록 우선순위와 추출중목록복귀뒤 실제MD저장도 확인했습니다. 소스/하네스는 동결합니다.
+
+남은 절차: 마지막 기록·하네스 commit→v1.2.5tag/sourcezip/공개3자산재다운로드와해시검증→표준HKCU설치→backup194개중프로그램2개를제외한사용자192개와책원본해시를정상앱실행전에대조→설치본private native검증→실제정상앱을열어놓기. 기존배포승인은유효하며 UAC/ACL/정책을변경하지않습니다. [상세 증거](./2026-10-24-reader-1.2.5.md).
+
+### 이전 후보 진행 기록
+
+**13:02 현재: 기술 후보 전수 검증 완료, 사용자 추가 UX 보완 진행. 1.2.5는 아직 공개·설치하지 않았습니다.** production checkpoint `421ee7d2758a4d436dd2b352a1b2636bb92a1334`, Setup243643634B/SHA`906427d23c530ebec93fb18ac22d1c4f6f8f42f116e2cc33b3f9c95026486548`, main`5a140dd5cc9ba2d9d3027d4fe553c361c600b0a85e4f21b2deb9f8c4c799d313`, worker`255045959bbec6819b4aa34dd633f9d2aea33c013d9fa23b2aaa7f17a6d1d652`입니다. DevCache `build-pins-1.2.5.json`, `build-1.2.5-artifacts-verification.json`(307실파일/45main/4worker/모델·고지·외부4자산 독립PASS), frozen `presentation71-final`/`pdf-release`/`scan-release`3영수증이 기준입니다. 합성71장17,565,219B native첫실폭1306/iframe1347의그림decode·fonts·2RAF **1214ms**, 마지막장별도2025ms입니다. hidden focus emulation조건이며OSpaint·사용자PPTX와구분합니다. UI10종/전체312시험105.571초PASS. 이전실패증거와중간빌드는보존했습니다.
+
+추가 UX검수에서 Enter/더블클릭·목록/X·현재문서추출·375/1336긴이름·다크는정상, Ctrl+F가앱검색을향하지않고Esc가viewer에서작동하지않는보완점을찾았습니다. `office_hwp_research`가 top+opaqueinner keyboardrelay/검색·dialog우선Esc→목록을TDD로보완중이며 `implementation_review`가독립검수, `ux_final`이실사용재검수합니다. **다음UI변경후위candidate는baseline이며새main/framefullbuild·자산4바인딩QA·artifact감사를갱신한후배포해야합니다.** backup194개중프로그램2개를제외한사용자192개는설치후정상앱을띄우기전해시를대조합니다. 새pins/receipt는기존파일을보존하고별도이름을쓰며v1.2.5tag는최종생산commit에한번만만듭니다. 표준설치·공개자산재다운로드/해시·정상앱실행까지기존사용자배포승인이유효합니다.
 
 사용자는 PPTX 첫 화면1–2초, 원본을 포함한 공통확대, 목록 복귀·현재문서 추출과 간결한 화면을 요청했습니다. root backend/preview checkpoint는 `96131b79a37e30fe6ee594ad126d3da3a820ee73`이며1.2.5는 아직 미공개·미설치입니다. LO 전체 변환은 첫 화면 목표를 충족하지 못해 공개 `@aiden0z/pptx-renderer`1.4.0의 수정 없는 번들로 PPTX만 먼저 표시·요청 장만 렌더하도록 통합했습니다. backend revision/ZIP/asset 경계, sandbox/CSP·nonce 전송, 공개API 검색·공통 확대와 고지·MPL대응소스 동봉까지 검수 중입니다. UIworker는 마지막 응답 경계와 실제 frozen Office71장 시험, debugger는 실제 App HTTP71장 속도를 담당합니다. root는 전체회귀/새빌드·정확한공개/설치 검증을 이어갑니다.
 
