@@ -131,6 +131,9 @@ def _relationships(archive, part: str) -> dict:
 def _save_asset(builder: _Builder, data: bytes, extension: str) -> str:
     if len(data) > MAX_PART_BYTES:
         raise DocumentExtractionError("그림 크기 제한을 초과했습니다.", "limit")
+    preview_asset = getattr(builder, 'preview_asset', None)
+    if preview_asset is not None:
+        return preview_asset(data, extension)
     extension = extension.lower()
     if not re.fullmatch(r"\.[a-z0-9]{1,10}", extension):
         extension = ".bin"
