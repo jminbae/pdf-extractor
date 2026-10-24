@@ -30,6 +30,9 @@ async function uiPresentationHostRegression(page, baseURL) {
     await p.locator('#search').fill('THIRD');await p.locator('#search-form').evaluate(n=>n.requestSubmit());
     await p.waitForFunction(()=>document.querySelector('#page-input').value==='3');
     await frame.waitForFunction(()=>document.body.innerText.includes('FAST_FRAME_THIRD_7391'));
+    await frame.waitForFunction(()=>document.querySelectorAll('[data-pptx-search-highlight]').length===1);
+    const searchDisplay=await p.locator('#location-note').textContent();
+    if(searchDisplay)throw new Error('UI_PRESENTATION_SEARCH_RESIZE_ERROR_RED '+searchDisplay);
     const nativeSearches=await p.evaluate(()=>window.__calls.filter(c=>c.name==='search_source'));
     if(nativeSearches.length)throw new Error('UI_PRESENTATION_HOST_NATIVE_SEARCH_RED');
     await p.locator('#compare-tab').click();await p.waitForSelector('#document [data-block-id]');
@@ -52,6 +55,6 @@ async function uiPresentationHostRegression(page, baseURL) {
     await p.locator('#reader-back').click();if(await p.locator('#presentation-frame').count())throw new Error('UI_PRESENTATION_HOST_DISPOSE_RED');
     const pageCalls=requests.filter(u=>new URL(u).pathname==='/page');
     if(pageCalls.length)throw new Error('UI_PRESENTATION_HOST_PDF_MIX_RED '+JSON.stringify(pageCalls));
-    return {ok:true,resultOnlySearch,first,zoomed,logical,wrong,dark,mobile,nativeSearches,pageCalls};
+    return {ok:true,resultOnlySearch,first,zoomed,searchDisplay,logical,wrong,dark,mobile,nativeSearches,pageCalls};
   } finally {await context.close();}
 }

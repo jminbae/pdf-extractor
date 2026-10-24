@@ -2,7 +2,7 @@
 import {PptxViewer, parseZipLazyMedia, buildPresentation, buildTextIndex, RECOMMENDED_ZIP_LIMITS} from '/presentation-vendor.js';
 
 const CHANNEL='pubnexus.presentation.v1',nonce=location.hash.slice(1),viewport=document.getElementById('viewport'),stage=document.getElementById('stage');
-let alive=true,revision=null,parentOrigin='*',viewer=null,model=null,handle=null,highlightHandle=null,activeHighlight=null,renderGeneration=0,pageIndex=0,zoom=100,searchEpoch=0,results=[],readySent=false,resizeFrame=0;
+let alive=true,revision=null,parentOrigin='*',viewer=null,model=null,handle=null,highlightHandle=null,activeHighlight=null,renderGeneration=0,renderedViewportWidth=0,pageIndex=0,zoom=100,searchEpoch=0,results=[],readySent=false,resizeFrame=0;
 const warnings=new Set();
 const safeError=e=>String(e?.message||e||'슬라이드를 열지 못했습니다.').slice(0,1200);
 const post=(type,data={})=>{if(alive)parent.postMessage({channel:CHANNEL,type,nonce,revision,...data},parentOrigin);};
@@ -25,7 +25,8 @@ async function render(index,{point,keepAnchor=false}={}){
   if(!validPage(index))throw new Error('슬라이드 번호가 올바르지 않습니다.');
   const anchor=keepAnchor?anchorAt(point):null,generation=++renderGeneration,started=performance.now();
   pageIndex=index;disposeHandle();
-  const fit=Math.max(1,viewport.clientWidth-26)/model.width,scale=fit*zoom/100;
+  renderedViewportWidth=viewport.clientWidth;
+  const fit=Math.max(1,renderedViewportWidth-26)/model.width,scale=fit*zoom/100;
   if(model.width*scale*model.height*scale>64_000_000)throw new Error('확대된 슬라이드가 표시 한도를 넘었습니다.');
   const slot=document.createElement('div');slot.className='slide-slot';slot.dataset.slideIndex=String(index);slot.style.width=model.width*scale+'px';slot.style.height=model.height*scale+'px';stage.append(slot);
   const current=viewer.renderSlideToContainer(index,slot,scale);if(!current)throw new Error('슬라이드를 표시하지 못했습니다.');handle=current;
@@ -88,5 +89,5 @@ async function receive(event){
 window.addEventListener('message',receive);
 viewport.addEventListener('wheel',event=>{if(!event.ctrlKey)return;event.preventDefault();if(!viewer||!event.deltaY)return;const r=viewport.getBoundingClientRect();post('wheel',{delta:event.deltaY<0?1:-1,point:{x:event.clientX-r.left,y:event.clientY-r.top},trusted:event.isTrusted,prevented:event.defaultPrevented});},{passive:false});
 viewport.addEventListener('click',event=>{if(event.target.closest('a')){event.preventDefault();event.stopImmediatePropagation();}if(!handle||window.getSelection()?.toString())return;const r=handle.element.getBoundingClientRect();const x=(event.clientX-r.left)/r.width*model.width,y=(event.clientY-r.top)/r.height*model.height;if(x<0||y<0||x>model.width||y>model.height)return;const entries=buildTextIndex(model).filter(entry=>entry.slideIndex===pageIndex&&x>=entry.bounds.x&&x<=entry.bounds.x+entry.bounds.w&&y>=entry.bounds.y&&y<=entry.bounds.y+entry.bounds.h);post('click',{page:pageIndex+1,x,y,entries:entries.map(entry=>({text:entry.text,bounds:entry.bounds,nodeId:entry.nodeId}))});},true);
-const observer=new ResizeObserver(()=>{if(!viewer||!readySent||resizeFrame)return;resizeFrame=requestAnimationFrame(()=>{resizeFrame=0;if(alive)render(pageIndex,{keepAnchor:true}).catch(error=>{if(safeError(error)!=='superseded')post('error',{error:safeError(error)});});});});observer.observe(viewport);
+const observer=new ResizeObserver(()=>{if(!viewer||!readySent||resizeFrame||viewport.clientWidth===renderedViewportWidth)return;resizeFrame=requestAnimationFrame(()=>{resizeFrame=0;if(alive&&viewport.clientWidth!==renderedViewportWidth)render(pageIndex,{keepAnchor:true}).catch(error=>{if(safeError(error)!=='superseded')post('error',{error:safeError(error)});});});});observer.observe(viewport);
 window.addEventListener('pagehide',destroy);

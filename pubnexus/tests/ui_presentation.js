@@ -40,6 +40,13 @@ async function uiPresentationRegression(page, baseURL) {
     await p.waitForFunction(()=>window.__packets.some(m=>m.type==='response'&&m.id==='highlight-third'&&m.ok));
     const highlighted=await frame.locator('[data-pptx-search-highlight]').count();
     if(!highlighted||!(await frame.locator('body').innerText()).includes('FAST_FRAME_THIRD_7391'))throw new Error('UI_PRESENTATION_HIGHLIGHT_RED');
+    const beforeResize=await p.evaluate(()=>window.__packets.filter(m=>m.type==='rendered').length);
+    await p.locator('#host').evaluate(n=>n.style.height='620px');await p.waitForTimeout(100);
+    const heightOnly=await p.evaluate(()=>window.__packets.filter(m=>m.type==='rendered').length);
+    if(heightOnly!==beforeResize)throw new Error('UI_PRESENTATION_HEIGHT_RESIZE_RERENDERS_RED '+JSON.stringify({beforeResize,heightOnly}));
+    await p.locator('#host').evaluate(n=>n.style.width='800px');
+    await p.waitForFunction(count=>window.__packets.filter(m=>m.type==='rendered').length>count,heightOnly);
+    if(await frame.locator('[data-pptx-search-highlight]').count()!==1)throw new Error('UI_PRESENTATION_WIDTH_RESIZE_LOSES_HIGHLIGHT_RED');
     await p.evaluate(()=>{window.__send('go',{page:1},'burst-first');window.__send('go',{page:2},'burst-second');});
     await p.waitForFunction(()=>window.__packets.some(m=>m.id==='burst-second'&&m.ok));
     if(!(await frame.locator('body').innerText()).includes('FAST_FRAME_SECOND_7391'))throw new Error('UI_PRESENTATION_NAV_ORDER_RED');
