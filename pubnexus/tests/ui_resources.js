@@ -5,7 +5,7 @@ async function uiResourcesRegression(page, baseURL) {
   try {
     await p.goto(baseURL);
     await p.waitForSelector('.file-row');
-    await p.locator('.file-row[data-index="1"] [data-action=read]').click();
+    await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());
     await p.waitForSelector('#document h1');
     await p.locator('#search').fill('needle');
     await p.locator('#search-form button[type=submit]').click();

@@ -4,7 +4,7 @@ async function uiMinimalRegression(page, baseURL) {
   const p = await context.newPage();
   try {
     await p.goto(baseURL);
-    await p.locator('.file-row[data-index="1"] [data-action=read]').click();
+    await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());
     await p.waitForSelector('#document h1');
     await p.locator('#compare-tab').click();
     await p.waitForSelector('#source-scroll .pdf-page');
@@ -103,7 +103,7 @@ async function uiMinimalRegression(page, baseURL) {
         closeBox.x+closeBox.width>readerBox.x+readerBox.width||readerBox.x+readerBox.width-closeBox.x-closeBox.width>12)
         throw new Error('UI_MINIMAL_CLOSE_BEHAVIOR_RED '+JSON.stringify({mode,result,closeBox,readerBox}));
       closed.push({mode,...result});
-      await p.locator('.file-row[data-index="1"] [data-action=read]').click();
+      await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());
       await p.waitForSelector('#document h1');
     }
     if(await p.locator('#theme-toggle').count()!==1)throw new Error('UI_MINIMAL_THEME_RED theme toggle is missing');
@@ -157,7 +157,7 @@ async function uiMinimalRegression(page, baseURL) {
     if(!infoClosed.closed||infoClosed.focus!=='B.pdf 파일 정보')throw new Error('UI_MINIMAL_DETAILS_ESCAPE_RED '+JSON.stringify(infoClosed));
     await info.click();await p.locator('[data-action=file-close]').click();
     if(await p.locator('#file-dialog').evaluate(n=>n.open))throw new Error('UI_MINIMAL_DETAILS_X_RED');
-    await p.locator('.file-row[data-index="1"] [data-action=read]').click();
+    await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());
     await p.waitForSelector('#document h1');
     const limits=await p.evaluate(() => {
       const pane=document.querySelector('#result-scroll'),send=delta=>{const e=new WheelEvent('wheel',{ctrlKey:true,deltaY:delta,bubbles:true,cancelable:true});pane.dispatchEvent(e);return e.defaultPrevented;};

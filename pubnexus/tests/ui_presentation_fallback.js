@@ -7,7 +7,7 @@ async function uiPresentationFallbackRegression(page,baseURL){
       return route.fulfill({json:{source_kind:'presentation',source_ready:true,pages:[[960,720],[960,720],[960,720]],source_revision:'fixture-source-v1',source_data_url:'/presentation-data?p=1&r=fixture-source-v1',source_frame_url:'/presentation-frame',source_unit_label:'슬라이드'}});});
     await p.goto(baseURL);await p.waitForSelector('.file-row');const dataStarted=p.waitForRequest(r=>r.url().includes('/presentation-data?'));await p.locator('.file-row[data-index="1"]').dblclick();await dataStarted;
     await p.waitForFunction(()=>document.querySelector('#source-pdf-fallback')&&!document.querySelector('#source-pdf-fallback').hidden);
-    await p.locator('#source-more summary').click();await p.locator('#source-pdf-fallback').click();await p.waitForTimeout(100);
+    await p.locator('#source-pdf-fallback').click();await p.waitForTimeout(100);
     const during={frames:await p.locator('#presentation-frame').count(),dataRequests,note:await p.locator('#page-note').textContent()};
     if(during.frames||during.dataRequests!==1)throw new Error('UI_PRESENTATION_FALLBACK_RESTARTS_OLD_FRAME_RED '+JSON.stringify(during));
     releasePdf();await p.waitForSelector('.pdf-page');releaseData();await p.waitForTimeout(100);

@@ -4,13 +4,13 @@ async function uiPresentationHostRegression(page, baseURL) {
   const text='FAST_FRAME_FIRST_7391',revision='fixture-source-v1';
   try {
     await p.route('**/open?*',async route=>{const u=new URL(route.request().url());if(u.searchParams.get('renderer')==='pdf')return route.continue();
-      const base={name:'Synthetic.pptx',path:'synthetic/Synthetic.pptx',revision:'saved-B-v1'};
+      const base={name:'Synthetic.pptx',path:u.searchParams.get('expected_path'),revision:'saved-B-v1'};
       await route.fulfill({json:u.searchParams.get('mode')==='result'?{...base,doc:{extracted:true,html:'<h1>Slide MD</h1><p data-block-id="b-old">'+text+'</p>',md_text:'# Slide MD\n\n'+text},source_ready:false,pages:[]}:
         {...base,source_kind:'presentation',source_ready:true,pages:[[960,720],[960,720],[960,720]],source_revision:revision,source_data_url:'/presentation-data?p=1&r='+revision,source_frame_url:'/presentation-frame',renderer_version:'1.4.0',source_unit_label:'슬라이드',source_label:'원본 슬라이드'}});});
     await p.route('**/document-map?*',async route=>{const u=new URL(route.request().url());
       await route.fulfill({json:{revision:'saved-B-v1',source_kind:'presentation',source_revision:revision,coordinate_space:'presentation_intrinsic_pixels',pages:[{width:960,height:720}],blocks:[{id:'b-old',text,slide:0,locations:[],logical_source:{slide:0,shape:2,paragraph:0}}]}});});
     await p.goto(baseURL);await p.waitForSelector('.file-row');
-    await p.locator('.file-row[data-index="1"] [data-action=read]').click();await p.waitForSelector('#document [data-block-id]');
+    await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());await p.waitForSelector('#document [data-block-id]');
     await p.locator('#search').fill('FIRST');await p.locator('#search-form').evaluate(n=>n.requestSubmit());
     await p.waitForFunction(()=>window.__calls.some(c=>c.name==='search'));
     const resultOnlySearch=await p.evaluate(()=>window.__calls.find(c=>c.name==='search'));

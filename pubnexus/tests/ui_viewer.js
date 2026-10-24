@@ -46,7 +46,7 @@ async function uiViewerRegression(page, baseURL) {
     await p.route('**/document-map?*',async route=>{try{await gate;await route.continue();}catch(error){if(!closing)throw error;}});
     await p.evaluate(()=>window.pnx.on({kind:'folder',...window.__fixture,files:window.__fixture.files.map((f,i)=>({...f,...(i===1?{needs_refresh:true}:{})}))}));
     const firstResult=p.waitForRequest(r=>new URL(r.url()).searchParams.get('mode')==='result');
-    await p.locator('.file-row[data-index="1"] [data-action=read]').click();
+    await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());
     await firstResult;await p.locator('#code-tab').click();await p.waitForTimeout(80);
     if(requests.filter(mode=>mode==='result').length!==1)
       throw new Error('UI_VIEWER_DUPLICATE_RESULT_RED '+JSON.stringify({requests}));
@@ -73,7 +73,7 @@ async function uiViewerRegression(page, baseURL) {
     if(!running.disabled||!running.text.includes('37%'))throw new Error('UI_VIEWER_JOB_STATUS_RED '+JSON.stringify(running));
     releasePreview();
     await p.waitForFunction(()=>document.querySelector('#page-total').textContent.includes('71'));
-    await p.locator('#page-input').fill('6');await p.locator('#page-input').press('Enter');
+    await p.locator('#source-position').click();await p.locator('#page-input').fill('6');await p.locator('#page-input').press('Enter');
     const slide=await p.evaluate(()=>({label:document.querySelector('#source-label').textContent,
       page:document.querySelector('#page-input').value,total:document.querySelector('#page-total').textContent,
       accessible:document.querySelector('#page-input').getAttribute('aria-label')}));

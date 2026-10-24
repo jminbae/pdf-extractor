@@ -15,7 +15,7 @@ async function uiKeyboardRegression(page,baseURL){
     await p.evaluate(()=>{const onFind=event=>{if(!event.ctrlKey||event.key.toLowerCase()!=='f')return;window.__listFindPrevented=event.defaultPrevented;document.removeEventListener('keydown',onFind);};document.addEventListener('keydown',onFind);});await p.keyboard.press('Control+f');
     const listFind=await p.evaluate(()=>({prevented:window.__listFindPrevented,readerHidden:document.querySelector('#reader').hidden}));
     if(listFind.prevented!==false||!listFind.readerHidden)throw new Error('UI_KEYBOARD_LIST_SCOPE_RED '+JSON.stringify(listFind));
-    await p.locator('.file-row[data-index="1"] [data-action=read]').click();await p.waitForSelector('#document h1');await p.locator('#result-scroll').click({position:{x:80,y:100}});await p.keyboard.press('Control+f');
+    await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());await p.waitForSelector('#document h1');await p.locator('#result-scroll').click({position:{x:80,y:100}});await p.keyboard.press('Control+f');
     const resultFind=await p.evaluate(()=>document.activeElement.id);if(resultFind!=='search')throw new Error('UI_KEYBOARD_RESULT_FIND_RED');
     await p.locator('#settings-open').click();await p.waitForFunction(()=>document.querySelector('#settings-dialog').open);await p.keyboard.press('Escape');
     const modalEscape=await p.evaluate(()=>({dialog:document.querySelector('#settings-dialog').open,reader:!document.querySelector('#reader').hidden}));

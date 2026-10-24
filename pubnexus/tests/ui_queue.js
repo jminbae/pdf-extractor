@@ -5,7 +5,8 @@ async function uiQueueRegression(page, baseURL) {
   try {
     await p.goto(baseURL);
     await p.waitForSelector('.file-row');
-    await p.locator('.file-row[data-index="1"] [data-action=read]').click();
+    await p.locator('[data-check="2"]').check();
+    await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());
     await p.waitForSelector('#document h1');
     await p.evaluate(() => {
       window.__queueMode=true;
@@ -19,10 +20,8 @@ async function uiQueueRegression(page, baseURL) {
     const before = await p.evaluate(() => ({disabled:document.querySelector('#extract').disabled,
       label:document.querySelector('#extract').textContent,query:document.querySelector('#search').value,
       scroll:document.querySelector('#result-scroll').scrollTop}));
-    if(before.disabled||!before.label.includes('대기열에 추가'))throw new Error('UI_QUEUE_RED '+JSON.stringify(before));
-    // List action is intentionally hidden in a reader. This seam tests queue event reconciliation;
-    // the visible current-document extraction action is covered by ui_viewer.js.
-    await p.evaluate(() => document.querySelector('#extract').click());
+    if(before.disabled||before.label!=='MD 추출')throw new Error('UI_QUEUE_RED '+JSON.stringify(before));
+    await p.locator('#extract').click();
     await p.waitForFunction(() => window.__calls.some(c=>c.name==='extract_selected'));
     const sent = await p.evaluate(() => window.__calls.find(c=>c.name==='extract_selected').args);
     await p.evaluate(() => {
@@ -41,6 +40,8 @@ async function uiQueueRegression(page, baseURL) {
       {...window.__fixture.files[0],status:'running',progress_pct:4,progress_stage:'문서 구조 추출',progress_page:1,progress_pages:30},window.__fixture.files[1],
       {...window.__fixture.files[2],status:'queued'},
       {name:'D.pdf',path:window.__fixture.path+'/D.pdf',done:false,md_ready:false,status:'ready'}],path:window.__fixture.path}));
+    // The new file is never selected automatically. This queue seam explicitly selects it.
+    await p.evaluate(() => document.querySelector('[data-check="3"]').click());
     const afterAdd = await p.evaluate(() => ({calls:window.__calls.filter(c=>c.name==='extract_selected').length,
       disabled:document.querySelector('#extract').disabled,label:document.querySelector('#extract').textContent}));
     await p.evaluate(() => window.__rejectNext=true);
@@ -59,7 +60,7 @@ async function uiQueueRegression(page, baseURL) {
       readerReset:afterQueue.query!==before.query||afterQueue.scroll!==before.scroll||!afterQueue.readerVisible,
       activeProgressReset:!afterQueue.activePct.includes('4%'),
       queueNotShown:afterQueue.pendingStatus!=='queued',duplicateAllowed:!afterQueue.duplicateDisabled||callsAfterDuplicate!==1,
-      autoQueuedFileAddition:afterAdd.calls!==1,newFileCannotQueue:afterAdd.disabled||!afterAdd.label.includes('대기열에 추가'),
+      autoQueuedFileAddition:afterAdd.calls!==1,newFileCannotQueue:afterAdd.disabled||afterAdd.label!=='MD 추출',
       rejectedInflightStuck:!rejectedCleared,
       failedInflightStuck:failedRetry.status!=='failed'||!failedRetry.retryEnabled||!failedRetry.mdDisabled,
       failureResetsReader:failedRetry.query!==before.query||failedRetry.scroll!==before.scroll,

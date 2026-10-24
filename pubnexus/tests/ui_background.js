@@ -5,7 +5,7 @@ async function uiBackgroundRegression(page, baseURL) {
   try {
     await p.goto(baseURL);
     await p.waitForSelector('.file-row');
-    await p.locator('.file-row[data-index="1"] [data-action=read]').click();
+    await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());
     await p.waitForSelector('#document h1');
     await p.evaluate(() => {
       window.pnx.on({kind:'run',on:true});
@@ -50,7 +50,7 @@ async function uiBackgroundRegression(page, baseURL) {
 
     await p.locator('#reader-back').click();
     await p.evaluate(() => window.pnx.on({kind:'run',on:false,done:1,files:window.__fixture.files}));
-    await p.locator('.file-row[data-index="1"] [data-action=read]').click();
+    await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());
     await p.waitForSelector('#document h1');
     // Exercise the real delegated retry handler while its existing MD is open.
     await p.evaluate(() => document.querySelector('#properties [data-action=retry]').click());

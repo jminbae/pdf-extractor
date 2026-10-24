@@ -128,8 +128,8 @@ try {
     ws.addEventListener('message',event=>{const message=JSON.parse(String(event.data));if(message.method==='Network.requestWillBeSent')officeRequests.push(message.params.request.url);});
     const previewBegan=Date.now();
     await evaluate("document.querySelector('.file-row[data-index=\"0\"] .filename').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));true");
-    const preparing=await evaluate("({reader:!document.querySelector('#reader').hidden,back:document.querySelector('#reader-back').textContent,extractEnabled:!document.querySelector('#reader-extract').disabled,globalHidden:document.querySelector('#extract').hidden})");
-    if(!preparing.reader||!preparing.back.includes('목록')||!preparing.extractEnabled||!preparing.globalHidden)throw Error('Office preparation blocked reader actions: '+JSON.stringify(preparing));
+    const preparing=await evaluate("({reader:!document.querySelector('#reader').hidden,back:document.querySelector('#reader-back').textContent,extractEnabled:!document.querySelector('#reader-extract').disabled,globalVisible:!document.querySelector('#extract').hidden,globalLabel:document.querySelector('#extract').textContent})");
+    if(!preparing.reader||!preparing.back.includes('목록')||!preparing.extractEnabled||!preparing.globalVisible||preparing.globalLabel!=='MD 추출')throw Error('Office preparation blocked reader actions: '+JSON.stringify(preparing));
     const slideCount=cfg.office_pages||3;
     await until(()=>evaluate(`(()=>{const frame=document.querySelector('#presentation-frame'),metrics=frame?JSON.parse(frame.dataset.metrics||'{}'):null;return frame?.dataset.ready==='true'&&Number.isFinite(metrics.render_width)&&metrics.render_width>=frame.getBoundingClientRect().width*.8;})()||document.querySelectorAll('#source-scroll .pdf-page').length===${slideCount}`),'actual PPTX source ready');
     const fastPresentation=await evaluate("!!document.querySelector('#presentation-frame')");
@@ -265,7 +265,7 @@ try {
   if(documentWorkers.length!==2||new Set(documentWorkers.map(item=>item.pid)).size!==2)throw Error('Each document did not receive a separate extraction process: '+JSON.stringify(documentWorkers));
   if(cfg.background_book&&finished.files[2].md_ready)throw Error('The unprocessed book must not have a Markdown result');
   if(cfg.scan_mode&&(finished.files[0].status!=='partial'||finished.files[1].status!=='complete'||!finished.files[0].warnings.some(w=>/OCR|오인식|인식/.test(String(w)))))throw Error('Scan must preserve its partial status and OCR warning');
-  const labels=cfg.scan_mode?['확인 필요','저장 완료']:['저장 완료','저장 완료'];
+  const labels=['저장 완료','저장 완료'];
   await until(()=>evaluate(`(()=>{const nodes=Array.from(document.querySelectorAll('.file-row .status'));const expected=${JSON.stringify(labels)};return nodes.length===${cfg.names.length}&&nodes.slice(0,2).every((node,i)=>node.textContent.includes(expected[i]));})()`),'rendered saved rows');
   await optionalScreenshot(cfg.listShot);
   await evaluate("document.querySelector('[data-action=read][data-index=\"1\"]').click();true");

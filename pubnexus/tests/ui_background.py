@@ -6,6 +6,7 @@ fixtures; no App instance, document extractor, user file or settings is opened.
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import io
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -25,6 +26,8 @@ def main():
         root = Path(temporary)
         presentation_bytes = None
         long_presentation_bytes = None
+        cropped_presentation_bytes = None
+        presentation_image_sha256 = None
         if args.presentation_vendor:
             from pptx import Presentation
             from pptx.util import Inches, Pt
@@ -33,6 +36,7 @@ def main():
             ImageDraw.Draw(picture).rectangle((400, 0, 799, 449), fill="#ebaa35")
             image_bytes = io.BytesIO()
             picture.save(image_bytes, format="JPEG", quality=92)
+            presentation_image_sha256 = hashlib.sha256(image_bytes.getvalue()).hexdigest()
             deck = Presentation()
             for number, marker in enumerate(("FIRST", "SECOND", "THIRD"), 1):
                 slide = deck.slides.add_slide(deck.slide_layouts[6])
@@ -48,6 +52,16 @@ def main():
                 slide.shapes.add_picture(io.BytesIO(image_bytes.getvalue()), Inches(1), Inches(2), width=Inches(7))
             deck.save(root / "long-frame-deck.pptx")
             long_presentation_bytes = (root / "long-frame-deck.pptx").read_bytes()
+            cropped = Presentation()
+            slide = cropped.slides.add_slide(cropped.slide_layouts[6])
+            slide.shapes.add_textbox(Inches(.5), Inches(.3), Inches(9), Inches(1)).text_frame.text = "CROP_ROTATION_IDENTITY"
+            first = slide.shapes.add_picture(io.BytesIO(image_bytes.getvalue()), Inches(1), Inches(2), width=Inches(3))
+            first.crop_left = .5
+            second = slide.shapes.add_picture(io.BytesIO(image_bytes.getvalue()), Inches(5), Inches(2), width=Inches(3))
+            second.crop_right = .25
+            second.rotation = 25
+            cropped.save(root / "cropped-frame-deck.pptx")
+            cropped_presentation_bytes = (root / "cropped-frame-deck.pptx").read_bytes()
         files = [{"name": "A.pdf", "path": str(root / "A.pdf"), "done": False, "md_ready": False, "status": "ready", "pages": 30},
                  {"name": "B.pdf", "path": str(root / "B.pdf"), "done": True, "md_ready": True, "status": "complete", "pages": 30,
                   "markdown": str(root / "Markdown" / "B.md")},
@@ -80,6 +94,8 @@ return Promise.resolve({ok:true,n:1});}})};</script>""".replace("STATE", json.du
                     data, mime = INDEX_HTML.replace("</head>", bootstrap + "</head>"), "text/html; charset=utf-8"
                 elif url.path == "/files":
                     data, mime = json.dumps(state), "application/json"
+                elif url.path == "/fixture-image-identity":
+                    data, mime = json.dumps({"sha256": presentation_image_sha256}), "application/json"
                 elif url.path == "/open":
                     index = int(parse_qs(url.query).get("p", [0])[0])
                     payload = {"key": 1, "revision": "saved-B-v1", "name": files[index]["name"], "pages": [[400,500]] * 30,
@@ -95,8 +111,8 @@ return Promise.resolve({ok:true,n:1});}})};</script>""".replace("STATE", json.du
                         "blocks": [{"id":"b-old", "mapping":"exact", "locations":[{"page":0,"bbox":[20,30,100,60],"width":400,"height":500}]}]}), "application/json"
                 elif url.path == "/page":
                     data, mime = '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="500"><rect width="400" height="500" fill="white"/></svg>', "image/svg+xml"
-                elif url.path in ("/workflow-regression", "/folders-regression", "/reader-actions-regression", "/presentation-continuous-regression"):
-                    filename = {"/workflow-regression":"ui_workflow.js", "/folders-regression":"ui_folders.js", "/reader-actions-regression":"ui_reader_actions.js", "/presentation-continuous-regression":"ui_presentation_continuous.js"}[url.path]
+                elif url.path in ("/workflow-regression", "/folders-regression", "/reader-actions-regression", "/presentation-continuous-regression", "/explorer-regression", "/presentation-images-regression"):
+                    filename = {"/workflow-regression":"ui_workflow.js", "/folders-regression":"ui_folders.js", "/reader-actions-regression":"ui_reader_actions.js", "/presentation-continuous-regression":"ui_presentation_continuous.js", "/explorer-regression":"ui_explorer.js", "/presentation-images-regression":"ui_presentation_images.js"}[url.path]
                     data, mime = Path(__file__).with_name(filename).read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
                 elif url.path == "/regression":
                     data, mime = Path(__file__).with_suffix(".js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
@@ -131,6 +147,8 @@ return Promise.resolve({ok:true,n:1});}})};</script>""".replace("STATE", json.du
                     data, mime = '<!doctype html><html><body style="margin:0"><div id="host" style="width:1000px;height:700px"></div></body></html>', "text/html; charset=utf-8"
                 elif url.path == "/presentation-long-data" and long_presentation_bytes is not None:
                     data, mime = long_presentation_bytes, "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                elif url.path == "/presentation-cropped-data" and cropped_presentation_bytes is not None:
+                    data, mime = cropped_presentation_bytes, "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 elif url.path == "/presentation-data" and presentation_bytes is not None:
                     if parse_qs(url.query).get("r", [""])[0] != "fixture-source-v1":
                         self.send_error(409)

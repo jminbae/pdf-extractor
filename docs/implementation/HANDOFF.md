@@ -1,20 +1,20 @@
-# 문서 추출기 구현 진행 기록
+# 문서 뷰어 구현 진행 기록
 
-## 진행 중 — 2026-10-24, 1.2.7 빠른 문서 뷰어·3패널 탐색기
+## 진행 중 — 2026-10-24, 1.2.7 빠른 뷰어·3패널 탐색기
 
-최신 화면 지시: **빠른 원본 미리보기가 주 기능이고 MD는 부수 기능입니다.** 기본 목록의 저장 완료/대기/추출 상태를 모두 없애고 상단 메뉴 `MD 추출`·`MD 보기`만 보조 버튼으로 둡니다. 52545 개발 데모를 보여드린 뒤 왼쪽 탐색기/문서 영역이 우아하지 않다는 피드백을 받았습니다. 단색 SVG·정돈된 트리·기본 접힌 이 PC·도구줄 축소·문서 여백을 고치는 중이며, 이전 1040 화면을 최종 UI로 간주하지 않습니다. 사용자 데모 `http://127.0.0.1:52545/`는 private TEMP 사본만 사용하고 추가 QA와 분리해 유지합니다.
+최신 기준은 **빠른 원본 뷰어가 주 기능, Markdown 추출은 부수 기능**입니다. 폴더 트리 / 문서 리스트·썸네일 / 원본 미리보기를 정돈하고, 저장 완료·대기 등 기본 목록 상태를 없앴습니다. `MD 추출`·`MD 보기`는 상단 직접 버튼이며 삼점 메뉴는 드문 파일정보 동작만 맡습니다. TXT·MD는 추가 추출하지 않습니다. 사용자 데모52545/62724는 별도 private TEMP 사본을 사용하며 유지합니다. 최신 실제 통합 데모59251는 worker의 HWP 대조 후 공개합니다.
 
-백엔드 첫 checkpoint는 `5469476cb58ce55398f063611a887295eb9b97ab`입니다. 이후 선택 요청 취소 registry(2개 실행/16개 client, 같은 세대 공유/이전 세대 거절), PDF 페이지 크기 재사용/실패 시 원자 복구/표시 전 불필요 전체 SHA 계산 제거를 추가했고 독립35개 PASS입니다. 실제396쪽 PDF 메타데이터 첫119ms, 재열기0.19~0.53ms로 측정했습니다(그림/paint 아님). XLSX는 공식 openpyxl ExcelReader·WorkSheetParser를 재사용해 dimension 없는 정상 파일의 전체 XML 선행 읽기를 제거했습니다. 5MB·5만행×8열 첫 창은 새 프로세스 334/340/344ms, warm14.3ms이며 수식 원문과 저장된 값 모두 보존합니다. 새 Rust 의존성은 비교 후 추가하지 않았습니다. 이전의1.86초 결과는 최적화 전 baseline입니다.
+안전 checkpoint는 `5469476`(native 창/선택 원본), `4dc9d51`(오래된 요청 취소/PDF 재열기 최적화), `f7a5525`(기존 MD 직접 보기/HWP 원본 쪽 표시)입니다. 최신 UI의 PDF cache lease·표시 방식 이력 복원, 원본 그림 위치 연결, 파일정보의 숨은 원본 표시범위를 최종 검수하고 있습니다. 새 생성물은 DevCache 또는 소유 TEMP에만 둡니다.
 
-실제 App 브라우저 진단 snapshot에서 DOCX230ms, TXT64ms, 실제13쪽 PDF133ms, 실제70MB42장 PPTX first-visible930ms/현재 viewport 모든 그림 decode943ms였습니다. 가까운1·2·3장만 mount하며 720px overflow0입니다. `explorer-actual-1.2.7-20261024-162246/first-viewport.json`은 개발 서버 증거이고, 이후 다듬는 소스/최종 EXE 증명으로 확대하지 않습니다. 시험용 TEMP 두 경로(`tmphhkxbxpq`, `native-preview-test-c1eggwld`) 삭제는 자동 승인 정책 차단으로 남겨뒀으며 우회하지 않았습니다.
+백엔드는 원자 선택 Path+expected_path, viewer 세대별 취소, 유한 metadata/image 캐시를 사용합니다. PDF는 전체 SHA 선행 계산 없이 원본을 열고 페이지 크기를 재사용합니다. XLSX는 공식 openpyxl ExcelReader/WorkSheetParser로 요청 셀 창만 읽어 dimension 없는 파일의 전체 선행 스캔을 제거했습니다. DOCX·ODF·EPUB 내용, RTF(striprtf0.0.34), HTML·EML·MBOX는 검증된 기존 공개 파서/어댑터를 사용합니다. HWP/HWPX는 동봉 rHWP 공식 render-tree/export-png/export-text로 정확한 쪽 렌더링·검색을 수행합니다. Office·한글 설치에 의존하지 않는 기본 경로입니다.
 
-현재 공개·설치본은 여전히 **1.2.6**입니다. 1.2.7은 미배포이며 아래 수정·검증 중입니다. 최신 사용자 우선순위는 Office/한글 설치에 의존하지 않는 빠른 원문 뷰어입니다. 좌측 폴더 트리 / 가운데 리스트·썸네일 / 우측 원본→MD 전환, 탐색기식 위치 표시와 현재 폴더 검색, 단일 클릭·키보드 이동·마우스 뒤로, 화면에 보이는 페이지/슬라이드부터 연속으로 채우는 흐름을 구현합니다. TXT/MD는 열기·검색만 제공하고 추출 대상에서 제외합니다.
+개발 App의 실제70MB42장 PPTX first-visible930ms/현재 viewport decode943ms, 실제13쪽 PDF133ms, 합성 DOCX230ms/TXT64ms를 확인했습니다. 396쪽 PDF metadata 첫119ms/warm0.19~0.53ms, 5MB·5만행 XLSX 새 프로세스334/340/344ms, 12쪽HWPX metadata+PNG667ms/warm12ms입니다. API·개발 브라우저 증거이며 최종 EXE/OS paint/모든 파일 성능 보증과 구분합니다. 상세는 [1.2.7 기록](./2026-10-24-viewer-1.2.7.md)과 DevCache 영수증에 있습니다.
 
-백엔드: TXT 원문·Unicode 검색, 읽기 전용 폴더 지연 확장, PPTX cNvPrId/원그림 SHA·crop·OCR 좌표 복구, DOCX 내용 창·XLSX 셀 창·논리 검색·원본 그림 캐시, PDF/패키지 내장 썸네일을 구현했습니다. 목록 변경 중 다른 파일을 빌리는 P1은 선택 Path 원자 캡처와 expected_path 검증으로 원본·결과·map·검색·그림 URL에 묶었습니다. 실제42장 그림65개/OCR1444문단 출처는 8개 검증 PASS지만 일반 OCR 수식 오류는 별도 미해결입니다. 공개 Pix2Text MFR 모델로 단일 실제 수식은 정확히 읽혔고 복합 그림 전체 입력은 실패했습니다. 수식 검출→crop 후 인식 검증과 안전한 통합을 계속해야 합니다. 어떤 수식도 하드코딩하거나 실패 텍스트를 정상으로 숨기지 않습니다.
+현재 공개·설치본은 **1.2.6**입니다. 1.2.7 최종 전체 Python/UI/실제 EXE 시험→고정 source/build/license 감사→tag 1회/공개3자산 재다운로드→표준 CURRENTUSER 설치→고정 bundle/사용자자료 전수대조→설치본 QA/실제 업데이트 조회를 이어갑니다. 새 소스 tag나 배포는 아직 하지 않았습니다. 기존1.2.6 tag·pins·rollback은 불변입니다.
 
-속도는 OS 화면 표시와 구분합니다. 고정 native 소스 SHA6575bab3의 합성 자료 백엔드 첫 내용 창: DOCX36KB 106ms/4.6MB 253ms, XLSX15KB 855ms/5MB·5만행×8열 1861ms입니다. 생성 직후 OS 디스크 캐시는 warm이며 앱 새 Python 프로세스 기준입니다. 재열기 중앙값은 DOCX9/184ms, XLSX17/1085ms이고 최종 UI·설치본 성능 증명이 아닙니다. 이전 slice의 낮은 수치를 최종 보장으로 쓰지 않습니다. `cache_root/260725 PDF 추출/native-preview-benchmark/receipt.json`에 원본 지문과 측정 조건이 있습니다. dimension 없는 XLSX는 openpyxl 초기 차원 추정이 전체 XML을 훑는 병목을 프로파일로 확인해 다음 최적화 대상으로 남깁니다. python-docx/openpyxl 초기 파싱의 제한 시간은 협력 체크이며 하드 중단 보장이 아닙니다. DOCX 내용 보기는 원본 조판을 모두 재현하지 않으며 수식/텍스트박스 누락은 알리고 명시적 PDF 표시를 남깁니다.
+배포 전 백업 `deployment-backup-1.2.7/receipt.json`은 store2425/출력516/설치EXE2 총2943개·1,759,903,782B 사본과 원본4개/이전백업/rollback을 포함9501파일 대조 PASS입니다. 실제 원본·기존 MD를 자동 재추출하거나 삭제하지 않습니다. 시험용 TEMP2개(`tmphhkxbxpq`, `native-preview-test-c1eggwld`)의 삭제는 자동 승인 정책에서 거절되어 남겨뒀고 우회하지 않았습니다.
 
-1.2.7 배포 전 백업은 완료했습니다. `deployment-backup-1.2.7/receipt.json`: 사용자 store2425/출력516/설치EXE2, 총2943파일·1,759,903,782B 사본, 원본4개/이전백업/rollback을 포함9501개 대조 PASS입니다. 이전1.2.6 pins·rollback·공개 tag는 불변이며 새 버전 빌드·공개·설치는 아직 하지 않았습니다. UI/실제 viewport 속도·선택 연속 취소·나머지 native 형식·수식 정확성·최종 전체 빌드/설치 검증이 남아 있습니다. 생성물은 DevCache/소유 TEMP, 사용자 자료 이동·삭제·자동 재추출은 하지 않습니다.
+한계: DOCX 내용 보기의 모든 조판/글상자/수식 재현은 보장하지 않습니다. 명시적 PDF 대체 표시는 외부 변환 엔진이 필요합니다. 이미지 속 복잡한 수식 OCR은 별도 미해결이며 실제42장 슬라이드9/16의 일반 OCR 오류를 해결 완료라고 주장하지 않습니다. Pix2Text 연구 모델은 DevCache 별도 환경에만 있고 배포 통합하지 않았습니다. 최신 목표인 원본 뷰어와 추출 정확성을 구분합니다. 빠른 취소는 python-docx/openpyxl 라이브러리 초기 파싱을 강제 중단하는 보장은 아닙니다.
 
 ## 완료 — 2026-10-24, 1.2.6 폴더 탐색·연속 보기·이미지 글자 추출
 

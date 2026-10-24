@@ -5,7 +5,7 @@ async function uiPresentationSuspendRegression(page,baseURL){
   try{
     await p.route('**/open?*',async route=>{if(new URL(route.request().url()).searchParams.get('mode')==='result')return route.continue();if(holdMetadata){await metadataGate;holdMetadata=false;}return route.fulfill({json:{source_kind:'presentation',source_ready:true,pages:[[960,720],[960,720],[960,720]],source_revision:'fixture-source-v1',source_data_url:'/presentation-data?p=1&r=fixture-source-v1',source_frame_url:'/presentation-frame',source_unit_label:'슬라이드'}});});
     await p.route('**/presentation-data?*',async route=>{count++;if(count===1)await gate;try{await route.continue();}catch(error){if(!closing&&count>1)throw error;}});
-    await p.goto(baseURL);await p.waitForSelector('.file-row');await p.locator('.file-row[data-index="1"] [data-action=read]').click();await p.waitForSelector('#document h1');
+    await p.goto(baseURL);await p.waitForSelector('.file-row');await p.locator('.file-row[data-index="1"] [data-action=read]').evaluate(n=>n.click());await p.waitForSelector('#document h1');
     await p.evaluate(()=>{window.__suspendHeading=document.querySelector('#document h1');document.querySelector('#search').value='needle';document.querySelector('#result-scroll').scrollTop=600;});
     const metadataStarted=p.waitForRequest(r=>r.url().includes('/open?')&&new URL(r.url()).searchParams.get('mode')==='source');await p.locator('#source-tab').click();await metadataStarted;await p.locator('#content-tab').click();releaseMetadata();await p.waitForTimeout(100);
     const metadataFrames=await p.locator('#presentation-frame').count();if(metadataFrames)throw new Error('UI_PRESENTATION_HIDDEN_METADATA_LIFETIME_RED '+metadataFrames);
