@@ -1,5 +1,34 @@
 # 문서 추출기 구현 진행 기록
 
+## 진행 중 — 2026-10-24, 1.2.3 동시 백그라운드 추출
+
+아래 1.2.2 기록보다 이 절이 우선합니다. **1.2.3 최종 후보의 회귀·산출물 감사·scan·우선순위·명시적 포커스/가시성 조건의 책 동시 실행 검증을 마쳤습니다. 기본 hidden 책 지연 시험은 raw 실패로 보존하며 아직 공개·설치 완료가 아닙니다.**
+
+- 설치된 1.2.2의 실제 스택과 API timeout으로 근본 원인을 확인했습니다. GUI와 같은 Python 프로세스에서 native MuPDF/GIL 작업을 실행했고 모든 새 PDF에 논문 서지/GROBID 경로가 선행했습니다. 이제 모든 PDF는 공통 SDK 우선 경로이며 문서마다 별도 프로세스로 실행합니다.
+- 사용자는 여러 문서를 동시에 독립 실행하되 자원 한도를 요구했습니다. 최종 스케줄러는 CPU에 따른 동시 상한(이 PC 물리16/논리24 CPU에서 8, 절대 상한 10), psutil 7.2.2 실측·예상 메모리 예약, 자원 부족 시 자동 대기/재개를 적용합니다. RAM 50% 예산·시스템 예비 15%/최소2GiB·CPU90% 대기 및 작은 PC 단일 작업 예외는 **새 작업 시작 기준이지 실행 중 메모리/CPU의 강제 상한이 아닙니다.** 같은 내용 SHA는 직렬화하고 export commit은 OS 파일 잠금으로 보호합니다.
+- 최종 전체 **285 tests PASS / 83.407초**(`test-1.2.3-priority-final.log`). 실제 두 native GIL 자식 동시 실행·GUI 읽기/검색·동시 취소, 메모리 대기/재개, 같은 SHA/개수 제한, coordinator 예외 시 역압 교착 해소, 저장 경합·snapshot·우선순위 생성을 포함합니다. 소스/UI 독립 검수 승인은 최신 hidden 지연 gate PASS를 뜻하지 않습니다. 이전 284개/93.332초 로그는 과거 후보 근거로 보존합니다.
+- 실제 책 SDK/본문 재검증: **396쪽 / 440.109초 / 1,934블록 / 표18 / 그림186 / 전체 쪽 누락0**, MD SHA `6878bed61a231e362e3819032a31ced0f658e8a21e44468e41f4d93c2b4dfe4f`로 기존 승인 MD와 동일합니다. 원본·실제 Documents MD·AppData 정본 불변. 이 전체 실행 중 App/후속 export가 바뀌어 raw source gate는 false이며, 본문 코어4개 불변과 conversion 검증 true를 별도로 기록했습니다. 최종 동시 스케줄러/EXE 전체 실행으로 과장하지 않습니다.
+- source 전제/측정·오탐 원인/독립 검수는 [배경 추출 진단](./2026-10-24-background-extraction.md), DevCache의 `background-1.2.3-whole-book-final`에 있습니다. 책 자원 표본은 전체 440초 중 약284초/55표본: CPU 평균41.09%·관측최대94.92%(24논리CPU 전체 용량 기준), private 관측최대1.88GiB/RSS1.11GiB입니다. 순간 lifetime peak나 모든 문서의 평균은 아닙니다.
+- 최종 빌드는 `build-1.2.3-priority-final.log` exit0입니다. Setup **243,151,591바이트**, SHA `e43b9ecfd5747ac451b685728e4ba231342c5dc740be2a921b2dad4e65e67f33`; 메인 **11,821,811바이트**, SHA `7a634a70e994ac4506b5bc5114d7418ca16a5330d35f49bdb33a80ae301455ac`입니다. `build-1.2.3-priority-artifacts-verification.json`에서 checksum·현재 메인44/워커4소스 동등·고지33/21·ONNX17/Kiwi9를 독립 확인했습니다. 이전 `a0419c…` 후보 감사는 보존하며 최신 후보로 혼용하지 않습니다.
+- 최종 실제 scan은 `frozen-1.2.3-priority-scan/receipt.json ok=true`입니다. 실제 책의 GUI NORMAL32·문서/SDK BELOW_NORMAL16384를 각7회 확인(`frozen-1.2.3-priority-book/priority-verification.json ok=true`)했으며, 이것이 WebView 지연을 해결했다는 증거는 아닙니다.
+- 최신 hidden 책 시험 `frozen-1.2.3-priority-book/receipt.json`은 **ok=false 유지**입니다. 상태 bridge 2.0–23.2ms·Node HTTP2–38ms였으나 브라우저 내부 fetch 완료 측정 1회 4,175.7ms로 2초 기준을 초과했습니다. 다른 MD/검색어·추가 CSV 저장·중복 차단·취소321ms·원본 불변은 확인했습니다. 환경 flag A/B는 `frozen-1.2.3-priority-book-foreground/receipt.json`의 `applied=false/ok=false`이므로 유효한 비교·개선 근거가 아닙니다. 전체 UI 응답 2초 보장은 미확인입니다.
+- 사용자 기존 프로그램/책 자료193개는 `deployment-backup-1.2.3/receipt.json`으로 SHA 대조 백업했고 원본 PDF는 수정하지 않았습니다. 현재 증거는 DevCache 후보 검증이며 실제 Documents·캐시의 새 결과 반영 또는 설치 완료로 올리지 않습니다.
+- 남은 작업: 아래 배포 확인란의 소스/tag/archive·installer/checksum 게시/다운로드 대조 → 기존 HKCU 설치 갱신·실제 설치본 확인입니다. 기존 1.2.2 릴리스/tag와 실패 raw receipt는 보존합니다. 상세 근거·수치는 [배경 추출 진단](./2026-10-24-background-extraction.md)을 확인합니다.
+
+최종 `frozen-1.2.3-book-focus-emulation-final/receipt.json`은 `ok=true`입니다. 같은 최종 EXE에 시험 전용 공식 CDP 포커스·가시성 에뮬레이션을 적용하고 전후/4회/검색/취소의 실제 상태와 해제를 확인했습니다. bridge2.6–11ms/Node HTTP1–4ms/브라우저 HTTP2.8–86.2ms, 실제쪽0/0/0/28, 검색108.6ms·12건·CSV 독립PID 저장·취소463ms(31쪽)·기존MD/검색어/원본SHA/TEMP정리 PASS입니다. 제품 설정과 기본 hidden 실패 기록을 바꾸지 않았고 모든 보이는 창 입력→paint 성능으로 확대하지 않습니다. 상세는 [1.2.3 배포 검증](./2026-10-24-release-1.2.3.md)에 있습니다.
+
+### 1.2.3 배포 확인란 — 아직 미실행
+
+| 단계 | 현재 상태 | 완료 뒤 기록할 근거 |
+| --- | --- | --- |
+| 최종 소스 commit·v1.2.3 tag·소스 archive | 미게시·미기록 | 실제 commit/tag SHA, archive 크기·SHA·공개 URL |
+| Setup·checksum 공개와 재다운로드 | 미게시 | 최종 Setup SHA `e43b9ecf…67f33`, 게시 바이트/다운로드 SHA 영수증 |
+| 기존 HKCU 설치 갱신 | 1.2.3 미설치 | 설치 로그 exitcode, HKCU 버전·경로, 설치 EXE SHA |
+| 설치본 원본/MD·검색·추출·중지 확인 | 미실행 | 실제 설치본 검증 영수증과 원본/기존 출력 보호 결과 |
+| 공개 업데이트 확인 | 미실행 | 실제 공개 tag 기준의 수동 확인 결과; hidden 자동 설치 차단과 구분 |
+
+이 표는 배포 작업을 했다는 기록이 아닙니다. root가 만드는 최종 1.2.3 배포 검증 문서와 실제 영수증을 확인한 뒤 완료한 행만 바꿉니다. 이 PC의 UAC=0/관리자 High 환경은 실제 비승격 자동 설치 검증으로 확대하지 않습니다.
+
 ## 최신 — 2026-10-24, 1.2.2 공개·설치·책 결과 반영 완료
 
 이 절과 [최종 검증·배포 기록](./2026-10-24-release-verification.md)이 아래 배포 전 상태보다 우선합니다.
@@ -208,15 +237,3 @@
 3. 원문좌표↔MD블록의 실제 source map과 읽기 전용 검색/클릭/스크롤 연동을 구현합니다. 기존 PNG preview를 활용할 수 있으며 PDF.js 교체는 전제가 아닙니다.
 4. rHWP CLI, DOCX/PPTX/XLSX 등의 구조 어댑터와 미리보기 어댑터를 순차 추가하고 오프라인 회귀·긴 문서/폴더 안정성을 검증합니다.
 5. 새 cache_root 경로로 빌드하고 검토용 실행을 확인합니다. 기존 설치본을 검증 없이 덮어쓰지 않습니다.
-# 진행 중 — 2026-10-24, 1.2.3 동시 백그라운드 추출
-
-아래 1.2.2 기록보다 이 절이 우선합니다. **1.2.3은 최종 빌드/EXE QA 중이며 아직 공개·설치 완료가 아닙니다.**
-
-- 설치된 1.2.2의 실제 스택과 API timeout으로 근본 원인을 확인했습니다. GUI와 같은 Python 프로세스에서 native MuPDF/GIL 작업을 실행했고 모든 새 PDF에 논문 서지/GROBID 경로가 선행했습니다. 이제 모든 PDF는 공통 SDK 우선 경로이며 문서마다 별도 프로세스로 실행합니다.
-- 사용자는 여러 문서를 동시에 독립 실행하되 자원 한도를 요구했습니다. 최종 스케줄러는 CPU에 따른 동시 상한(이 PC 8, 절대 상한 10), psutil 실측과 예상 메모리 예약, 자원 부족 시 자동 대기/재개를 적용합니다. 이는 강제 메모리 상한이 아닌 신규 실행 기준입니다. 같은 내용 SHA는 직렬화하고 export commit은 OS 파일 잠금으로 보호합니다.
-- 전체 **284 tests PASS / 93.332초**. 실제 두 native GIL 자식 동시 실행·GUI 읽기/검색·동시 취소, 메모리 대기/재개, 같은 SHA/개수 제한, coordinator 예외 시 역압 교착 해소, 저장 경합·snapshot 검사를 포함합니다. 실제 UI 회귀 3종과 관련 독립 검수 모두 승인, 현재 알려진 P1/P2 없음입니다.
-- 실제 책 SDK/본문 재검증: **396쪽 / 440.109초 / 1,934블록 / 표18 / 그림186 / 전체 쪽 누락0**, MD SHA `6878bed61a231e362e3819032a31ced0f658e8a21e44468e41f4d93c2b4dfe4f`로 기존 승인 MD와 동일합니다. 원본·실제 Documents MD·AppData 정본 불변. 이 전체 실행 중 App/후속 export가 바뀌어 raw source gate는 false이며, 본문 코어4개 불변과 conversion 검증 true를 별도로 기록했습니다. 최종 동시 스케줄러/EXE 전체 실행으로 과장하지 않습니다.
-- source 전제/측정·오탐 원인/독립 검수는 [배경 추출 진단](./2026-10-24-background-extraction.md), DevCache의 `background-1.2.3-whole-book-final`에 있습니다. 책 자원 표본은 전체 440초 중 약284초/55표본: CPU 평균41.09%·관측최대94.92%(24논리CPU 전체 용량 기준), private 관측최대1.88GiB/RSS1.11GiB입니다. 순간 lifetime peak나 모든 문서의 평균은 아닙니다.
-- 최종 빌드 로그 `D:\DevCache\260725 PDF 추출\build-1.2.3-parallel-final.log`, 전체 시험 로그 `test-1.2.3-parallel-final.log`. 사용자 기존 프로그램/책 자료193개는 `deployment-backup-1.2.3/receipt.json`으로 SHA 대조 백업했고 원본 PDF는 수정하지 않았습니다.
-- 남은 작업: 최종 EXE native/scan + 실제 책 진행 중 다른 CSV 완료·읽기/검색·취소 → 소스/tag/archive·installer/checksum 게시/다운로드 대조 → 기존 HKCU 설치 갱신·실제 설치본 확인. 기존 1.2.2 릴리스/tag는 보존합니다.
-

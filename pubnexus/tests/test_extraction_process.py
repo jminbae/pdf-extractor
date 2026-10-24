@@ -20,6 +20,30 @@ class BackgroundProcessTests(unittest.TestCase):
     source = support.AppExportTests.source
     extracted = support.AppExportTests.extracted
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows process priority contract')
+    def test_worker_and_its_descendant_have_background_priority_without_changing_gui(self):
+        import psutil
+        source = self.source()
+        probe = self.root / 'priority.py'
+        probe.write_text('''import json,psutil,subprocess,sys
+from pathlib import Path
+request=Path(sys.argv[-1]);own=psutil.Process().nice()
+code='import psutil; print(int(psutil.Process().nice()))'
+child=subprocess.run([sys.executable,'-B','-c',code],capture_output=True,text=True,check=True)
+with (request.parent/'events.jsonl').open('a',encoding='utf-8') as stream:
+ stream.write(json.dumps({'kind':'priority','payload':{'worker':own,'descendant':json.loads(child.stdout)}})+'\\n')
+ stream.write(json.dumps({'kind':'run','payload':{'on':False}})+'\\n')
+''', encoding='utf-8')
+        parent_before = psutil.Process().nice()
+        received = []
+        with patch.object(extraction_process, '_command', return_value=[sys.executable, '-B', str(probe)]):
+            extraction_process.run([source], self.root / 'output', on_event=lambda k, p: received.append((k, p)))
+        priority = next(payload for kind, payload in received if kind == 'priority')
+        self.assertEqual(priority['worker'], 0x4000)
+        self.assertEqual(priority['descendant'], 0x4000)
+        parent_after = psutil.Process().nice()
+        self.assertEqual(parent_before, parent_after)
+
     def test_final_complete_line_written_at_process_exit_is_drained(self):
         source = self.source()
         received = []

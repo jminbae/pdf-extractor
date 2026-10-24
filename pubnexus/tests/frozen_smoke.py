@@ -36,6 +36,10 @@ const deadline=Date.now()+cfg.timeout*1000;
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,label){while(Date.now()<deadline){const value=await fn();if(value)return value;await pause(100);}throw Error('Timed out: '+label);}
 let ws;
+let command;
+let focusEmulation={requested:!!cfg.focus_emulation_test,production:false};
+let background=null;
+let completedResult=null;
 let previousProbe='';
 function probe(value){const serialized=JSON.stringify(value,null,2);if(serialized!==previousProbe){fs.writeFileSync(cfg.probe,serialized,'utf8');previousProbe=serialized;}}
 try {
@@ -44,8 +48,14 @@ try {
   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('CDP connect timeout')),5000);ws.addEventListener('open',()=>{clearTimeout(timer);resolve();},{once:true});ws.addEventListener('error',()=>{clearTimeout(timer);reject(Error('CDP connection failed'));},{once:true});});
   let next=0;const pending=new Map();
   ws.addEventListener('message',event=>{const message=JSON.parse(String(event.data));const item=pending.get(message.id);if(item){pending.delete(message.id);clearTimeout(item.timer);message.error?item.reject(Error(JSON.stringify(message.error))):item.resolve(message.result);}});
-  const command=(method,params={},timeoutMs=15000)=>new Promise((resolve,reject)=>{const id=++next;const timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP command timeout: '+method));},timeoutMs);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}));});
+  command=(method,params={},timeoutMs=15000)=>new Promise((resolve,reject)=>{const id=++next;const timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP command timeout: '+method));},timeoutMs);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}));});
   async function evaluate(expression){const result=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result?.value;}
+  async function focusState(stage){
+    const state=await evaluate('({has_focus:document.hasFocus(),visibility:document.visibilityState,hidden:document.hidden})');
+    const sample={stage,...state,valid:state?.has_focus===true&&state?.visibility==='visible'&&state?.hidden===false};
+    if(focusEmulation.requested)(focusEmulation.samples??=[]).push(sample);
+    return sample;
+  }
   const screenshots=[];
   async function optionalScreenshot(destination){
     try{const shot=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false},3000);fs.writeFileSync(destination,Buffer.from(shot.data,'base64'));screenshots.push({path:destination,saved:true});}
@@ -58,6 +68,14 @@ try {
   if(path.resolve(state.output_dir||'').toLowerCase()!==path.resolve(cfg.output_dir).toLowerCase())throw Error('Refusing to save outside the explicit private output folder');
   if(JSON.stringify(state.files.map(f=>f.name))!==JSON.stringify(cfg.names))throw Error('Unexpected input list');
   if(state.files.some(f=>f.md_ready))throw Error('A private fixture was presented as saved Markdown before export');
+  if(focusEmulation.requested){
+    focusEmulation.browser=await command('Browser.getVersion');
+    focusEmulation.before=await focusState('before');
+    focusEmulation.protocol_result=await command('Emulation.setFocusEmulationEnabled',{enabled:true});
+    focusEmulation.enabled=true;
+    focusEmulation.after=await focusState('after');
+    if(!focusEmulation.after.valid)throw Error('Focus emulation did not establish a focused visible page: '+JSON.stringify(focusEmulation.after));
+  }
   await until(()=>evaluate(`document.querySelectorAll('.file-row .row-actions [data-action=read]').length===${cfg.names.length}`),'always-present Markdown buttons');
   const initialMdButtons=await evaluate("Array.from(document.querySelectorAll('.file-row .row-actions [data-action=read]')).map(b=>({label:b.textContent,disabled:b.disabled}))");
   if(initialMdButtons.some(b=>b.label!=='MD 보기'||!b.disabled))throw Error('Cached extraction enabled an unsaved Markdown button');
@@ -112,24 +130,60 @@ try {
   if(!compare.visible||compare.editable||compare.error_note||compare.page_errors)throw Error('PDF comparison has an error or is not a read-only view: '+JSON.stringify(compare));
   compare.hidden_test_eager_load=true;
   await optionalScreenshot(cfg.compareShot);
-  let background=null;
   if(cfg.background_book){
     await evaluate("window.__backgroundWorkers=[];const on=window.pnx.on;window.pnx.on=function(m){if(m.kind==='worker_started')window.__backgroundWorkers.push(m.pid);return on(m);};true");
     const start=await evaluate('window.pywebview.api.extract_selected([2],true)');
     if(!start?.ok)throw Error('Book background extraction did not start');
-    const running=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');const f=s.files?.[2];if(f?.error)throw Error(f.error);return f?.status==='running'&&f.progress_pct>=5?s:null;},'actual book SDK progress');
+    const running=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');const f=s.files?.[2];if(f?.error)throw Error(f.error);return f?.status==='running'&&f.progress_pct>=5&&f.progress_pages>1?s:null;},'actual multi-page book SDK progress');
+    const bookBegan=Date.now();
+    fs.writeFileSync(cfg.bookActive,JSON.stringify({started_at:new Date().toISOString(),book:running.files[2],resources:running.resources}),'utf8');
     const measurements=[];
+    background={ok:false,measurements,latency_failures:[],stage:'measuring-book',
+      latency_gate:{limit_ms:2000,targets:['bridge_inside_browser','node_http_files','browser_http_files'],cdp_roundtrip:'diagnostic_only'}};
     for(let index=0;index<4;index++){
-      const began=Date.now();const s=await evaluate('window.pywebview.api.state()');
+      const pingBegan=Date.now();
+      const browser=await focusState('book-round-'+index);
+      const pingMs=Date.now()-pingBegan;
+      const began=Date.now();
+      const timed=await evaluate('(async()=>{const began=performance.now();const state=await window.pywebview.api.state();return {state,bridge_ms:performance.now()-began};})()');
+      const s=timed.state;
       const elapsed=Date.now()-began;
-      if(elapsed>2000||s.files[2].status!=='running'||!s.files[0].md_ready)throw Error('Book extraction blocked UI state or saved Markdown');
-      measurements.push({roundtrip_ms:elapsed,percent:s.files[2].progress_pct,stage:s.files[2].progress_stage,page:s.files[2].progress_page});
+      const httpBegan=Date.now();
+      const backendResponse=await fetch(new URL('files',target.url),{cache:'no-store',signal:AbortSignal.timeout(15000)});
+      const backend=await backendResponse.json();
+      const backendMs=Date.now()-httpBegan;
+      const browserHttp=await evaluate('(async()=>{const began=performance.now();const response=await fetch("/files",{cache:"no-store"});const state=await response.json();return {http_ms:performance.now()-began,status:response.status,files:state.files};})()');
+      const failures=[];
+      if(timed.bridge_ms>2000)failures.push('state_api_over_2000ms');
+      if(backendMs>2000)failures.push('http_backend_over_2000ms');
+      if(browserHttp.http_ms>2000)failures.push('browser_http_over_2000ms');
+      if(focusEmulation.requested&&!browser.valid)failures.push('focus_emulation_state_invalid');
+      if(s.files[2].status!=='running')failures.push('book_not_running');
+      if(!s.files[0].md_ready)failures.push('saved_markdown_unavailable');
+      measurements.push({roundtrip_ms:elapsed,bridge_ms:timed.bridge_ms,cdp_ping_ms:pingMs,
+        node_http_files_ms:backendMs,browser_http_files_ms:browserHttp.http_ms,
+        http_status:backendResponse.status,browser_http_status:browserHttp.status,
+        has_focus:browser.has_focus,visibility:browser.visibility,hidden:browser.hidden,failures,
+        percent:s.files[2].progress_pct,stage:s.files[2].progress_stage,page:s.files[2].progress_page,
+        book:s.files[2],saved:s.files[0],resources:s.resources,backend_files:backend.files});
+      background.latency_failures.push(...failures.map(reason=>({round:index,reason})));
+      probe({stage:'book-latency',measurements,latency_failures:background.latency_failures});
+      fs.writeFileSync(cfg.result,JSON.stringify({ok:false,background,focus_emulation:focusEmulation}),'utf8');
       await pause(1000);
     }
+    // This private diagnostic job stays alive for a 15-second own-PID profiler.
+    // The latency gate remains 2000ms and is never relaxed.
+    await pause(Math.max(0,20000-(Date.now()-bookBegan)));
+    const searchFocus=await focusState('source-search');
+    if(focusEmulation.requested&&!searchFocus.valid)background.latency_failures.push({reason:'focus_emulation_state_invalid_before_search'});
     const begun=Date.now();
-    const hits=await evaluate(`window.pywebview.api.search_source(0,${JSON.stringify(cfg.pdfMarker)})`);
+    const searched=await evaluate(`(async()=>{const began=performance.now();const hits=await window.pywebview.api.search_source(0,${JSON.stringify(cfg.pdfMarker)});return {hits,bridge_ms:performance.now()-began};})()`);
+    const hits=searched.hits;
     const searchMs=Date.now()-begun;
-    if(!hits?.ok||!hits.results?.length||searchMs>2000)throw Error('Original search blocked during actual book extraction');
+    background.source_search={roundtrip_ms:searchMs,bridge_ms:searched.bridge_ms,ok:hits?.ok,hits:hits?.results?.length,error:hits?.why};
+    if(searched.bridge_ms>2000)background.latency_failures.push({reason:'source_search_api_over_2000ms'});
+    fs.writeFileSync(cfg.result,JSON.stringify({ok:false,background,focus_emulation:focusEmulation}),'utf8');
+    if(!hits?.ok||!hits.results?.length)throw Error('Original search failed during actual book extraction: '+JSON.stringify(background.source_search));
     const controls=await evaluate("({add_files:!document.querySelector('[data-action=add-files]').disabled,add_folder:!document.querySelector('[data-action=add-folder]').disabled,saved_md:!document.querySelector('#content-tab').disabled,reader_visible:!document.querySelector('#reader').hidden})");
     if(!Object.values(controls).every(Boolean))throw Error('Reading/file controls were disabled during extraction: '+JSON.stringify(controls));
     await evaluate(`document.querySelector('#search').value=${JSON.stringify(cfg.pdfMarker)};document.querySelector('#search-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));true`);
@@ -142,6 +196,8 @@ try {
     const queueState=await evaluate('window.pywebview.api.state()');
     if(!['queued','running','complete'].includes(queueState.files[1].status)||!queueState.files[1].md_ready)throw Error('Another job made the existing Markdown unreadable');
     const parallelFinished=await until(async()=>{const s=await evaluate('window.pywebview.api.state()');if(s.files[1].error)throw Error(s.files[1].error);return s.files[1].done&&s.files[2].status==='running'?s:null;},'CSV completes in its own process while the book keeps extracting');
+    const cancelFocus=await focusState('cancel');
+    if(focusEmulation.requested&&!cancelFocus.valid)background.latency_failures.push({reason:'focus_emulation_state_invalid_before_cancel'});
     const cancelBegan=Date.now();
     const cancelled=await evaluate('window.pywebview.api.cancel()');
     if(!cancelled?.ok)throw Error('Cancel was not accepted');
@@ -153,10 +209,25 @@ try {
     const workers=await evaluate('window.__backgroundWorkers');
     if(!workers.length)throw Error('No actual extraction child PID was observed');
     if(!stopped.files[1].done||!stopped.files[1].md_ready||workers.length!==2||new Set(workers).size!==2)throw Error('The independent completed CSV or two worker PIDs were not preserved');
-    background={ok:true,measurements,source_search_ms:searchMs,controls,cancel_ms:cancelMs,worker_pids:workers,reader_query_preserved:true,enqueue:enqueued,duplicate,parallel_completed:parallelFinished.files[1],resources:parallelFinished.resources,book_final:stopped.files[2]};
+    background={...background,ok:background.latency_failures.length===0,stage:'cancelled-and-verified',measurements,source_search_ms:searchMs,controls,cancel_ms:cancelMs,worker_pids:workers,reader_query_preserved:true,enqueue:enqueued,duplicate,parallel_completed:parallelFinished.files[1],resources:parallelFinished.resources,book_final:stopped.files[2]};
   }
-  fs.writeFileSync(cfg.result,JSON.stringify({ok:true,target_url:target.url,bridge:true,settings,settings_ui:settingsUi,manual_update:manualUpdate,initial_md_buttons:initialMdButtons,original_before_export:original,start_response:started,document_workers:documentWorkers,state:finished,csv_ui:csvUi,raw_markdown:code,pdf_comparison:compare,background,screenshots},null,2),'utf8');
-} finally {if(ws)ws.close();}
+  completedResult={ok:background?.ok!==false,target_url:target.url,bridge:true,settings,settings_ui:settingsUi,manual_update:manualUpdate,initial_md_buttons:initialMdButtons,original_before_export:original,start_response:started,document_workers:documentWorkers,state:finished,csv_ui:csvUi,raw_markdown:code,pdf_comparison:compare,background,screenshots,focus_emulation:focusEmulation};
+  fs.writeFileSync(cfg.result,JSON.stringify(completedResult,null,2),'utf8');
+  if(!completedResult.ok)throw Error('Book latency failed the unchanged 2000ms gate: '+JSON.stringify(background.latency_failures));
+} catch(error){
+  fs.writeFileSync(cfg.result,JSON.stringify({...completedResult,ok:false,error:String(error),background,focus_emulation:focusEmulation},null,2),'utf8');
+  throw error;
+} finally {
+  try{
+    if(focusEmulation.enabled){
+      try{focusEmulation.reset_protocol_result=await command('Emulation.setFocusEmulationEnabled',{enabled:false});focusEmulation.reset=true;}
+      catch(error){focusEmulation.reset=false;focusEmulation.reset_error=String(error);}
+      const saved=fs.existsSync(cfg.result)?JSON.parse(fs.readFileSync(cfg.result,'utf8')):{ok:false};
+      fs.writeFileSync(cfg.result,JSON.stringify({...saved,ok:saved.ok===true&&focusEmulation.reset,focus_emulation:focusEmulation},null,2),'utf8');
+      if(!focusEmulation.reset)throw Error('Focus emulation cleanup failed: '+focusEmulation.reset_error);
+    }
+  } finally {if(ws)ws.close();}
+}
 '''
 
 
@@ -291,12 +362,16 @@ def main() -> int:
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--scan", action="store_true", help="Use a raster-only PDF and an empty canonical cache")
     parser.add_argument("--check-update", action="store_true", help="Explicitly query the real release manifest; never install")
+    parser.add_argument("--foreground-test", action="store_true", help="Diagnostic hidden WebView: disable Chromium background scheduling, never production")
+    parser.add_argument("--focus-emulation-test", action="store_true", help="Test-only CDP active/focused page emulation; require actual focus and visibility")
     parser.add_argument("--background-book", type=Path, help="Copy a real PDF into private TEMP and verify browsing/search/cancel during its extraction")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("This harness requires Windows WebView2")
     if args.timeout <= 0 or not args.node:
         parser.error("A positive timeout and Node.js 22+ are required")
+    if args.foreground_test and args.focus_emulation_test:
+        parser.error("Choose one diagnostic condition at a time")
     if not args.prepare_only and (not args.exe or not args.exe.is_file()):
         parser.error("Pass the freshly built EXE through --exe")
     cache_root = _cache_root().resolve()
@@ -311,9 +386,9 @@ def main() -> int:
     process = job = root = None
     try:
         probe = subprocess.run([args.node, "--input-type=module", "-e", "console.log(typeof WebSocket)"],
-                               capture_output=True, text=True, timeout=10,
+                               capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10,
                                creationflags=subprocess.CREATE_NO_WINDOW)
-        if probe.returncode or probe.stdout.strip() != "function":
+        if probe.returncode or (probe.stdout or '').strip() != "function":
             raise RuntimeError("Node.js has no built-in WebSocket; no packages were installed")
         with tempfile.TemporaryDirectory(prefix="pubnexus-frozen-") as temporary:
             root = Path(temporary)
@@ -336,7 +411,9 @@ def main() -> int:
                 from pubnexus.version import VERSION
                 config = {**fixtures, "timeout": args.timeout, "result": str(root / "cdp-result.json"),
                           "expected_version": VERSION, "check_update": args.check_update,
+                          "focus_emulation_test": args.focus_emulation_test,
                           "listShot": str(output / "list.png"), "compareShot": str(output / "comparison.png"),
+                          "bookActive": str(output / "book-running.json"),
                           "probe": str(output / "cdp-probe.json")}
                 if args.prepare_only:
                     receipt.update(ok=True, fixtures_validated=True, exe_launched=False)
@@ -347,9 +424,11 @@ def main() -> int:
                     config_path = root / "cdp-config.json"
                     config_path.write_text(json.dumps(config), encoding="utf-8")
                     environment = os.environ.copy()
+                    foreground_flags = ['--disable-backgrounding-occluded-windows',
+                                        '--disable-renderer-backgrounding', '--disable-background-timer-throttling'] if args.foreground_test else []
                     environment.update(PUBNEXUS_STORE=fixtures["cache"], PUBNEXUS_ROOT=str(root),
                                        PUBNEXUS_OUTPUT=fixtures["output_dir"],
-                                       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f"--remote-debugging-port={config['port']}",
+                                       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=' '.join([f"--remote-debugging-port={config['port']}", *foreground_flags]),
                                        WEBVIEW2_USER_DATA_FOLDER=str(root / "profile"), PYTHONDONTWRITEBYTECODE="1",
                                        PNX_TEST_DEBUG_PORT=str(config["port"]))
                     startup = subprocess.STARTUPINFO()
@@ -362,12 +441,43 @@ def main() -> int:
                         job = _PrivateJob(process)
                         receipt["job_bound"] = bool(job)
                         receipt.update(exe=str(args.exe.resolve()), exe_sha256=_digest(args.exe), pid=process.pid)
+                        if foreground_flags:
+                            import psutil
+                            observed_args = []
+                            owner = psutil.Process(process.pid)
+                            limit = time.monotonic() + 12
+                            while time.monotonic() < limit:
+                                if process.poll() is not None or not owner.is_running():
+                                    raise RuntimeError('Private frozen app exited before diagnostic flag verification')
+                                for child in owner.children(recursive=True):
+                                    try:
+                                        command_line = child.cmdline()
+                                        if all(flag in command_line for flag in foreground_flags):
+                                            observed_args.append({'pid': child.pid, 'arguments': command_line,
+                                                                  'priority': int(child.nice())})
+                                    except psutil.Error:
+                                        pass
+                                if observed_args:
+                                    break
+                                time.sleep(.1)
+                            receipt['foreground_test'] = {'requested_flags': foreground_flags,
+                                                          'observed_owned_processes': observed_args,
+                                                          'applied': bool(observed_args), 'production': False}
+                            if not observed_args:
+                                raise RuntimeError('Diagnostic WebView background flags were not applied; no valid A/B condition')
+                        (output / 'running.json').write_text(json.dumps(
+                            {'own_pid': process.pid, 'config': config, 'exe_sha256': receipt['exe_sha256']},
+                            ensure_ascii=False, indent=2), encoding='utf-8')
                         cdp = subprocess.run([args.node, "--input-type=module", "-e", _CDP_SCRIPT, str(config_path)],
-                                             capture_output=True, text=True, timeout=args.timeout + 20,
+                                             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=args.timeout + 20,
                                              creationflags=subprocess.CREATE_NO_WINDOW)
-                        (output / "cdp.log").write_text(cdp.stdout + cdp.stderr, encoding="utf-8")
+                        stdout, stderr = cdp.stdout or '', cdp.stderr or ''
+                        (output / "cdp.log").write_text(stdout + stderr, encoding="utf-8")
+                        result_path = Path(config['result'])
+                        if result_path.is_file():
+                            receipt['webview'] = json.loads(result_path.read_text(encoding='utf-8'))
                         if cdp.returncode:
-                            raise RuntimeError("Frozen WebView2 bridge smoke failed: " + cdp.stderr[-3000:])
+                            raise RuntimeError("Frozen WebView2 bridge smoke failed: " + stderr[-3000:])
                         result = json.loads(Path(config["result"]).read_text(encoding="utf-8"))
                         if not result.get("ok"):
                             raise AssertionError("CDP returned an unsuccessful receipt")
@@ -409,25 +519,48 @@ def main() -> int:
                     if checksum != receipt['book_original']['sha256_before']:
                         raise AssertionError('Original book changed during background validation')
             finally:
-                if process:
-                    receipt["exe_returncode_before_cleanup"] = process.poll()
-                if job:
-                    receipt["owned_job_pids_before_cleanup"] = job.pids()
-                    job.close()
-                    job = None
-                if process and process.poll() is None:
-                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
-                if process:
-                    process.wait(timeout=10)
-                for source in sources:
-                    source.chmod(stat.S_IREAD | stat.S_IWRITE)
+                try:
+                    partial_result = root / 'cdp-result.json'
+                    if partial_result.is_file() and 'webview' not in receipt:
+                        receipt['webview'] = json.loads(partial_result.read_text(encoding='utf-8'))
+                    # Failed diagnostics also preserve source integrity evidence.
+                    after = {str(path): _digest(path) for path in sources}
+                    receipt.update(source_digests_after=after,
+                                   sources_unchanged=after == fixtures['source_digests_before'])
+                    if not receipt['sources_unchanged']:
+                        raise AssertionError('A private fixture original changed')
+                    if args.background_book:
+                        receipt['book_original']['sha256_after'] = _digest(args.background_book)
+                        if receipt['book_original']['sha256_after'] != receipt['book_original']['sha256_before']:
+                            raise AssertionError('Original book changed during diagnostics')
+                except Exception as error:
+                    receipt.update(ok=False, diagnostic_integrity_error=f'{type(error).__name__}: {error}')
+                finally:
+                    if process:
+                        receipt["exe_returncode_before_cleanup"] = process.poll()
+                    if job:
+                        receipt["owned_job_pids_before_cleanup"] = job.pids()
+                        job.close()
+                        job = None
+                    if process and process.poll() is None:
+                        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+                    if process:
+                        process.wait(timeout=10)
+                    for source in sources:
+                        source.chmod(stat.S_IREAD | stat.S_IWRITE)
         receipt["temporary_inputs_removed"] = not root.exists()
         if not receipt["temporary_inputs_removed"]:
             raise AssertionError("Temporary fixture/profile cleanup did not complete")
     except Exception as error:
-        receipt.update(ok=False, error=f"{type(error).__name__}: {error}")
+        if isinstance(error, subprocess.TimeoutExpired):
+            def decoded(value):
+                return value.decode('utf-8', errors='replace') if isinstance(value, bytes) else (value or '')
+            (output / 'cdp.log').write_text(decoded(error.stdout) + decoded(error.stderr), encoding='utf-8')
+            receipt.update(ok=False, error=f'CDP diagnostic timeout: {error.timeout}s', cdp_timeout=True)
+        else:
+            receipt.update(ok=False, error=f"{type(error).__name__}: {error}")
     finally:
         if root is not None:
             receipt["temporary_inputs_removed"] = not root.exists()

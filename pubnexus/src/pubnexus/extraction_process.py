@@ -119,7 +119,8 @@ def run(paths, output_dir, *, force=False, cancel=None, on_event=None, timeout=8
             with (work / 'stdout.log').open('wb') as stdout, (work / 'stderr.log').open('wb') as stderr:
                 process = subprocess.Popen([*_command(), str(request)], stdin=subprocess.DEVNULL,
                     stdout=stdout, stderr=stderr, cwd=str(work), env=env, shell=False,
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                    creationflags=(getattr(subprocess, 'CREATE_NO_WINDOW', 0) |
+                                   getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0)))
                 job = _OwnedJob(process)
                 emit('worker_started', {'pid': process.pid})
                 with events.open('rb') as stream:
