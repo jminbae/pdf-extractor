@@ -774,6 +774,7 @@ class App:
             utils.log(f"[app] config.yaml 을 읽지 못했다({e}) — 기본값으로 시작")
             self.cfg = {}
         self.folder: Path | None = None
+        self._folders: list[dict] = []
         self.pdfs: list[Path] = []
         # 정본은 PDF 옆이 아니라 앱 저장소에 있다(store.py). 짝은 내용 지문(sha1).
         self.done: dict[str, str] = {}           # 정규화한 PDF 경로 → sha1
@@ -943,6 +944,14 @@ class App:
             pass
 
     # ── 폴더 ────────────────────────────────────────────────────────
+    def folder_state(self) -> dict:
+        with self._operation_lock:
+            parent = self.folder.parent if self.folder else None
+            return {"path": str(self.folder or ""),
+                    "parent": str(parent) if parent and parent != self.folder else None,
+                    "folders": list(self._folders), "files": self.file_rows(),
+                    "output_dir": str(self.output_dir)}
+
     def folder_files(self, folder: Path) -> list[Path]:
         folder = Path(folder).resolve()
         output = self.output_dir.resolve()
@@ -963,8 +972,7 @@ class App:
         if self.pdfs and self.folder is None:
             self.folder = self.pdfs[0].parent
         self.scan_store()
-        self.push("folder", {"path": str(self.folder or ""), "files": self.file_rows(),
-                             "output_dir": str(self.output_dir)})
+        self.push("folder", self.folder_state())
 
     def add_dropped_files(self, event: dict) -> dict:
         """Use WebView2's native file-drop paths; never guess from a file name."""
@@ -985,23 +993,41 @@ class App:
             return {"ok": False, "why": str(error)}
 
     def set_folder(self, folder: Path) -> None:
-        if self.worker and self.worker.is_alive():
-            raise RuntimeError("추출을 마치거나 중지한 뒤 폴더를 바꾸세요.")
-        self.folder = Path(folder)
-        self.status(f"{self.folder.name} 훑는 중…", busy=True, force=True)
-        self.pdfs = self.folder_files(self.folder)
-        self.scan_store()
-        ui = self.ui_load()
-        last = ui.get("paper") if _norm(ui.get("folder") or "") == _norm(self.folder) else None
-        self.ui_save(folder=str(self.folder))
-        self.push("folder", {"path": str(self.folder), "files": self.file_rows(),
-                             "last": last, "output_dir": str(self.output_dir)})
-        self.status("", busy=False, force=True)
+        self.browse_folder(folder)
+
+    def browse_folder(self, folder: Path) -> dict:
+        """Change the visible directory; running jobs retain their captured paths."""
+        folder = Path(folder).resolve(strict=True)
+        if not folder.is_dir():
+            raise ValueError('폴더를 선택하세요.')
+        output = self.output_dir.resolve()
+        in_output = folder.is_relative_to(output)
+        folders, files = [], []
+        for entry in folder.iterdir():
+            resolved = entry.resolve()
+            if not in_output and resolved.is_relative_to(output):
+                continue
+            if entry.is_dir():
+                if entry.name.casefold() not in {'markdown', '.git', '__pycache__', 'node_modules'}:
+                    folders.append({'name': entry.name, 'path': str(resolved)})
+            elif entry.is_file() and entry.suffix.lower() in DOCUMENT_EXTENSIONS:
+                files.append(resolved)
+        folders.sort(key=lambda row: (row['name'].casefold(), row['path'].casefold()))
+        files.sort(key=lambda path: (path.name.casefold(), str(path).casefold()))
+        with self._operation_lock:
+            ui = self.ui_load()
+            last = ui.get('paper') if _norm(ui.get('folder') or '') == _norm(folder) else None
+            self.folder, self.pdfs, self._folders = folder, files, folders
+            self.scan_store()
+            self.ui_save(folder=str(folder))
+            result = dict(self.folder_state(), last=last)
+        self.push('folder', result)
         # 요약에 적힌 경로로 못 찾은 것들은 **내용**으로 맞춰 본다. PDF 를 옮겼거나
         # 다른 폴더에서 뽑았으면 경로가 다르기 때문이다. 목록은 이미 떴고, 확인되는
         # 대로 점이 하나씩 초록으로 바뀐다 — 화면을 붙잡지 않는다.
         threading.Thread(target=self._reconcile, args=(self.folder,),
                          daemon=True).start()
+        return result
 
     def _reconcile(self, folder: Path) -> None:
         for p in list(self.pdfs):
@@ -1870,8 +1896,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path in ("/", "/index.html"):
                 self._send(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
             elif u.path == "/files":
-                self._json({"path": str(self.app.folder or ""),
-                            "files": self.app.file_rows(), "output_dir": str(self.app.output_dir)})
+                self._json(self.app.folder_state())
             elif u.path == "/open":
                 index = int(q.get('p', ['-1'])[0])
                 mode = q.get('mode', [''])[0]
@@ -1954,6 +1979,14 @@ def serve(app: App) -> int:
 class Api:
     def __init__(self, app: App) -> None:
         self._app = app
+
+    def browse_folder(self, path: str) -> dict:
+        if not isinstance(path, str) or not path or '\0' in path or not Path(path).is_absolute():
+            return {'ok': False, 'why': '폴더의 전체 경로를 입력하세요.'}
+        try:
+            return dict(self._app.browse_folder(Path(path)), ok=True)
+        except (OSError, ValueError, RuntimeError) as error:
+            return {'ok': False, 'why': str(error)}
 
     def settings(self) -> dict:
         return self._app.settings_state()
@@ -2132,20 +2165,28 @@ class Api:
         todo = [p for p in a.pdfs if a.sha_for(p) is None]
         return {"todo": len(todo), "total": len(a.pdfs)}
 
-    def extract_selected(self, indexes: list[int], force: bool = False) -> dict:
+    def extract_selected(self, indexes: list[int], force: bool = False,
+                         expected_paths: list[str] | None = None) -> dict:
         a = self._app
         if not isinstance(indexes, list) or not isinstance(force, bool):
             return {"ok": False, "why": "문서 선택을 확인하세요."}
-        rows = a.file_rows()
-        picked = list(dict.fromkeys(i for i in indexes if type(i) is int and 0 <= i < len(a.pdfs)))
-        targets = [a.pdfs[i] for i in picked if force or not rows[i]["done"]]
-        if not targets:
-            return {"ok": False, "why": "추출할 문서를 선택하세요."}
-        queued = a.extraction_busy()
-        try:
-            accepted = a.start(targets, force=force)
-        except RuntimeError as error:
-            return {'ok': False, 'why': str(error)}
+        with a._operation_lock:
+            if expected_paths is not None:
+                if (not isinstance(expected_paths, list) or len(expected_paths) != len(indexes)
+                        or any(type(i) is not int or not 0 <= i < len(a.pdfs)
+                               or not isinstance(path, str) or _norm(a.pdfs[i]) != _norm(path)
+                               for i, path in zip(indexes, expected_paths))):
+                    return {'ok': False, 'why': '폴더가 변경됐습니다. 현재 목록에서 문서를 선택하세요.'}
+            rows = a.file_rows()
+            picked = list(dict.fromkeys(i for i in indexes if type(i) is int and 0 <= i < len(a.pdfs)))
+            targets = [a.pdfs[i] for i in picked if force or not rows[i]["done"]]
+            if not targets:
+                return {"ok": False, "why": "추출할 문서를 선택하세요."}
+            queued = a.extraction_busy()
+            try:
+                accepted = a.start(targets, force=force)
+            except RuntimeError as error:
+                return {'ok': False, 'why': str(error)}
         return {"ok": True, "n": len(accepted), 'queued': queued,
                 'accepted_paths': [str(path) for path in accepted]}
 
@@ -2216,9 +2257,9 @@ class Api:
         a = self._app
         ui = a.ui_load()
         last = ui.get("paper") if _norm(ui.get("folder") or "") == _norm(a.folder or "") else None
-        return {"path": str(a.folder or ""), "grobid": a.grobid.state,
-                "sec": a.grobid.secs, "files": a.file_rows(), "last": last,
-                "output_dir": str(a.output_dir), 'pdf_engine_available': pdf_markdown.available(),
+        return {**a.folder_state(), "grobid": a.grobid.state,
+                "sec": a.grobid.secs, "last": last,
+                'pdf_engine_available': pdf_markdown.available(),
                 'resources': dict(a._resource_state), 'settings': a.settings_state()}
 
     def remember(self, name: str) -> dict:

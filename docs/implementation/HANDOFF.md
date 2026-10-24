@@ -1,5 +1,13 @@
 # 문서 추출기 구현 진행 기록
 
+## 진행 중 — 2026-10-24, 1.2.6 실제 문서 사용 흐름
+
+사용자 새 제보: 완료 상태의 체크 제한, 폴더 이동 부재, PPTX 한 장씩 이동, 추출 버튼 위치, 완료 후 옆 MD, 이미지 속 본문 누락과 PDF 90% 정체입니다. **왼쪽 원본 / 오른쪽 추출→MD 보기**가 최신 사용자 기준입니다. 말보다 수정·실제 파일 검증 결과를 짧게 보고합니다.
+
+실제 원본은 기존 폴더 아래 `261023 린버크 승인`에 있습니다. 13쪽 `Upadacitinib vitiligo P3_manuscipt.pdf`와 71장 PPTX를 private 사본으로 검사합니다. 사용자 원본·기존 MD·store·설정은 수정하지 않습니다. 생성물은 프로젝트 DevCache/TEMP입니다. 실제 설치1.2.5 worker에서 새SDK18.484초, 기존grobid캐시1.156초에 완료돼 지속90%정체는 아직 재현하지 못했습니다. 확정한 SDK stderr tqdm 진행 미수신을 수정했고 신규3개 포함 SDK/process23시험이 통과했습니다. 가짜 진행률을 추가하지 않습니다.
+
+root 폴더 API는 immediate 파일/하위폴더·추출 중 탐색·expected_paths 가드로 4RED→input/API/parallel27PASS(7.325초), 독립 input10PASS입니다. folder_files/폴더 추가/드래그의 재귀 수집은 유지합니다. UI owner `reader_ux_v126`은 체크·자동 옆MD와 폴더 UI를 보완했고 연속 슬라이드·우측 CTA·path guard 연결을 진행 중입니다. debugger `stall_diagnosis`는 documents.py/local_ocr.py의 PPTX 이미지 OCR·현재 버전 marker·native 진행 콜백을 담당합니다. root가 app.py의 marker 캐시 갱신과 통합·빌드·배포를 맡고 `implementation_review`가 독립 검수합니다. 현재 v1.2.6은 미배포입니다. [계획·검증](./2026-10-24-reader-1.2.6.md).
+
 ## 완료 — 2026-10-24, 1.2.5 빠른 PPTX·공통 문서 UX 공개·설치
 
 **[v1.2.5 공개](https://github.com/jminbae/pdf-extractor/releases/tag/v1.2.5)·공개 파일 재다운로드·표준 HKCU 설치·설치본 검증과 정상 앱 실행을 마쳤습니다.** 공개 tag/source commit은 `3eea5231f21e46db5c8e74315cce1c6e961ec38a`, production checkpoint는 `53576a8a533041737c9bf49764709e9048a7278e`입니다. UI `ae821c660e87417a68d0c30d85de6309e4f537f8187f28acdaf5a6b2e4866e92`, frame `8d243f0d4d939d22b9694c22e50faa56ed380b9657cad3f7f9c8009ac6d93952`. Setup243625715B/SHA`f68c965a2f1f3477d36429afa8ff73e99db8ab4454efdaa6f7bb818d805cc3ba`, main`8737bc4a10a3a793fabacdddbd0394db0e65e5def3216c6621a1740d6a7b3758`, worker`255045959bbec6819b4aa34dd633f9d2aea33c013d9fa23b2aaa7f17a6d1d652`입니다. DevCache `build-pins-1.2.5-ux-final.json`, `build-1.2.5-ux-artifacts-verification.json`이 최종 빌드 기준이며 이전 pins/감사·실패 기록은 baseline으로 보존합니다.

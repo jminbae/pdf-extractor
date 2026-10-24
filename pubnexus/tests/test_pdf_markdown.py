@@ -65,6 +65,49 @@ class PDFMarkdownTests(unittest.TestCase):
         self.assertTrue(progress)
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
 
+    def test_actual_sdk_reports_completed_pages_before_conversion_finishes(self):
+        from pubnexus.pdf_markdown import available, convert
+        if not available():
+            self.skipTest("별도 설치한 공식 PyMuPDF 2.0 엔진이 없습니다.")
+        path = self.base / "seven-pages.pdf"
+        with fitz.open() as pdf:
+            for number in range(7):
+                pdf.new_page().insert_text((72, 72), f"Completed page marker {number + 1}.")
+            pdf.save(path)
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        progress = []
+        result = convert(path, self.base / "assets", progress=lambda *event: progress.append(event))
+        self.assertTrue(any(stage == "sdk_layout" and 0 < page < total == 7
+                            for page, total, stage in progress), progress)
+        for number in range(7):
+            self.assertIn(f"Completed page marker {number + 1}.", result["sdk_markdown"])
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
+
+    def test_sdk_progress_observes_fragmented_tqdm_completion_without_counting_a_new_pass(self):
+        from pubnexus.pdf_markdown_child import _SDKProgress
+        path = self.base / "progress.jsonl"
+        path.touch()
+        observer = _SDKProgress(path, 13)
+        for text in ("\r  0%|          | 0/13 [00:00<?, ?it/s]", "\r 15%|#5        | 2/",
+                     "13 [00:01<00:04, 2.0it/s]", "\r100%|##########| 13/13 [00:08<00:00, 1.6it/s]",
+                     "\r  0%|          | 0/13 [00:00<?, ?it/s]",
+                     "\r100%|##########| 13/13 [00:00<00:00, 1300it/s]"):
+            observer.write(text)
+        import json
+        events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([event["page"] for event in events], [0, 2, 13])
+        self.assertTrue(all(event["total"] == 13 and event["stage"] == "sdk_layout" for event in events))
+
+    def test_sdk_fallback_progress_only_counts_previously_completed_pages(self):
+        from pubnexus.pdf_markdown_child import _SDKProgress
+        path = self.base / "progress.jsonl"
+        observer = _SDKProgress(path, 13)
+        for text in ("[ ] (0/13)", "[=] ( 1/13)", "[==] ( 2/13)", "[===] (13/13)"):
+            observer.write(text)
+        import json
+        self.assertEqual([json.loads(line)["page"] for line in path.read_text(encoding="utf-8").splitlines()],
+                         [0, 1, 12])
+
     def test_refinement_raw_basis_and_cross_page_source_locations_survive_canonical(self):
         from pubnexus.pdf_markdown import _canonical
         pages = [{"page": n, "status": "text_extracted", "ocr_performed": False,

@@ -79,6 +79,69 @@ class AppInputTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertFalse(self.app.pdfs)
 
+    def test_browse_lists_immediate_folders_and_documents_without_recursing(self):
+        direct = self.file('documents/direct.PDF')
+        self.file('documents/sub/nested.pdf')
+        self.file('documents/Markdown/generated.md')
+        self.file('documents/program.exe')
+        api = support.app_module.Api(self.app)
+        self.assertTrue(callable(getattr(api, 'browse_folder', None)), 'Folder navigation is missing')
+        result = api.browse_folder(str(direct.parent))
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.app.pdfs, [direct])
+        self.assertEqual(result['parent'], str(self.root))
+        self.assertEqual(result['folders'], [{'name': 'sub', 'path': str(direct.parent / 'sub')}])
+        self.assertEqual(result['files'][0]['path'], str(direct))
+        self.assertEqual(api.state()['folders'], result['folders'])
+
+    def test_browse_during_extraction_keeps_the_job_paths_and_output(self):
+        active = self.file('old/active.csv')
+        new = self.file('new/new.csv')
+        self.app.pdfs = [active]
+        self.app.worker = Mock()
+        self.app.worker.is_alive.return_value = True
+        key = support.app_module._norm(active)
+        self.app._pending_paths = {key}
+        self.app._active_paths = {key}
+        self.app._background_queue = [(active, True)]
+        self.app._worker_pids = {key: 12345}
+        output = self.app.output_dir
+        api = support.app_module.Api(self.app)
+        self.assertTrue(callable(getattr(api, 'browse_folder', None)), 'Folder navigation is missing')
+        self.assertTrue(api.browse_folder(str(new.parent))['ok'])
+        self.assertEqual(self.app.pdfs, [new])
+        self.assertEqual(self.app._pending_paths, {key})
+        self.assertEqual(self.app._active_paths, {key})
+        self.assertEqual(self.app._background_queue, [(active, True)])
+        self.assertEqual(self.app._worker_pids, {key: 12345})
+        self.assertEqual(self.app.output_dir, output)
+        self.assertFalse(self.app.cancel.is_set())
+
+    def test_invalid_browse_does_not_replace_the_current_selection(self):
+        source = self.file('documents/report.csv')
+        self.app.pdfs = [source]
+        api = support.app_module.Api(self.app)
+        self.assertTrue(callable(getattr(api, 'browse_folder', None)), 'Folder navigation is missing')
+        for value in ('', 'relative/path', str(self.root / 'missing'), str(source), None, 13):
+            self.assertFalse(api.browse_folder(value)['ok'])
+            self.assertEqual(self.app.pdfs, [source])
+
+    def test_stale_indexes_after_folder_navigation_cannot_extract_a_different_file(self):
+        before = self.file('old/report.csv')
+        now = self.file('new/report.csv')
+        self.app.pdfs = [now]
+        self.app.start = Mock()
+        api = support.app_module.Api(self.app)
+        self.assertIn('expected_paths', __import__('inspect').signature(api.extract_selected).parameters,
+                      'Extraction needs the selected paths, not only mutable row indexes')
+        result = api.extract_selected([0], True, [str(before)])
+        self.assertFalse(result['ok'])
+        self.app.start.assert_not_called()
+        self.app.start.return_value = [now]
+        result = api.extract_selected([0], True, [str(now)])
+        self.assertTrue(result['ok'])
+        self.app.start.assert_called_once_with([now], force=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,22 +32,32 @@ def _event(path, page, total, stage="sdk_layout"):
 
 class _SDKProgress:
     """Observe the pinned SDK's public show_progress output, without altering it."""
-    def __init__(self, path, total):
+    def __init__(self, path, total, stream=None):
         self.path, self.total, self.buffer, self.last = path, total, "", -1
+        self.stream = stream
 
     def write(self, text):
+        if self.stream is not None:
+            self.stream.write(text)
         self.buffer = (self.buffer + text)[-512:]
+        counts = []
         for match in re.finditer(r"\(\s*(\d+)/(\d+)\)", self.buffer):
             current, total = map(int, match.groups())
-            # SDK prints before processing the current page; only previous pages are done.
-            completed = max(0, current - 1)
-            if total == self.total and completed > self.last:
+            # The SDK fallback prints before processing the current page.
+            counts.append((match.start(), max(0, current - 1), total))
+        for match in re.finditer(r"(?:^|[\r\n])\s*\d+%\|[^\r\n]*?\|\s*(\d+)/(\d+)\s*\[", self.buffer):
+            completed, total = map(int, match.groups())
+            # tqdm's counter advances after the yielded page has been processed.
+            counts.append((match.start(), completed, total))
+        for _, completed, total in sorted(counts):
+            if total == self.total and 0 <= completed <= total and completed > self.last:
                 self.last = completed
                 _event(self.path, completed, total)
         return len(text)
 
     def flush(self):
-        pass
+        if self.stream is not None:
+            self.stream.flush()
 
 
 def _background_evidence(page, pymupdf):
@@ -348,12 +358,13 @@ def _convert(request):
                 if info["status"] == "ocr_required":
                     info["status"] = "ocr_extracted" if page.get_text().strip() else "ocr_empty"
             options.update(ocr_function=tracked_ocr, ocr_language=language, ocr_dpi=150)
-        original_stdout = sys.stdout
+        original_stdout, original_stderr = sys.stdout, sys.stderr
         sys.stdout = _SDKProgress(progress, len(pdf))
+        sys.stderr = _SDKProgress(progress, len(pdf), original_stderr)
         try:
             chunks = pdf.to_markdown(**options)
         finally:
-            sys.stdout = original_stdout
+            sys.stdout, sys.stderr = original_stdout, original_stderr
         ocr_recovery = []
         if models:
             for index, info in enumerate(pages):
