@@ -104,6 +104,10 @@ return Promise.resolve({ok:true,n:1});}})};</script>""".replace("STATE", json.du
                     data, mime = Path(__file__).with_name("ui_presentation_host.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
                 elif url.path == "/presentation-fallback-regression":
                     data, mime = Path(__file__).with_name("ui_presentation_fallback.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
+                elif url.path == "/presentation-layout-regression":
+                    data, mime = Path(__file__).with_name("ui_presentation_layout.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
+                elif url.path == "/presentation-suspend-regression":
+                    data, mime = Path(__file__).with_name("ui_presentation_suspend.js").read_text(encoding="utf-8"), "text/javascript; charset=utf-8"
                 elif url.path == "/presentation-test-host":
                     data, mime = '<!doctype html><html><body style="margin:0"><div id="host" style="width:1000px;height:700px"></div></body></html>', "text/html; charset=utf-8"
                 elif url.path == "/presentation-data" and presentation_bytes is not None:

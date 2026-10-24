@@ -41,6 +41,9 @@ async function uiPresentationRegression(page, baseURL) {
     const highlighted=await frame.locator('[data-pptx-search-highlight]').count();
     if(!highlighted||!(await frame.locator('body').innerText()).includes('FAST_FRAME_THIRD_7391'))throw new Error('UI_PRESENTATION_HIGHLIGHT_RED');
     const beforeResize=await p.evaluate(()=>window.__packets.filter(m=>m.type==='rendered').length);
+    await p.locator('#host').evaluate(n=>n.style.width='0px');await p.waitForTimeout(80);await p.locator('#host').evaluate(n=>n.style.width='1000px');await p.waitForTimeout(100);
+    const afterHide=await p.evaluate(()=>window.__packets.filter(m=>m.type==='rendered').length);
+    if(afterHide!==beforeResize)throw new Error('UI_PRESENTATION_HIDDEN_RESIZE_RERENDERS_RED '+JSON.stringify({beforeResize,afterHide}));
     await p.locator('#host').evaluate(n=>n.style.height='620px');await p.waitForTimeout(100);
     const heightOnly=await p.evaluate(()=>window.__packets.filter(m=>m.type==='rendered').length);
     if(heightOnly!==beforeResize)throw new Error('UI_PRESENTATION_HEIGHT_RESIZE_RERENDERS_RED '+JSON.stringify({beforeResize,heightOnly}));
