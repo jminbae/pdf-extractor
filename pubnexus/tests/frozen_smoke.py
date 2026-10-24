@@ -40,6 +40,9 @@ const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,label){while(Date.now()<deadline){const value=await fn();if(value)return value;await pause(100);}throw Error('Timed out: '+label);}
 let ws;
 let command;
+let activePresentationTarget=null;
+const ownedPresentationTargets=new Set();
+let resetPresentationTarget;
 let focusEmulation={requested:!!cfg.focus_emulation_test,production:false};
 let background=null;
 let completedResult=null;
@@ -53,16 +56,52 @@ try {
   ws.addEventListener('message',event=>{const message=JSON.parse(String(event.data));const item=pending.get(message.id);if(item){pending.delete(message.id);clearTimeout(item.timer);message.error?item.reject(Error(JSON.stringify(message.error))):item.resolve(message.result);}});
   command=(method,params={},timeoutMs=15000,sessionId=null)=>new Promise((resolve,reject)=>{const id=++next;const timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP command timeout: '+method));},timeoutMs);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));});
   async function evaluate(expression){const result=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result?.value;}
-  async function trustedKey(key,ctrl=false){
+  async function trustedKey(key,ctrl=false,{closePresentation=false}={}){
+    const owned=activePresentationTarget;
+    let controlDownAttempted=false;
+    if(owned){owned.allow_destroyed=closePresentation;owned.proof.close_scope=closePresentation;}
+    const send=(params)=>command('Input.dispatchKeyEvent',params,15000,owned?.sessionId||null);
     const code=key==='Escape'?'Escape':'KeyF',keyCode=key==='Escape'?27:70;
-    if(ctrl)await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,modifiers:2});
-    try{await command('Input.dispatchKeyEvent',{type:'keyDown',key,code,windowsVirtualKeyCode:keyCode,modifiers:ctrl?2:0});await command('Input.dispatchKeyEvent',{type:'keyUp',key,code,windowsVirtualKeyCode:keyCode,modifiers:ctrl?2:0});}
-    finally{if(ctrl)await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,modifiers:0});}
+    try{
+      if(owned)await validatePresentationTarget(owned);
+      if(ctrl){controlDownAttempted=true;await send({type:'keyDown',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,modifiers:2});}
+      if(owned)await validatePresentationTarget(owned);
+      await send({type:'keyDown',key,code,windowsVirtualKeyCode:keyCode,modifiers:ctrl?2:0});
+      if(owned)owned.proof.key_down_ack=true;
+      try{await send({type:'keyUp',key,code,windowsVirtualKeyCode:keyCode,modifiers:ctrl?2:0});}
+      catch(error){if(!owned||!closePresentation||!await presentationTargetDestroyed(owned))throw error;owned.proof.key_up='owned-target-destroyed';}
+      if(owned){
+        const event=await until(()=>owned.proof.events.find(event=>event.key.toLowerCase()===key.toLowerCase()&&event.ctrl===ctrl),'trusted key delivered to owned iframe session');
+        if(!event.trusted||!event.prevented||event.href!==owned.expected)throw Error('Owned iframe did not receive trusted prevented key: '+JSON.stringify(owned.proof));
+        owned.proof.observed=event;
+      }
+    }finally{
+      try{if(controlDownAttempted){if(owned)await validatePresentationTarget(owned);await send({type:'keyUp',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,modifiers:0});}}
+      finally{if(owned)await resetPresentationTarget(owned);}
+    }
   }
   async function focusPresentation(){
     const point=await evaluate("(()=>{const box=document.querySelector('#presentation-frame').getBoundingClientRect();return{x:box.left+8,y:box.top+8};})()");
     await command('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});await command('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});
     if(!await evaluate("document.activeElement?.id==='presentation-frame'"))throw Error('Trusted input did not focus the owned presentation iframe');
+    const owned=await attachPresentationTarget();
+    activePresentationTarget=owned;
+    owned.proof.before=await presentationTargetEvaluate(owned,"({has_focus:document.hasFocus(),visibility:document.visibilityState,active:document.activeElement?.tagName})");
+    if(focusEmulation.requested){
+      owned.focus_attempted=true;
+      owned.proof.protocol_result=await command('Emulation.setFocusEmulationEnabled',{enabled:true},15000,owned.sessionId);
+      owned.proof.enabled=true;
+    }
+    await validatePresentationTarget(owned);
+    owned.proof.window_focus=await presentationTargetEvaluate(owned,"(()=>{window.focus();return{has_focus:document.hasFocus(),visibility:document.visibilityState,active:document.activeElement?.tagName};})()");
+    const focusDeadline=Math.min(deadline,Date.now()+10000);
+    do{
+      const focused=await presentationTargetEvaluate(owned,"(async()=>{await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));return{has_focus:document.hasFocus(),visibility:document.visibilityState,active:document.activeElement?.tagName};})()");
+      (frameContextProbe.focus_samples??=[]).push(focused);owned.proof.after=focused;
+      if(focused.has_focus===true&&focused.visibility==='visible')return;
+      await pause(100);
+    }while(Date.now()<focusDeadline);
+    throw Error('Owned child document did not acquire focus within 10000ms: '+JSON.stringify(owned.proof));
   }
   async function focusState(stage){
     const state=await evaluate('({has_focus:document.hasFocus(),visibility:document.visibilityState,hidden:document.hidden})');
@@ -78,8 +117,77 @@ try {
   const executionContexts=new Map();
   ws.addEventListener('message',event=>{const message=JSON.parse(String(event.data));if(message.method==='Runtime.executionContextCreated')executionContexts.set(message.params.context.id,message.params.context);else if(message.method==='Runtime.executionContextDestroyed')executionContexts.delete(message.params.executionContextId);else if(message.method==='Runtime.executionContextsCleared')executionContexts.clear();});
   const frameContextProbe={};
+  async function presentationTargetEvaluate(owned,expression){
+    const checked='(()=>{if(location.href!=='+JSON.stringify(owned.expected)+')throw Error("Refusing a stale or foreign iframe");return ('+expression+');})()';
+    const result=await command('Runtime.evaluate',{expression:checked,awaitPromise:true,returnByValue:true},15000,owned.sessionId);
+    if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));
+    return result.result?.value;
+  }
+  async function validatePresentationTarget(owned){
+    const src=await evaluate("document.querySelector('#presentation-frame')?.src");
+    if(src!==owned.expected)throw Error('Owned presentation iframe was replaced before input');
+    const info=(await command('Target.getTargetInfo',{targetId:owned.targetId})).targetInfo;
+    if(info.type!=='iframe'||info.url!==owned.expected)throw Error('Opaque iframe target identity changed');
+    const identity=await presentationTargetEvaluate(owned,"(()=>{let opaque=false;try{void parent.document.body;}catch{opaque=true;}return{href:location.href,opaque,native_bridge:!!window.pywebview?.api};})()");
+    if(identity.href!==owned.expected||!identity.opaque||identity.native_bridge)throw Error('Opaque iframe ownership/isolation check failed');
+    owned.proof.identity=identity;
+  }
+  async function presentationTargetDestroyed(owned){
+    if(!owned.allow_destroyed)return false;
+    try{
+      const targets=await command('Target.getTargets'),absent=!targets.targetInfos.some(t=>t.targetId===owned.targetId);
+      const frameRemoved=await evaluate("!document.querySelector('#presentation-frame')");
+      owned.proof.destruction={target_absent:absent,owner_iframe_removed:frameRemoved};
+      return absent&&frameRemoved;
+    }catch(error){owned.proof.destruction_probe_error=String(error);return false;}
+  }
+  async function attachPresentationTarget(){
+    if(activePresentationTarget)throw Error('Previous owned iframe input session was not reset');
+    const owner=await evaluate("(()=>{const f=document.querySelector('#presentation-frame');return f?{src:f.src,sandbox:f.getAttribute('sandbox')}:null;})()");
+    const url=owner&&new URL(owner.src),parentUrl=new URL(target.url);
+    if(!url||url.origin!==parentUrl.origin||url.pathname!=='/presentation-frame'||!/^#[a-z0-9-]{16,128}$/i.test(url.hash)||owner.sandbox!=='allow-scripts')throw Error('Unexpected owned iframe URL or sandbox');
+    const targets=await command('Target.getTargets'),candidates=targets.targetInfos.filter(t=>t.type==='iframe'&&t.url===owner.src);
+    if(candidates.length!==1)throw Error('Expected exactly one full-URL nonce-matched opaque iframe target');
+    const targetId=candidates[0].targetId,sessionId=(await command('Target.attachToTarget',{targetId,flatten:true})).sessionId;
+    const proof={target_id:targetId,session_id:sessionId,expected_url:owner.src,production:false,transport:'owned-opaque-iframe-target',events:[]};
+    const owned={targetId,sessionId,expected:owner.src,proof,allow_destroyed:false,focus_attempted:false,binding:'__pnx_owned_key_'+(focusEmulation.frames?.length||0)};
+    ownedPresentationTargets.add(owned);(focusEmulation.frames??=[]).push(proof);
+    try{
+      await command('Runtime.enable',{},15000,sessionId);
+      await validatePresentationTarget(owned);
+      owned.binding_attempted=true;
+      await command('Runtime.addBinding',{name:owned.binding},15000,sessionId);
+      owned.listener=event=>{const message=JSON.parse(String(event.data));if(message.sessionId!==sessionId||message.method!=='Runtime.bindingCalled'||message.params.name!==owned.binding)return;const value=JSON.parse(message.params.payload);if(value.href===owned.expected)proof.events.push(value);};
+      ws.addEventListener('message',owned.listener);
+      await presentationTargetEvaluate(owned,'(()=>{window.__pnxOwnedKeyObserver=event=>{if(event.key==="Escape"||event.key.toLowerCase()==="f")window['+JSON.stringify(owned.binding)+'](JSON.stringify({key:event.key,ctrl:event.ctrlKey,trusted:event.isTrusted,prevented:event.defaultPrevented,href:location.href,has_focus:document.hasFocus()}));};window.addEventListener("keydown",window.__pnxOwnedKeyObserver,true);return true;})()');
+      return owned;
+    }catch(error){await resetPresentationTarget(owned);throw error;}
+  }
+  resetPresentationTarget=async owned=>{
+    if(owned.cleaned)return;
+    const errors=[];let destroyed=false;
+    try{
+      if(owned.focus_attempted){
+        try{owned.proof.reset_protocol_result=await command('Emulation.setFocusEmulationEnabled',{enabled:false},15000,owned.sessionId);owned.proof.reset=true;owned.proof.reset_method='protocol-disabled';}
+        catch(error){destroyed=await presentationTargetDestroyed(owned);if(destroyed){owned.proof.reset=true;owned.proof.reset_method='owned-target-destroyed';}else errors.push('focus reset: '+String(error));}
+      }else{owned.proof.reset=true;owned.proof.reset_method='focus-not-enabled';}
+      if(!destroyed){
+        try{await presentationTargetEvaluate(owned,'(()=>{window.removeEventListener("keydown",window.__pnxOwnedKeyObserver,true);delete window.__pnxOwnedKeyObserver;return true;})()');}
+        catch(error){if(!await presentationTargetDestroyed(owned))errors.push('observer cleanup: '+String(error));}
+        if(owned.binding_attempted)try{await command('Runtime.removeBinding',{name:owned.binding},15000,owned.sessionId);}
+        catch(error){if(!await presentationTargetDestroyed(owned))errors.push('binding cleanup: '+String(error));}
+      }
+    }finally{
+      try{await command('Target.detachFromTarget',{sessionId:owned.sessionId});owned.proof.detached=true;}
+      catch(error){if(await presentationTargetDestroyed(owned))owned.proof.detached_by_target_destruction=true;else errors.push('detach: '+String(error));}
+      if(owned.listener)ws.removeEventListener('message',owned.listener);
+      owned.cleaned=true;ownedPresentationTargets.delete(owned);if(activePresentationTarget===owned)activePresentationTarget=null;
+      owned.proof.cleanup_errors=errors;if(errors.length){owned.proof.reset=false;throw Error('Owned iframe cleanup failed: '+errors.join('; '));}
+    }
+  };
   async function frameEvaluate(expression){
     const expected=await evaluate("document.querySelector('#presentation-frame')?.src");if(!expected)throw Error('No owned presentation iframe');
+    if(activePresentationTarget?.expected===expected)return {...await presentationTargetEvaluate(activePresentationTarget,expression),context_transport:'owned-opaque-iframe-target'};
     const tree=await command('Page.getFrameTree');frameContextProbe.tree=tree;
     const visit=node=>node.frame.url.split('#')[0]===expected.split('#')[0]?node.frame:(node.childFrames||[]).map(visit).find(Boolean);const frame=visit(tree.frameTree);
     const context=frame&&[...executionContexts.values()].find(c=>c.auxData?.isDefault&&c.auxData?.frameId===frame.id);
@@ -157,7 +265,8 @@ try {
     let sourceSearch=null,keyboard=null;
     if(fastPresentation){
       const query=cfg.pdfMarker+' slide '+slideCount;
-      await frameEvaluate("(()=>{window.__officeKeys=[];document.addEventListener('keydown',event=>{if(event.key==='Escape'||event.key.toLowerCase()==='f')window.__officeKeys.push({key:event.key,ctrl:event.ctrlKey,trusted:event.isTrusted,prevented:event.defaultPrevented});});return{armed:true};})()");
+      await evaluate("(()=>{window.__officeParentKeys=[];window.addEventListener('keydown',event=>{if(event.key==='Escape'||event.key.toLowerCase()==='f')window.__officeParentKeys.push({key:event.key,ctrl:event.ctrlKey,trusted:event.isTrusted,prevented:event.defaultPrevented});},true);return true;})()");
+      await frameEvaluate("(()=>{window.__officeKeys=[];window.addEventListener('keydown',event=>{if(event.key==='Escape'||event.key.toLowerCase()==='f')window.__officeKeys.push({key:event.key,ctrl:event.ctrlKey,trusted:event.isTrusted,prevented:event.defaultPrevented,has_focus:document.hasFocus(),active:document.activeElement?.tagName,nonce:location.hash});},true);return{armed:true};})()");
       await evaluate(`document.querySelector('#search').value=${JSON.stringify(query)};true`);await focusPresentation();await trustedKey('f',true);
       await until(()=>evaluate("document.activeElement?.id==='search'"),'opaque iframe Ctrl+F focuses app search');
       const find=await evaluate("({focused:document.activeElement.id==='search',query:document.querySelector('#search').value,start:document.querySelector('#search').selectionStart,end:document.querySelector('#search').selectionEnd})");
@@ -169,6 +278,7 @@ try {
       await until(async()=>!(await frameEvaluate("({highlights:document.querySelectorAll('[data-pptx-search-highlight]').length})")).highlights,'native iframe Escape clears official search highlights');
       keyboard.search_escape=await evaluate("({reader_visible:!document.querySelector('#reader').hidden,results_hidden:document.querySelector('#search-results').hidden,query:document.querySelector('#search').value,note:document.querySelector('#location-note').textContent})");
       Object.assign(keyboard.search_escape,await frameEvaluate("({highlights:document.querySelectorAll('[data-pptx-search-highlight]').length,event:window.__officeKeys.find(event=>event.key==='Escape')})"));
+      keyboard.search_escape.parent_events=await evaluate('window.__officeParentKeys');keyboard.search_escape.focus_samples=frameContextProbe.focus_samples;
       if(!keyboard.search_escape.reader_visible||!keyboard.search_escape.results_hidden||keyboard.search_escape.query!==query||keyboard.search_escape.note||keyboard.search_escape.highlights||!keyboard.search_escape.event?.trusted||!keyboard.search_escape.event?.prevented)throw Error('Native iframe Escape did not dismiss only search: '+JSON.stringify(keyboard));
       officeCheckpoint('keyboard-search-escape-verified',{keyboard});
     }
@@ -182,7 +292,7 @@ try {
     if(fastPresentation){
       await until(()=>evaluate("!document.querySelector('#stop').disabled&&window.__officeWorkers.some(worker=>worker.path.endsWith('01-slides.pptx'))"),'actual current-document worker starts before Escape');
       const before=await evaluate("({stop_enabled:!document.querySelector('#stop').disabled,reader_visible:!document.querySelector('#reader').hidden})");
-      await focusPresentation();await trustedKey('Escape');await until(()=>evaluate("!document.querySelector('#list-view').hidden"),'second native iframe Escape returns to the file list');
+      await focusPresentation();await trustedKey('Escape',false,{closePresentation:true});await until(()=>evaluate("!document.querySelector('#list-view').hidden"),'second native iframe Escape returns to the file list');
       keyboard.close_while_running={before,...await evaluate("({list_visible:!document.querySelector('#list-view').hidden,reader_hidden:document.querySelector('#reader').hidden,frame_removed:!document.querySelector('#presentation-frame'),stop_enabled:!document.querySelector('#stop').disabled})")};
       if(!before.stop_enabled||!before.reader_visible||!keyboard.close_while_running.list_visible||!keyboard.close_while_running.reader_hidden||!keyboard.close_while_running.frame_removed||!keyboard.close_while_running.stop_enabled)throw Error('Native iframe Escape stopped extraction or failed to return to the list: '+JSON.stringify(keyboard));
       officeCheckpoint('keyboard-close-while-running-verified',{keyboard});
@@ -389,11 +499,15 @@ try {
   throw error;
 } finally {
   try{
+    const frameCleanupErrors=[];
+    for(const owned of [...ownedPresentationTargets])try{await resetPresentationTarget(owned);}catch(error){frameCleanupErrors.push(String(error));}
+    focusEmulation.frames_reset=(focusEmulation.frames||[]).every(frame=>frame.reset===true&&!frame.cleanup_errors?.length);
+    if(frameCleanupErrors.length)focusEmulation.frame_cleanup_errors=frameCleanupErrors;
     if(focusEmulation.enabled){
       try{focusEmulation.reset_protocol_result=await command('Emulation.setFocusEmulationEnabled',{enabled:false});focusEmulation.reset=true;}
       catch(error){focusEmulation.reset=false;focusEmulation.reset_error=String(error);}
       const saved=fs.existsSync(cfg.result)?JSON.parse(fs.readFileSync(cfg.result,'utf8')):{ok:false};
-      fs.writeFileSync(cfg.result,JSON.stringify({...saved,ok:saved.ok===true&&focusEmulation.reset,focus_emulation:focusEmulation},null,2),'utf8');
+      fs.writeFileSync(cfg.result,JSON.stringify({...saved,ok:saved.ok===true&&focusEmulation.reset&&focusEmulation.frames_reset,focus_emulation:focusEmulation},null,2),'utf8');
       if(!focusEmulation.reset)throw Error('Focus emulation cleanup failed: '+focusEmulation.reset_error);
     }
   } finally {if(ws)ws.close();}

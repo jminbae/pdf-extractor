@@ -2,6 +2,12 @@
 
 ## 진행 중 — 2026-10-24, 1.2.7 빠른 뷰어·3패널 탐색기
 
+최종 생산 후보는 checkpoint `74d27f6e2c57f2c64083392c8d4702bb6ea5cea9`입니다. Python413개/101.045초·UI33개 PASS, 독립 검수 승인 후 빌드했습니다. Setup `6585b78545e60d23342f2a0a16d22aa7b16186644ed0c4354d8ca868d4b1657e`(243768766B), main `b5310c5731a413ada62776435272824b81a4e993588fb412f46fe53bf51f9de5`, worker `d89e1a2acf4965320776472aea78ddf0e49ffb5df1ee889cb4644c2dfa45df98`입니다. `build-pins-1.2.7-final.json` SHA `81f0c486c58d270a451beaae931c7f402e5c910d7628caeb6adfc8534889af77`에2415파일/전체명세를 고정했고 input108개 SHA `3cb30cffef09a446c97f96a6567280c35d57d519e8a34e260bdcc53f779f09d7`와 불변 대조했습니다.
+
+실제 EXE의13쪽PDF(본문73047자/표3/13쪽)·scan OCR·native6형식(DOCX/XLSX/TXT/MD/RTF/HWPX)의 원본 보기·검색·trusted확대·상단MD1click·자료보존/Job/TEMP 검증과 독립 감사는 PASS입니다. native 최종 `frozen-native-viewer/20261024-173807-0c13ac46/receipt.json`은 실제trusted선택→DOM/PNGdecode1031/967/917/931/962/1967ms(숨김focus조건/OSpaint아님)입니다. 앞선2943ms는 CDP입력3왕복까지포함한 잘못된 시계 경계로 false원형을 보존했습니다. PDF/scan의 강제reload 때 pywebview의 오래된list_folders callback 예외 각1건은 기능통과와 별도 알려진로그 한계입니다.
+
+**남은 배포 게이트는71장PPTX의 숨김WebView2 키보드 검증입니다.** r1/r2는 원본 문서 기능이 수행됐지만 Esc가 iframe대신 parent에 전달됐고, r3는 정확한iframe히트테스트에도 child.hasFocus 대기에서timeout했습니다. false영수증/원본무변경/TEMP회수를 보존했습니다. 소유가 검증된 OOPIF의 CDP focus/input/reset 경계를 하네스에서 고치며 생산소스는 변경하지 않습니다. 새 검증기는 native6+기존PDF/scan/71게이트를 유지합니다. 아직1.2.7 tag/공개/설치를 하지 않았고1.2.6은 불변입니다.
+
 최신 기준은 **빠른 원본 뷰어가 주 기능, Markdown 추출은 부수 기능**입니다. 폴더 트리 / 문서 리스트·썸네일 / 원본 미리보기를 정돈하고, 저장 완료·대기 등 기본 목록 상태를 없앴습니다. `MD 추출`·`MD 보기`는 상단 직접 버튼이며 삼점 메뉴는 드문 파일정보 동작만 맡습니다. TXT·MD는 추가 추출하지 않습니다. 사용자 데모52545/62724는 별도 private TEMP 사본을 사용하며 유지합니다. 최신 실제 통합 데모59251는 worker의 HWP 대조 후 공개합니다.
 
 안전 checkpoint는 `5469476`(native 창/선택 원본), `4dc9d51`(오래된 요청 취소/PDF 재열기 최적화), `f7a5525`(기존 MD 직접 보기/HWP 원본 쪽 표시)입니다. 최신 UI의 PDF cache lease·표시 방식 이력 복원, 원본 그림 위치 연결, 파일정보의 숨은 원본 표시범위를 최종 검수하고 있습니다. 새 생성물은 DevCache 또는 소유 TEMP에만 둡니다.
