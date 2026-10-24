@@ -7,6 +7,7 @@ async function uiMinimalRegression(page, baseURL) {
     await p.locator('.file-row[data-index="1"] [data-action=read]').click();
     await p.waitForSelector('#document h1');
     await p.locator('#compare-tab').click();
+    await p.waitForSelector('#source-scroll .pdf-page');
     await p.evaluate(() => {
       document.querySelector('#linked-scroll').checked=false;
       document.querySelector('#result-scroll').scrollTop=700;
@@ -65,17 +66,19 @@ async function uiMinimalRegression(page, baseURL) {
       sameHeading:window.__minimalHeading===document.querySelector('#document h1')}));
     if(reset.percent.trim()!=='100%'||reset.zoom!==1||!reset.sameHeading)
       throw new Error('UI_MINIMAL_RESET_RED '+JSON.stringify(reset));
-    // A normal wheel still scrolls the MD, and Ctrl-wheel on the original is not intercepted.
+    // A normal wheel scrolls; Ctrl-wheel on the original scales only its own pane.
     await p.mouse.move(x,y);const oldScroll=await p.locator('#result-scroll').evaluate(n=>n.scrollTop);
     await p.mouse.wheel(0,250);await p.waitForTimeout(150);
     const ordinary=await p.locator('#result-scroll').evaluate(n=>n.scrollTop);
     const original=await p.evaluate(() => {
       const e=new WheelEvent('wheel',{ctrlKey:true,deltaY:-100,bubbles:true,cancelable:true});
       document.querySelector('#source-scroll').dispatchEvent(e);
-      return {prevented:e.defaultPrevented,percent:document.querySelector('#md-zoom-reset').textContent};
+      return {prevented:e.defaultPrevented,percent:document.querySelector('#md-zoom-reset').textContent,
+        sourcePercent:document.querySelector('#source-zoom-reset').textContent};
     });
-    if(!(ordinary>oldScroll)||original.prevented||original.percent.trim()!=='100%')
+    if(!(ordinary>oldScroll)||!original.prevented||original.percent.trim()!=='100%'||original.sourcePercent.trim()!=='110%')
       throw new Error('UI_MINIMAL_WHEEL_SCOPE_RED '+JSON.stringify({oldScroll,ordinary,original}));
+    await p.locator('#source-zoom-reset').click();
     await p.locator('#document [data-block-id="b-old"]').click();
     await p.waitForSelector('.pdf-highlight');
     const mapping=await p.locator('.pdf-highlight').first().evaluate(n=>({top:n.style.top,left:n.style.left}));
@@ -110,6 +113,7 @@ async function uiMinimalRegression(page, baseURL) {
     await p.locator('#theme-toggle').click();
     await p.waitForFunction(() => document.querySelector('#theme-toggle').getAttribute('aria-pressed')==='true');
     await p.locator('#document [data-block-id="b-old"]').click();
+    await p.waitForSelector('.pdf-highlight');
     const dark=await p.evaluate(() => ({background:getComputedStyle(document.body).backgroundColor,
       scheme:getComputedStyle(document.documentElement).colorScheme,
       sameHeading:window.__themeHeading===document.querySelector('#document h1'),

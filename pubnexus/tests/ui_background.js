@@ -33,7 +33,7 @@ async function uiBackgroundRegression(page, baseURL) {
     await p.waitForSelector('#document h1');
     const after = await p.evaluate(() => ({query:document.querySelector('#search').value,scroll:document.querySelector('#result-scroll').scrollTop}));
 
-    await p.locator('[data-action=list]').click();
+    await p.locator('#reader-back').click();
     await p.evaluate(() => {
       window.pnx.on({kind:'run',on:true});
       window.pnx.on({kind:'prog',path:window.__fixture.files[0].path,name:'A.pdf',file_pct:4,pct:4});
@@ -48,7 +48,7 @@ async function uiBackgroundRegression(page, baseURL) {
       page:document.querySelector('#page-input').value,sourceScroll:document.querySelector('#source-scroll').scrollTop,
       calls:window.__calls.filter(c=>c.name.startsWith('search'))}));
 
-    await p.locator('[data-action=list]').click();
+    await p.locator('#reader-back').click();
     await p.evaluate(() => window.pnx.on({kind:'run',on:false,done:1,files:window.__fixture.files}));
     await p.locator('.file-row[data-index="1"] [data-action=read]').click();
     await p.waitForSelector('#document h1');

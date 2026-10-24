@@ -20,7 +20,9 @@ async function uiQueueRegression(page, baseURL) {
       label:document.querySelector('#extract').textContent,query:document.querySelector('#search').value,
       scroll:document.querySelector('#result-scroll').scrollTop}));
     if(before.disabled||!before.label.includes('대기열에 추가'))throw new Error('UI_QUEUE_RED '+JSON.stringify(before));
-    await p.locator('#extract').click();
+    // List action is intentionally hidden in a reader. This seam tests queue event reconciliation;
+    // the visible current-document extraction action is covered by ui_viewer.js.
+    await p.evaluate(() => document.querySelector('#extract').click());
     await p.waitForFunction(() => window.__calls.some(c=>c.name==='extract_selected'));
     const sent = await p.evaluate(() => window.__calls.find(c=>c.name==='extract_selected').args);
     await p.evaluate(() => {
@@ -42,7 +44,7 @@ async function uiQueueRegression(page, baseURL) {
     const afterAdd = await p.evaluate(() => ({calls:window.__calls.filter(c=>c.name==='extract_selected').length,
       disabled:document.querySelector('#extract').disabled,label:document.querySelector('#extract').textContent}));
     await p.evaluate(() => window.__rejectNext=true);
-    await p.locator('#extract').click();
+    await p.evaluate(() => document.querySelector('#extract').click());
     await p.waitForFunction(() => window.__calls.filter(c=>c.name==='extract_selected').length===2&&!document.querySelector('#extract').disabled);
     const rejectedCleared = await p.locator('#extract').isEnabled();
     await p.evaluate(() => window.pnx.on({kind:'file_error',path:window.__fixture.files[2].path,error:'Fixture failure'}));

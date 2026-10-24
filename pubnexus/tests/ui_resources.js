@@ -43,7 +43,7 @@ async function uiResourcesRegression(page, baseURL) {
       readerReset:desktop.query!=='needle'||desktop.scroll!==700,
       overflow:desktop.width>desktop.viewport||mobile.width>mobile.viewport,
       pageErrors:errors.length!==0};
-    if(Object.values(violations).some(Boolean))throw new Error('UI_RESOURCES_RED '+JSON.stringify({violations,desktop,mobile}));
+    if(Object.values(violations).some(Boolean))throw new Error('UI_RESOURCES_RED '+JSON.stringify({violations,desktop,mobile,errors}));
     return {ok:true,frontendFixtureOnly:true,desktop,mobile,unknown};
   } finally {await context.close();}
 }
